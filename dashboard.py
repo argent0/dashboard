@@ -11,6 +11,12 @@ YAML subset tasks.yaml actually uses (flat mappings, flow lists, folded
 block scalars, and scalar block lists with folded continuation lines)
 rather than pulling in PyYAML.
 
+Statuses: pending, in_progress (first pass), in_revision (sent back by a
+coordinator review for corrections), built, tested, blocked. Optional
+per-task `reviews:` list records each coordinator assessment as
+"r<N> <sent-back|accepted|escalated> <date> <notes>"; more than REVIEW_CAP
+sent-back rounds without acceptance is flagged for human escalation.
+
 If PyYAML becomes a normal dependency, swap `load_yaml_subset` for
 `yaml.safe_load` and delete the parser — everything below that point works
 on plain dicts/lists and doesn't care how they were produced.
@@ -201,6 +207,7 @@ STATUS_STYLE = {
     "tested": ("✓", C.GREEN, "tested"),
     "built": ("◆", C.CYAN, "built"),
     "in_progress": ("◐", C.YELLOW, "in_progress"),
+    "in_revision": ("↻", C.MAGENTA, "in_revision"),
     "blocked": ("✗", C.RED, "blocked"),
     "pending": ("○", C.GRAY, "pending"),
 }
@@ -234,6 +241,13 @@ def truncate(s: str, width: int) -> str:
 # Rendering
 # --------------------------------------------------------------------------
 
+# A `reviews:` entry is the coordinator's assessment of one pass over a task:
+# "r<N> <sent-back|accepted|escalated> <date> <free text>". Sent-back rounds
+# are capped; past the cap the task should go to a human, not another round.
+REVIEW_RE = re.compile(r"^r(\d+)\s+(sent-back|accepted|escalated)\b")
+REVIEW_CAP = 2
+
+
 def render(data: dict, color: bool, width: int) -> str:
     phases = data.get("phases") or []
     tasks = data.get("tasks") or []
@@ -247,6 +261,23 @@ def render(data: dict, color: bool, width: int) -> str:
         if t.get("status") != "pending":
             return False
         return all(by_id.get(d, {}).get("status") == "tested" for d in (t.get("depends_on") or []))
+
+    def reviews(t: dict) -> list:
+        r = t.get("reviews") or []
+        return r if isinstance(r, list) else [str(r)]
+
+    def sent_back_rounds(t: dict) -> int:
+        return sum(1 for r in reviews(t) if (m := REVIEW_RE.match(r)) and m.group(2) == "sent-back")
+
+    def last_verdict(t: dict):
+        for r in reversed(reviews(t)):
+            m = REVIEW_RE.match(r)
+            if m:
+                return m.group(2)
+        return None
+
+    def cap_hit(t: dict) -> bool:
+        return sent_back_rounds(t) >= REVIEW_CAP and last_verdict(t) == "sent-back"
 
     def unmet_deps(t: dict):
         return [d for d in (t.get("depends_on") or []) if by_id.get(d, {}).get("status") != "tested"]
@@ -272,7 +303,7 @@ def render(data: dict, color: bool, width: int) -> str:
     bar_w = min(40, width - 30)
     summary_bits = "  ".join(
         style(f"{STATUS_STYLE[s][0]} {counts.get(s, 0)} {STATUS_STYLE[s][2]}", STATUS_STYLE[s][1], enabled=color)
-        for s in ("tested", "built", "in_progress", "blocked", "pending")
+        for s in ("tested", "built", "in_progress", "in_revision", "blocked", "pending")
     )
     line(style("Overall", C.BOLD, enabled=color) + f"  {bar(frac, bar_w, color)}  {tested}/{total} tested ({pct}%)")
     line(summary_bits)
@@ -299,7 +330,10 @@ def render(data: dict, color: bool, width: int) -> str:
             mark = " ⚑" if t.get("milestone") else "  "
             tid = t["id"].ljust(24)
             tstatus = t.get("status", "pending").ljust(11)
-            row = f"  {icon} " + style(tstatus, col, enabled=color) + " " + style(tid, C.DIM, enabled=color) + mark + " " + truncate(t.get("title", ""), max(width - 46, 10))
+            n_rev = len(reviews(t))
+            badge = (style(f"r{n_rev}", C.RED if cap_hit(t) else C.MAGENTA, enabled=color) + " ") if n_rev else ""
+            badge_w = len(f"r{n_rev} ") if n_rev else 0
+            row = f"  {icon} " + style(tstatus, col, enabled=color) + " " + style(tid, C.DIM, enabled=color) + mark + " " + badge + truncate(t.get("title", ""), max(width - 46 - badge_w, 10))
             line(row)
         line()
 
@@ -320,6 +354,18 @@ def render(data: dict, color: bool, width: int) -> str:
             line("  " + style(t["id"], C.CYAN, enabled=color) + "  " + truncate(t.get("title", ""), width - len(t["id"]) - 6))
     else:
         line(style("  (none — everything actionable is in progress, or nothing is unblocked)", C.DIM, enabled=color))
+    line()
+
+    # ---- in revision (sent back by the coordinator's review) ----
+    revising = [t for t in tasks if t.get("status") == "in_revision"]
+    line(style(f"↻ In revision ({len(revising)})", C.BOLD, C.MAGENTA, enabled=color))
+    if revising:
+        for t in revising:
+            last = reviews(t)[-1] if reviews(t) else "no review recorded"
+            warn = style(f"  ⚠ cap hit ({REVIEW_CAP} rounds) — escalate", C.RED, enabled=color) if cap_hit(t) else ""
+            line("  " + style(t["id"], C.MAGENTA, enabled=color) + warn + style(f"  — {truncate(last, max(width - len(t['id']) - 8, 20))}", C.DIM, enabled=color))
+    else:
+        line(style("  (none)", C.DIM, enabled=color))
     line()
 
     # ---- blocked ----
