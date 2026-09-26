@@ -11,3 +11,4 @@ pub mod init;
 pub mod checks;
 pub mod records;
 pub mod state;
+pub mod player;

@@ -84,6 +84,26 @@ pub fn run_dashboard(args: &[&str], cwd: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_dashboard")).args(args).current_dir(cwd).output().expect("failed to run dashboard binary")
 }
 
+/// Checks out `branch` in the director repo, creating it from `main` on
+/// first use. Leaves the repo checked out on `branch`.
+pub fn checkout_branch(repo: &Path, branch: &str) {
+    let git = Git::new(repo);
+    if git.ref_exists(&format!("refs/heads/{branch}")) {
+        git.run(&["checkout", "-q", branch]).expect("checkout branch");
+    } else {
+        git.run(&["checkout", "-q", "-b", branch, "main"]).expect("checkout new branch");
+    }
+}
+
+/// Checks out `branch` (creating it from `main` on first use), writes `rel`,
+/// and commits — the common shape of a director plan/replan/post commit used
+/// throughout tests/player.rs. Returns the new commit's sha.
+pub fn director_commit_on_branch(repo: &Path, branch: &str, rel: &str, content: &str, msg: &str) -> String {
+    checkout_branch(repo, branch);
+    write_file(repo, rel, content);
+    commit(repo, msg)
+}
+
 /// Pushes `main` from a director clone already linked to its hub (via
 /// `dashboard::init::init`) up to that hub. Used by tests that need commits
 /// beyond the one `director_repo()` seeds, e.g. to exercise a check runner

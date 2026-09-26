@@ -48,6 +48,24 @@ pub enum Transition {
     MergeAccept,
 }
 
+impl Transition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Transition::Plan => "plan",
+            Transition::Replan => "replan",
+            Transition::Post => "post",
+            Transition::Finish => "finish",
+            Transition::Block => "block",
+            Transition::SendBack => "send_back",
+            Transition::Accept => "accept",
+            Transition::Retire => "retire",
+            Transition::Docs => "docs",
+            Transition::MergeUnblock => "merge_unblock",
+            Transition::MergeAccept => "merge_accept",
+        }
+    }
+}
+
 // --------------------------------------------------------------------------
 // Import notes: refs/notes/dashboard-imports (spec §4)
 // --------------------------------------------------------------------------

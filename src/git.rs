@@ -97,6 +97,14 @@ impl Git {
         self.run(&["update-ref", name, sha]).map(|_| ())
     }
 
+    /// Compare-and-swap ref update: `name` is set to `new` only if it
+    /// currently points at `old` (an empty `old` means "must not exist yet",
+    /// used for branch creation). Fails atomically otherwise — the player
+    /// relies on this so a concurrent write never gets silently clobbered.
+    pub fn update_ref_cas(&self, name: &str, new: &str, old: &str) -> Result<(), GitError> {
+        self.run(&["update-ref", name, new, old]).map(|_| ())
+    }
+
     pub fn delete_ref(&self, name: &str) -> Result<(), GitError> {
         self.run(&["update-ref", "-d", name]).map(|_| ())
     }
@@ -196,6 +204,55 @@ impl Git {
     /// Force-overwrites the note on `sha` under `notes_ref` with `content`.
     pub fn notes_add(&self, notes_ref: &str, sha: &str, content: &str) -> Result<(), GitError> {
         self.run_with_stdin(&["notes", "--ref", notes_ref, "add", "-f", "-F", "-", sha], content).map(|_| ())
+    }
+
+    /// Runs `git <args>` with extra environment variables set (e.g. explicit
+    /// author/committer identity for the player's own commits, spec.md §11).
+    pub fn run_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, GitError> {
+        let output = Command::new("git").args(args).current_dir(&self.dir).envs(envs.iter().copied()).output().map_err(|e| Self::err(args, None, e.to_string()))?;
+        if output.status.success() {
+            let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
+            if s.ends_with('\n') {
+                s.pop();
+            }
+            Ok(s)
+        } else {
+            Err(Self::err(args, output.status.code(), String::from_utf8_lossy(&output.stderr)))
+        }
+    }
+
+    /// `git merge-tree --write-tree <ours> <theirs>`, run without a worktree
+    /// (spec.md §11's unblock merge). Returns the merged tree's sha on a
+    /// clean merge, or `None` on conflicts (exit code 1) — the caller skips
+    /// those and reports them rather than treating them as a hard error.
+    pub fn merge_tree_write(&self, ours: &str, theirs: &str) -> Result<Option<String>, GitError> {
+        match self.run(&["merge-tree", "--write-tree", ours, theirs]) {
+            Ok(out) => Ok(Some(out.lines().next().unwrap_or("").to_string())),
+            Err(e) if e.code == Some(1) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `git commit-tree <tree> -p <parent> ... -m <message>`, with the
+    /// player's own author/committer identity forced via env vars so it
+    /// never depends on the user's global git config (spec.md §11).
+    pub fn commit_tree(&self, tree: &str, parents: &[&str], message: &str) -> Result<String, GitError> {
+        let mut args: Vec<&str> = vec!["commit-tree", tree];
+        for p in parents {
+            args.push("-p");
+            args.push(p);
+        }
+        args.push("-m");
+        args.push(message);
+        self.run_with_env(
+            &args,
+            &[
+                ("GIT_AUTHOR_NAME", "dashboard-player"),
+                ("GIT_AUTHOR_EMAIL", "dashboard-player@localhost"),
+                ("GIT_COMMITTER_NAME", "dashboard-player"),
+                ("GIT_COMMITTER_EMAIL", "dashboard-player@localhost"),
+            ],
+        )
     }
 
     pub fn config_get(&self, key: &str) -> Option<String> {

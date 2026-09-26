@@ -6,7 +6,7 @@
 // integration tests in tests/ exercise the library directly.
 
 use clap::{Parser, Subcommand};
-use dashboard::{init, legacy, ui};
+use dashboard::{init, legacy, paths, player, ui};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -60,6 +60,16 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Run the player loop: import and validate director/subagent commits,
+    /// run checks, and merge accepted/unblocked work (spec.md §5, §9, §11).
+    Player {
+        /// Run a single tick, print its report, and exit.
+        #[arg(long)]
+        once: bool,
+        /// Seconds to sleep between ticks when looping.
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+    },
 }
 
 fn main() {
@@ -67,6 +77,7 @@ fn main() {
 
     match args.command {
         Some(Command::Init { name }) => run_init(name, args.home),
+        Some(Command::Player { once, interval }) => run_player(args.home, once, interval),
         None => run_legacy(args.file, args.no_color, args.width),
     }
 }
@@ -89,6 +100,58 @@ fn run_init(name: Option<String>, home: Option<PathBuf>) {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+// --------------------------------------------------------------------------
+// dashboard player
+// --------------------------------------------------------------------------
+
+fn run_player(home: Option<PathBuf>, once: bool, interval: u64) {
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot read current directory: {e}");
+            std::process::exit(1);
+        }
+    };
+    let home = match paths::resolve_home(home, &cwd) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    // step 6 swaps NullSessions for the real tmux-backed Sessions impl.
+    let mut player = match player::Player::open(home, player::NullSessions::default()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if once {
+        match player.tick() {
+            Ok(report) => println!("{report}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    loop {
+        match player.tick() {
+            Ok(report) => {
+                if !report.is_empty() {
+                    println!("{report}");
+                }
+            }
+            Err(e) => eprintln!("error: {e}"),
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval));
     }
 }
 
