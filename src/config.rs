@@ -149,14 +149,17 @@ impl FromStr for Reason {
 // Checks (spec §6.1) — shared by tests.toml and task.toml
 // --------------------------------------------------------------------------
 
+// `pub` (not `pub(crate)` like the rest of this module): src/checks.rs's
+// public `Runner::run_check` takes `&Check` directly, and integration tests
+// outside this crate build `Check` literals to drive it.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Check {
-    pub(crate) name: String,
-    pub(crate) cmd: String,
+pub struct Check {
+    pub name: String,
+    pub cmd: String,
     #[serde(default = "default_runs")]
-    pub(crate) runs: u32,
+    pub runs: u32,
     #[serde(default = "default_min_pass")]
-    pub(crate) min_pass: u32,
+    pub min_pass: u32,
 }
 
 fn default_runs() -> u32 {

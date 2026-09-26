@@ -8,3 +8,4 @@ pub mod paths;
 pub mod ui;
 pub mod legacy;
 pub mod init;
+pub mod checks;

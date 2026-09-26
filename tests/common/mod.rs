@@ -83,3 +83,12 @@ pub fn temp_home() -> TempDir {
 pub fn run_dashboard(args: &[&str], cwd: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_dashboard")).args(args).current_dir(cwd).output().expect("failed to run dashboard binary")
 }
+
+/// Pushes `main` from a director clone already linked to its hub (via
+/// `dashboard::init::init`) up to that hub. Used by tests that need commits
+/// beyond the one `director_repo()` seeds, e.g. to exercise a check runner
+/// against several commits.
+pub fn push_main_to_hub(repo: &Path) {
+    let git = Git::new(repo);
+    git.run(&["push", "-q", "hub", "main"]).expect("push main to hub");
+}
