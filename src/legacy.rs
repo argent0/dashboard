@@ -18,7 +18,7 @@ use std::collections::HashMap;
 // --------------------------------------------------------------------------
 
 #[derive(Debug, Default, Deserialize)]
-pub(crate) struct Roadmap {
+pub struct Roadmap {
     #[serde(default)]
     pub(crate) title: Option<String>,
     #[serde(default)]
@@ -122,7 +122,7 @@ fn review_verdict(s: &str) -> Option<&'static str> {
     None
 }
 
-pub(crate) fn render(data: &Roadmap, color: bool, width: usize) -> String {
+pub fn render(data: &Roadmap, color: bool, width: usize) -> String {
     let phases = &data.phases;
     let tasks = &data.tasks;
     let by_id: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();

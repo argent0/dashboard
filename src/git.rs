@@ -10,10 +10,10 @@ use std::process::{Command, Stdio};
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[derive(Debug, Clone)]
-pub(crate) struct GitError {
-    pub(crate) args: Vec<String>,
-    pub(crate) code: Option<i32>,
-    pub(crate) stderr: String,
+pub struct GitError {
+    pub args: Vec<String>,
+    pub code: Option<i32>,
+    pub stderr: String,
 }
 
 impl std::fmt::Display for GitError {
@@ -24,12 +24,12 @@ impl std::fmt::Display for GitError {
 
 impl std::error::Error for GitError {}
 
-pub(crate) struct Git {
-    pub(crate) dir: PathBuf,
+pub struct Git {
+    pub dir: PathBuf,
 }
 
 impl Git {
-    pub(crate) fn new(dir: impl Into<PathBuf>) -> Self {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }
 
@@ -38,7 +38,7 @@ impl Git {
     }
 
     /// Runs `git <args>` and returns stdout with the trailing newline trimmed.
-    pub(crate) fn run(&self, args: &[&str]) -> Result<String, GitError> {
+    pub fn run(&self, args: &[&str]) -> Result<String, GitError> {
         let output = Command::new("git").args(args).current_dir(&self.dir).output().map_err(|e| Self::err(args, None, e.to_string()))?;
         if output.status.success() {
             let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -52,12 +52,12 @@ impl Git {
     }
 
     /// Runs `git <args>`, returning only whether it exited 0.
-    pub(crate) fn run_ok(&self, args: &[&str]) -> bool {
+    pub fn run_ok(&self, args: &[&str]) -> bool {
         Command::new("git").args(args).current_dir(&self.dir).output().map(|o| o.status.success()).unwrap_or(false)
     }
 
     /// Runs `git <args>` feeding `input` on stdin.
-    pub(crate) fn run_with_stdin(&self, args: &[&str], input: &str) -> Result<String, GitError> {
+    pub fn run_with_stdin(&self, args: &[&str], input: &str) -> Result<String, GitError> {
         let mut child = Command::new("git")
             .args(args)
             .current_dir(&self.dir)
@@ -81,28 +81,28 @@ impl Git {
 
     // ---- helpers ----
 
-    pub(crate) fn rev_parse(&self, rev: &str) -> Option<String> {
+    pub fn rev_parse(&self, rev: &str) -> Option<String> {
         self.run(&["rev-parse", "--verify", "-q", rev]).ok().filter(|s| !s.is_empty())
     }
 
-    pub(crate) fn is_ancestor(&self, a: &str, b: &str) -> bool {
+    pub fn is_ancestor(&self, a: &str, b: &str) -> bool {
         self.run_ok(&["merge-base", "--is-ancestor", a, b])
     }
 
-    pub(crate) fn ref_exists(&self, name: &str) -> bool {
+    pub fn ref_exists(&self, name: &str) -> bool {
         self.run_ok(&["show-ref", "--verify", "--quiet", name])
     }
 
-    pub(crate) fn update_ref(&self, name: &str, sha: &str) -> Result<(), GitError> {
+    pub fn update_ref(&self, name: &str, sha: &str) -> Result<(), GitError> {
         self.run(&["update-ref", name, sha]).map(|_| ())
     }
 
-    pub(crate) fn delete_ref(&self, name: &str) -> Result<(), GitError> {
+    pub fn delete_ref(&self, name: &str) -> Result<(), GitError> {
         self.run(&["update-ref", "-d", name]).map(|_| ())
     }
 
     /// Returns `(refname, sha)` pairs for every ref matching `pattern`.
-    pub(crate) fn for_each_ref(&self, pattern: &str) -> Vec<(String, String)> {
+    pub fn for_each_ref(&self, pattern: &str) -> Vec<(String, String)> {
         match self.run(&["for-each-ref", "--format=%(objectname) %(refname)", pattern]) {
             Ok(out) => out
                 .lines()
@@ -117,16 +117,16 @@ impl Git {
         }
     }
 
-    pub(crate) fn show_file(&self, rev: &str, path: &str) -> Option<String> {
+    pub fn show_file(&self, rev: &str, path: &str) -> Option<String> {
         self.run(&["show", &format!("{rev}:{path}")]).ok()
     }
 
-    pub(crate) fn blob_hash(&self, rev: &str, path: &str) -> Option<String> {
+    pub fn blob_hash(&self, rev: &str, path: &str) -> Option<String> {
         self.run(&["rev-parse", "--verify", "-q", &format!("{rev}:{path}")]).ok().filter(|s| !s.is_empty())
     }
 
     /// Recursive, name-only listing of files under `path_prefix` at `rev`.
-    pub(crate) fn ls_tree_files(&self, rev: &str, path_prefix: &str) -> Vec<String> {
+    pub fn ls_tree_files(&self, rev: &str, path_prefix: &str) -> Vec<String> {
         match self.run(&["ls-tree", "-r", "--name-only", rev, "--", path_prefix]) {
             Ok(out) => out.lines().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
             Err(_) => Vec::new(),
@@ -134,7 +134,7 @@ impl Git {
     }
 
     /// `(status, path)` pairs from `git diff --name-status --no-renames a b`.
-    pub(crate) fn diff_names(&self, a: &str, b: &str) -> Vec<(char, String)> {
+    pub fn diff_names(&self, a: &str, b: &str) -> Vec<(char, String)> {
         match self.run(&["diff", "--name-status", "--no-renames", a, b]) {
             Ok(out) => out
                 .lines()
@@ -149,7 +149,7 @@ impl Git {
         }
     }
 
-    pub(crate) fn rev_list(&self, range_args: &[&str]) -> Vec<String> {
+    pub fn rev_list(&self, range_args: &[&str]) -> Vec<String> {
         let mut args = vec!["rev-list"];
         args.extend_from_slice(range_args);
         match self.run(&args) {
@@ -158,24 +158,24 @@ impl Git {
         }
     }
 
-    pub(crate) fn parents(&self, sha: &str) -> Vec<String> {
+    pub fn parents(&self, sha: &str) -> Vec<String> {
         match self.run(&["rev-list", "--parents", "-n", "1", sha]) {
             Ok(out) => out.split_whitespace().skip(1).map(|s| s.to_string()).collect(),
             Err(_) => Vec::new(),
         }
     }
 
-    pub(crate) fn commit_subject(&self, sha: &str) -> Option<String> {
+    pub fn commit_subject(&self, sha: &str) -> Option<String> {
         self.run(&["log", "-1", "--format=%s", sha]).ok()
     }
 
-    pub(crate) fn commit_body(&self, sha: &str) -> Option<String> {
+    pub fn commit_body(&self, sha: &str) -> Option<String> {
         self.run(&["log", "-1", "--format=%b", sha]).ok()
     }
 
     /// True when `sha`'s tree equals its first parent's tree; a root commit
     /// (no parents) counts as empty only if its own tree is the empty tree.
-    pub(crate) fn is_empty_commit(&self, sha: &str) -> bool {
+    pub fn is_empty_commit(&self, sha: &str) -> bool {
         let tree = match self.run(&["rev-parse", &format!("{sha}^{{tree}}")]) {
             Ok(t) => t,
             Err(_) => return false,
@@ -189,20 +189,20 @@ impl Git {
         }
     }
 
-    pub(crate) fn notes_show(&self, notes_ref: &str, sha: &str) -> Option<String> {
+    pub fn notes_show(&self, notes_ref: &str, sha: &str) -> Option<String> {
         self.run(&["notes", "--ref", notes_ref, "show", sha]).ok()
     }
 
     /// Force-overwrites the note on `sha` under `notes_ref` with `content`.
-    pub(crate) fn notes_add(&self, notes_ref: &str, sha: &str, content: &str) -> Result<(), GitError> {
+    pub fn notes_add(&self, notes_ref: &str, sha: &str, content: &str) -> Result<(), GitError> {
         self.run_with_stdin(&["notes", "--ref", notes_ref, "add", "-f", "-F", "-", sha], content).map(|_| ())
     }
 
-    pub(crate) fn config_get(&self, key: &str) -> Option<String> {
+    pub fn config_get(&self, key: &str) -> Option<String> {
         self.run(&["config", "--get", key]).ok().filter(|s| !s.is_empty())
     }
 
-    pub(crate) fn config_set(&self, key: &str, val: &str) -> Result<(), GitError> {
+    pub fn config_set(&self, key: &str, val: &str) -> Result<(), GitError> {
         self.run(&["config", key, val]).map(|_| ())
     }
 }

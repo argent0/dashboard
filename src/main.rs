@@ -1,20 +1,12 @@
-// Console dashboard for a project's docs/roadmap/tasks.yaml.
+// Console dashboard for a director/player/subagent roadmap tracked in git
+// (spec.md), plus — until step 8 of the migration plan — the legacy
+// tasks.yaml renderer (src/legacy.rs) that this CLI grew up rendering.
 //
-// Shared across projects — lives outside any single repo. Run it from inside
-// a project directory (or pass --file) and it renders that project's roadmap;
-// the header title comes from tasks.yaml's own `title` field.
-//
-// This is the legacy tasks.yaml renderer (see src/legacy.rs). spec.md
-// describes a director/player/subagent model, computed from git, that will
-// replace it; until that lands the CLI below keeps working unchanged.
+// This binary is a thin CLI over the `dashboard` library crate (src/lib.rs);
+// integration tests in tests/ exercise the library directly.
 
-mod config;
-mod git;
-mod legacy;
-mod paths;
-mod ui;
-
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use dashboard::{init, legacy, ui};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -31,12 +23,22 @@ fn default_tasks_file() -> Option<PathBuf> {
     None
 }
 
-/// Console dashboard for a project's docs/roadmap/tasks.yaml.
+/// Console dashboard for a project's roadmap.
 #[derive(Parser)]
 #[command(name = "dashboard")]
 struct Args {
-    /// Path to tasks.yaml (default: ./docs/roadmap/tasks.yaml or ./tasks.yaml,
-    /// resolved against the current directory).
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// dashboard home root (<root>/hub.git, etc. — the full home, not a data
+    /// root). Later commands resolve this via `dashboard.home` in the
+    /// current repo's git config when not given.
+    #[arg(long, global = true)]
+    home: Option<PathBuf>,
+
+    /// Path to tasks.yaml (legacy renderer only; default:
+    /// ./docs/roadmap/tasks.yaml or ./tasks.yaml, resolved against the
+    /// current directory).
     #[arg(long)]
     file: Option<PathBuf>,
 
@@ -49,10 +51,53 @@ struct Args {
     width: Option<u32>,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// Create this project's hub from the director clone containing (or
+    /// above) the current directory.
+    Init {
+        /// Project name (default: the director clone toplevel's basename).
+        #[arg(long)]
+        name: Option<String>,
+    },
+}
+
 fn main() {
     let args = Args::parse();
 
-    let file = match args.file.or_else(default_tasks_file) {
+    match args.command {
+        Some(Command::Init { name }) => run_init(name, args.home),
+        None => run_legacy(args.file, args.no_color, args.width),
+    }
+}
+
+// --------------------------------------------------------------------------
+// dashboard init
+// --------------------------------------------------------------------------
+
+fn run_init(name: Option<String>, home: Option<PathBuf>) {
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot read current directory: {e}");
+            std::process::exit(1);
+        }
+    };
+    match init::init(&cwd, name.as_deref(), home) {
+        Ok(report) => println!("{}", report.summary()),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// legacy tasks.yaml renderer
+// --------------------------------------------------------------------------
+
+fn run_legacy(file: Option<PathBuf>, no_color: bool, width: Option<u32>) {
+    let file = match file.or_else(default_tasks_file) {
         Some(f) => f,
         None => {
             eprintln!("error: no tasks.yaml found (tried ./docs/roadmap/tasks.yaml and ./tasks.yaml) — pass --file");
@@ -80,8 +125,8 @@ fn main() {
         }
     };
 
-    let width = ui::detect_width(args.width);
-    let color = !args.no_color && std::io::stdout().is_terminal();
+    let width = ui::detect_width(width);
+    let color = !no_color && std::io::stdout().is_terminal();
 
     println!("{}", legacy::render(&data, color, width));
 }

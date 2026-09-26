@@ -107,7 +107,7 @@ pub(crate) mod term {
     }
 }
 
-pub(crate) fn detect_width(explicit: Option<u32>) -> usize {
+pub fn detect_width(explicit: Option<u32>) -> usize {
     let width = explicit
         .or_else(|| std::env::var("COLUMNS").ok().and_then(|v| v.parse::<u32>().ok()).filter(|&v| v > 0))
         .or_else(term::columns)

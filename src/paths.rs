@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 /// `$XDG_DATA_HOME/dashboard`, falling back to `$HOME/.local/share/dashboard`
 /// when `XDG_DATA_HOME` is unset or empty.
-pub(crate) fn data_root() -> PathBuf {
+pub fn data_root() -> PathBuf {
     match std::env::var("XDG_DATA_HOME") {
         Ok(v) if !v.is_empty() => PathBuf::from(v).join("dashboard"),
         _ => {
@@ -18,43 +18,43 @@ pub(crate) fn data_root() -> PathBuf {
 }
 
 #[derive(Debug)]
-pub(crate) struct Home {
-    pub(crate) root: PathBuf,
+pub struct Home {
+    pub root: PathBuf,
 }
 
 impl Home {
-    pub(crate) fn for_project(name: &str) -> Self {
+    pub fn for_project(name: &str) -> Self {
         Self { root: data_root().join(name) }
     }
 
-    pub(crate) fn hub(&self) -> PathBuf {
+    pub fn hub(&self) -> PathBuf {
         self.root.join("hub.git")
     }
 
-    pub(crate) fn subagents_dir(&self) -> PathBuf {
+    pub fn subagents_dir(&self) -> PathBuf {
         self.root.join("subagents")
     }
 
-    pub(crate) fn subagent(&self, slug: &str) -> PathBuf {
+    pub fn subagent(&self, slug: &str) -> PathBuf {
         self.subagents_dir().join(slug)
     }
 
-    pub(crate) fn work(&self) -> PathBuf {
+    pub fn work(&self) -> PathBuf {
         self.root.join("work")
     }
 
-    pub(crate) fn events(&self) -> PathBuf {
+    pub fn events(&self) -> PathBuf {
         self.root.join("events.jsonl")
     }
 
-    pub(crate) fn director_cursor(&self) -> PathBuf {
+    pub fn director_cursor(&self) -> PathBuf {
         self.root.join("director.cursor")
     }
 }
 
 /// Resolves the dashboard home: the explicit `--home` path if given, else
 /// `git config dashboard.home` read from `cwd`'s repo.
-pub(crate) fn resolve_home(explicit: Option<PathBuf>, cwd: &Path) -> Result<Home, String> {
+pub fn resolve_home(explicit: Option<PathBuf>, cwd: &Path) -> Result<Home, String> {
     if let Some(root) = explicit {
         return Ok(Home { root });
     }
