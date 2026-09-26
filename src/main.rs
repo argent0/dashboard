@@ -4,12 +4,6 @@
 // a project directory (or pass --file) and it renders that project's roadmap;
 // the header title comes from tasks.yaml's own `title` field.
 //
-// Zero dependencies on purpose: many of the projects this runs against have no
-// packaging set up for the language they're written in, so the parser below
-// only understands the specific YAML subset tasks.yaml actually uses (flat
-// mappings, flow lists, folded block scalars, and scalar block lists with
-// folded continuation lines) rather than pulling in a real YAML library.
-//
 // Statuses: pending, in_progress (first pass), in_revision (sent back by a
 // coordinator review for corrections), built, tested, blocked. Optional
 // per-task `reviews:` list records each coordinator assessment as
@@ -17,293 +11,56 @@
 // sent-back round is flagged as the final one: if that revision still isn't
 // right, the coordinator escalates to a human instead of sending it back again.
 
+use clap::Parser;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 // --------------------------------------------------------------------------
-// Minimal YAML-subset parser
+// tasks.yaml schema
 // --------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-enum Yaml {
-    Null,
-    Bool(bool),
-    Str(String),
-    List(Vec<Yaml>),
-    Mapping(HashMap<String, Yaml>),
+#[derive(Debug, Default, Deserialize)]
+struct Roadmap {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    phases: Vec<Phase>,
+    #[serde(default)]
+    tasks: Vec<Task>,
 }
 
-impl Yaml {
-    fn get(&self, key: &str) -> Option<&Yaml> {
-        match self {
-            Yaml::Mapping(m) => m.get(key),
-            _ => None,
-        }
-    }
-
-    fn as_str(&self) -> Option<&str> {
-        match self {
-            Yaml::Str(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    fn truthy(&self) -> bool {
-        match self {
-            Yaml::Null => false,
-            Yaml::Bool(b) => *b,
-            Yaml::Str(s) => !s.is_empty(),
-            Yaml::List(v) => !v.is_empty(),
-            Yaml::Mapping(m) => !m.is_empty(),
-        }
-    }
-
-    fn as_str_list(&self) -> Vec<String> {
-        match self {
-            Yaml::List(v) => v.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
-            _ => vec![],
-        }
-    }
-
-    fn as_item_list(&self) -> &[Yaml] {
-        match self {
-            Yaml::List(v) => v.as_slice(),
-            _ => &[],
-        }
-    }
+#[derive(Debug, Deserialize)]
+struct Phase {
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    goal: Option<String>,
 }
 
-fn get_str<'a>(m: &'a Yaml, key: &str, default: &'a str) -> &'a str {
-    m.get(key).and_then(Yaml::as_str).unwrap_or(default)
+fn default_status() -> String {
+    "pending".to_string()
 }
 
-fn get_list(m: &Yaml, key: &str) -> Vec<String> {
-    m.get(key).map(Yaml::as_str_list).unwrap_or_default()
-}
-
-fn get_truthy(m: &Yaml, key: &str) -> bool {
-    m.get(key).map(Yaml::truthy).unwrap_or(false)
-}
-
-fn strip_comment(line: &str) -> String {
-    let mut in_quote: Option<char> = None;
-    for (idx, ch) in line.char_indices() {
-        if let Some(q) = in_quote {
-            if ch == q {
-                in_quote = None;
-            }
-        } else if ch == '"' || ch == '\'' {
-            in_quote = Some(ch);
-        } else if ch == '#' {
-            return line[..idx].to_string();
-        }
-    }
-    line.to_string()
-}
-
-fn indent_of(line: &str) -> usize {
-    line.chars().take_while(|&c| c == ' ').count()
-}
-
-fn parse_scalar(s: &str) -> Yaml {
-    let s = s.trim();
-    if s.is_empty() {
-        return Yaml::Null;
-    }
-    if s == "true" {
-        return Yaml::Bool(true);
-    }
-    if s == "false" {
-        return Yaml::Bool(false);
-    }
-    if s.starts_with('[') && s.ends_with(']') {
-        let inner = s[1..s.len() - 1].trim();
-        if inner.is_empty() {
-            return Yaml::List(vec![]);
-        }
-        let items = inner
-            .split(',')
-            .map(|x| Yaml::Str(x.trim().trim_matches(|c| c == '"' || c == '\'').to_string()))
-            .collect();
-        return Yaml::List(items);
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() >= 2 && chars[0] == chars[chars.len() - 1] && (chars[0] == '"' || chars[0] == '\'') {
-        let inner: String = chars[1..chars.len() - 1].iter().collect();
-        return Yaml::Str(inner);
-    }
-    Yaml::Str(s.to_string())
-}
-
-/// Matches `^(\w+):\s*(.*)$`, returning (key, value.strip()).
-fn match_kv(content: &str) -> Option<(String, String)> {
-    let key: String = content.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-    if key.is_empty() {
-        return None;
-    }
-    let rest = &content[key.len()..];
-    let rest = rest.strip_prefix(':')?;
-    Some((key, rest.trim().to_string()))
-}
-
-fn parse_scalar_list(lines: &[String], start: usize, dash_indent: usize) -> (Vec<String>, usize) {
-    let n = lines.len();
-    let mut items = Vec::new();
-    let mut cur: Option<Vec<String>> = None;
-    let mut i = start;
-    while i < n {
-        let l = &lines[i];
-        if l.trim().is_empty() {
-            i += 1;
-            continue;
-        }
-        let ind = indent_of(l);
-        let body = &l[ind..];
-        if ind == dash_indent && body.starts_with("- ") {
-            if let Some(c) = cur.take() {
-                items.push(c.join(" ").trim().to_string());
-            }
-            cur = Some(vec![body[2..].trim().to_string()]);
-            i += 1;
-        } else if ind > dash_indent {
-            cur.as_mut().expect("scalar list continuation before first item").push(l.trim().to_string());
-            i += 1;
-        } else {
-            break;
-        }
-    }
-    if let Some(c) = cur {
-        items.push(c.join(" ").trim().to_string());
-    }
-    (items, i)
-}
-
-fn parse_field(item: &mut HashMap<String, Yaml>, content: &str, field_indent: usize, i: usize, lines: &[String]) -> usize {
-    let n = lines.len();
-    let (key, val) = match match_kv(content) {
-        Some(kv) => kv,
-        None => return i,
-    };
-    let mut i = i;
-    if val == ">" || val == "|" {
-        let mut block: Vec<String> = Vec::new();
-        let mut block_indent: Option<usize> = None;
-        while i < n {
-            let l = &lines[i];
-            if l.trim().is_empty() {
-                i += 1;
-                continue;
-            }
-            let ind = indent_of(l);
-            if ind <= field_indent {
-                break;
-            }
-            let bi = *block_indent.get_or_insert(ind);
-            block.push(l[bi..].to_string());
-            i += 1;
-        }
-        let joined = block.iter().map(|s| s.trim()).collect::<Vec<_>>().join(" ").trim().to_string();
-        item.insert(key, Yaml::Str(joined));
-    } else if val.is_empty() {
-        let mut j = i;
-        while j < n && lines[j].trim().is_empty() {
-            j += 1;
-        }
-        if j < n && indent_of(&lines[j]) > field_indent && lines[j].trim_start().starts_with("- ") {
-            let (values, new_i) = parse_scalar_list(lines, j, indent_of(&lines[j]));
-            item.insert(key, Yaml::List(values.into_iter().map(Yaml::Str).collect()));
-            i = new_i;
-        } else {
-            item.insert(key, Yaml::Null);
-            i = j;
-        }
-    } else {
-        item.insert(key, parse_scalar(&val));
-    }
-    i
-}
-
-fn parse_mapping_item(lines: &[String], i: usize, indent: usize) -> (HashMap<String, Yaml>, usize) {
-    let n = lines.len();
-    let mut item = HashMap::new();
-    let body = &lines[i][indent..];
-    let field_indent = indent + 2;
-    let mut i = parse_field(&mut item, &body[2..], field_indent, i + 1, lines);
-    while i < n {
-        let l = &lines[i];
-        if l.trim().is_empty() {
-            i += 1;
-            continue;
-        }
-        let ind = indent_of(l);
-        if ind != field_indent {
-            break;
-        }
-        let content = &l[field_indent..];
-        if content.starts_with("- ") {
-            break;
-        }
-        i = parse_field(&mut item, content, field_indent, i + 1, lines);
-    }
-    (item, i)
-}
-
-fn parse_list(lines: &[String], start: usize, indent: usize) -> (Vec<HashMap<String, Yaml>>, usize) {
-    let n = lines.len();
-    let mut items = Vec::new();
-    let mut i = start;
-    while i < n {
-        let l = &lines[i];
-        if l.trim().is_empty() {
-            i += 1;
-            continue;
-        }
-        if indent_of(l) != indent || !l[indent..].starts_with("- ") {
-            break;
-        }
-        let (item, new_i) = parse_mapping_item(lines, i, indent);
-        items.push(item);
-        i = new_i;
-    }
-    (items, i)
-}
-
-fn load_yaml_subset(text: &str) -> HashMap<String, Yaml> {
-    let lines: Vec<String> = text.lines().map(strip_comment).collect();
-    let n = lines.len();
-    let mut result = HashMap::new();
-    let mut i = 0;
-    while i < n {
-        let l = lines[i].clone();
-        if l.trim().is_empty() || indent_of(&l) != 0 {
-            i += 1;
-            continue;
-        }
-        let (key, val) = match l.split_once(':') {
-            Some((k, v)) => (k.trim().to_string(), v.trim().to_string()),
-            None => (l.trim().to_string(), String::new()),
-        };
-        i += 1;
-        if !val.is_empty() {
-            result.insert(key, parse_scalar(&val));
-            continue;
-        }
-        let mut j = i;
-        while j < n && lines[j].trim().is_empty() {
-            j += 1;
-        }
-        if j < n && lines[j].trim_start().starts_with("- ") {
-            let ind = indent_of(&lines[j]);
-            let (items, new_i) = parse_list(&lines, j, ind);
-            result.insert(key, Yaml::List(items.into_iter().map(Yaml::Mapping).collect()));
-            i = new_i;
-        } else {
-            result.insert(key, Yaml::Null);
-            i = j;
-        }
-    }
-    result
+#[derive(Debug, Deserialize)]
+struct Task {
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default = "default_status")]
+    status: String,
+    #[serde(default)]
+    phase: String,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
+    milestone: bool,
+    #[serde(default)]
+    reviews: Vec<String>,
+    #[serde(default)]
+    blocked_reason: Option<String>,
 }
 
 // --------------------------------------------------------------------------
@@ -431,36 +188,32 @@ fn review_verdict(s: &str) -> Option<&'static str> {
     None
 }
 
-fn render(data: &Yaml, color: bool, width: usize) -> String {
-    let phases = data.get("phases").map(Yaml::as_item_list).unwrap_or(&[]);
-    let tasks = data.get("tasks").map(Yaml::as_item_list).unwrap_or(&[]);
-    let by_id: HashMap<&str, &Yaml> = tasks.iter().filter_map(|t| t.get("id").and_then(Yaml::as_str).map(|id| (id, t))).collect();
+fn render(data: &Roadmap, color: bool, width: usize) -> String {
+    let phases = &data.phases;
+    let tasks = &data.tasks;
+    let by_id: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
 
     let mut out: Vec<String> = Vec::new();
 
-    let task_status = |t: &Yaml| -> String { get_str(t, "status", "pending").to_string() };
+    let sent_back_rounds = |t: &Task| -> usize { t.reviews.iter().filter(|r| review_verdict(r) == Some("sent-back")).count() };
 
-    let reviews = |t: &Yaml| -> Vec<String> { get_list(t, "reviews") };
+    let last_verdict = |t: &Task| -> Option<&'static str> { t.reviews.iter().rev().find_map(|r| review_verdict(r)) };
 
-    let sent_back_rounds = |t: &Yaml| -> usize { reviews(t).iter().filter(|r| review_verdict(r) == Some("sent-back")).count() };
+    let cap_hit = |t: &Task| -> bool { sent_back_rounds(t) >= REVIEW_CAP && last_verdict(t) == Some("sent-back") };
 
-    let last_verdict = |t: &Yaml| -> Option<&'static str> { reviews(t).iter().rev().find_map(|r| review_verdict(r)) };
-
-    let cap_hit = |t: &Yaml| -> bool { sent_back_rounds(t) >= REVIEW_CAP && last_verdict(t) == Some("sent-back") };
-
-    let actionable = |t: &Yaml| -> bool {
-        if task_status(t) != "pending" {
+    let actionable = |t: &Task| -> bool {
+        if t.status != "pending" {
             return false;
         }
-        get_list(t, "depends_on").iter().all(|d| by_id.get(d.as_str()).map(|dep| get_str(dep, "status", "pending") == "tested").unwrap_or(false))
+        t.depends_on.iter().all(|d| by_id.get(d.as_str()).map(|dep| dep.status == "tested").unwrap_or(false))
     };
 
-    let unmet_deps = |t: &Yaml| -> Vec<String> {
-        get_list(t, "depends_on").into_iter().filter(|d| by_id.get(d.as_str()).map(|dep| get_str(dep, "status", "pending") != "tested").unwrap_or(true)).collect()
+    let unmet_deps = |t: &Task| -> Vec<String> {
+        t.depends_on.iter().filter(|d| by_id.get(d.as_str()).map(|dep| dep.status != "tested").unwrap_or(true)).cloned().collect()
     };
 
     // ---- header ----
-    let project = get_str(data, "title", "PROJECT");
+    let project = data.title.as_deref().unwrap_or("PROJECT");
     let title = format!(" {project} — Implementation Roadmap ");
     let inner_w = (width.saturating_sub(2)).max(title.chars().count());
     out.push(style(&format!("╭{}╮", "─".repeat(inner_w)), &[c::MAGENTA], color));
@@ -477,8 +230,7 @@ fn render(data: &Yaml, color: bool, width: usize) -> String {
     let total = tasks.len();
     let mut counts: HashMap<&str, usize> = STATUS_ORDER.iter().map(|s| (*s, 0)).collect();
     for t in tasks {
-        let s = task_status(t);
-        let key = STATUS_ORDER.iter().find(|&&o| o == s).copied().unwrap_or("pending");
+        let key = STATUS_ORDER.iter().find(|&&o| o == t.status).copied().unwrap_or("pending");
         *counts.entry(key).or_insert(0) += 1;
     }
     let tested = *counts.get("tested").unwrap_or(&0);
@@ -500,29 +252,22 @@ fn render(data: &Yaml, color: bool, width: usize) -> String {
 
     // ---- phases ----
     for ph in phases {
-        let ph_id = get_str(ph, "id", "");
-        let ph_tasks: Vec<&Yaml> = tasks.iter().filter(|t| get_str(t, "phase", "") == ph_id).collect();
+        let ph_tasks: Vec<&Task> = tasks.iter().filter(|t| t.phase == ph.id).collect();
         let ph_total = ph_tasks.len();
-        let ph_tested = ph_tasks.iter().filter(|t| task_status(t) == "tested").count();
+        let ph_tested = ph_tasks.iter().filter(|t| t.status == "tested").count();
         let ph_frac = if ph_total > 0 { ph_tested as f64 / ph_total as f64 } else { 0.0 };
-        let header = match ph.get("title") {
-            Some(Yaml::Str(s)) => s.clone(),
-            Some(Yaml::Null) | None => ph_id.to_string(),
-            Some(_) => ph_id.to_string(),
-        };
+        let header = ph.title.clone().unwrap_or_else(|| ph.id.clone());
         out.push(format!("{}  {}  {}/{}", style(&header, &[c::BOLD], color), bar(ph_frac, 20, color), ph_tested, ph_total));
-        let goal = ph.get("goal").and_then(Yaml::as_str).unwrap_or("");
+        let goal = ph.goal.as_deref().unwrap_or("");
         if !goal.is_empty() {
             out.push(format!("  {}", style(&truncate(goal, width.saturating_sub(2)), &[c::DIM], color)));
         }
         for t in &ph_tasks {
-            let status = task_status(t);
-            let ss = status_style(&status);
-            let mark = if get_truthy(t, "milestone") { " ⚑" } else { "  " };
-            let id = get_str(t, "id", "");
-            let tid = format!("{:<24}", id);
-            let tstatus = format!("{:<11}", status);
-            let n_rev = reviews(t).len();
+            let ss = status_style(&t.status);
+            let mark = if t.milestone { " ⚑" } else { "  " };
+            let tid = format!("{:<24}", t.id);
+            let tstatus = format!("{:<11}", t.status);
+            let n_rev = t.reviews.len();
             let badge = if n_rev > 0 {
                 format!("{} ", style(&format!("r{n_rev}"), &[if cap_hit(t) { c::RED } else { c::MAGENTA }], color))
             } else {
@@ -530,38 +275,29 @@ fn render(data: &Yaml, color: bool, width: usize) -> String {
             };
             let badge_w = if n_rev > 0 { format!("r{n_rev} ").chars().count() } else { 0 };
             let title_w = (width.saturating_sub(46).saturating_sub(badge_w)).max(10);
-            let row = format!(
-                "  {} {} {}{} {}",
-                ss.icon,
-                style(&tstatus, &[ss.color], color),
-                style(&tid, &[c::DIM], color),
-                mark,
-                badge + &truncate(get_str(t, "title", ""), title_w)
-            );
+            let row = format!("  {} {} {}{} {}", ss.icon, style(&tstatus, &[ss.color], color), style(&tid, &[c::DIM], color), mark, badge + &truncate(&t.title, title_w));
             out.push(row);
         }
         out.push(String::new());
     }
 
     // ---- milestones ----
-    let milestones: Vec<&Yaml> = tasks.iter().filter(|t| get_truthy(t, "milestone")).collect();
+    let milestones: Vec<&Task> = tasks.iter().filter(|t| t.milestone).collect();
     if !milestones.is_empty() {
         out.push(style("⚑ Milestones", &[c::BOLD, c::MAGENTA], color));
         for t in &milestones {
-            let status = task_status(t);
-            let ss = status_style(&status);
-            out.push(format!("  {} {} {}", ss.icon, style(&format!("{:<11}", status), &[ss.color], color), truncate(get_str(t, "title", ""), width.saturating_sub(20))));
+            let ss = status_style(&t.status);
+            out.push(format!("  {} {} {}", ss.icon, style(&format!("{:<11}", t.status), &[ss.color], color), truncate(&t.title, width.saturating_sub(20))));
         }
         out.push(String::new());
     }
 
     // ---- actionable now ("next", computed) ----
-    let next_tasks: Vec<&Yaml> = tasks.iter().filter(|t| actionable(t)).collect();
+    let next_tasks: Vec<&Task> = tasks.iter().filter(|t| actionable(t)).collect();
     out.push(style(&format!("▶ Actionable now ({})", next_tasks.len()), &[c::BOLD, c::CYAN], color));
     if !next_tasks.is_empty() {
         for t in &next_tasks {
-            let id = get_str(t, "id", "");
-            out.push(format!("  {}  {}", style(id, &[c::CYAN], color), truncate(get_str(t, "title", ""), width.saturating_sub(id.chars().count()).saturating_sub(6))));
+            out.push(format!("  {}  {}", style(&t.id, &[c::CYAN], color), truncate(&t.title, width.saturating_sub(t.id.chars().count()).saturating_sub(6))));
         }
     } else {
         out.push(style("  (none — everything actionable is in progress, or nothing is unblocked)", &[c::DIM], color));
@@ -569,20 +305,18 @@ fn render(data: &Yaml, color: bool, width: usize) -> String {
     out.push(String::new());
 
     // ---- in revision (sent back by the coordinator's review) ----
-    let revising: Vec<&Yaml> = tasks.iter().filter(|t| task_status(t) == "in_revision").collect();
+    let revising: Vec<&Task> = tasks.iter().filter(|t| t.status == "in_revision").collect();
     out.push(style(&format!("↻ In revision ({})", revising.len()), &[c::BOLD, c::MAGENTA], color));
     if !revising.is_empty() {
         for t in &revising {
-            let id = get_str(t, "id", "");
-            let rv = reviews(t);
-            let last = rv.last().cloned().unwrap_or_else(|| "no review recorded".to_string());
+            let last = t.reviews.last().cloned().unwrap_or_else(|| "no review recorded".to_string());
             let warn = if cap_hit(t) {
                 style(&format!("  ⚠ final round ({REVIEW_CAP}/{REVIEW_CAP}) — escalate if still not right"), &[c::RED], color)
             } else {
                 String::new()
             };
-            let last_w = (width.saturating_sub(id.chars().count()).saturating_sub(8)).max(20);
-            out.push(format!("  {}{}{}", style(id, &[c::MAGENTA], color), warn, style(&format!("  — {}", truncate(&last, last_w)), &[c::DIM], color)));
+            let last_w = (width.saturating_sub(t.id.chars().count()).saturating_sub(8)).max(20);
+            out.push(format!("  {}{}{}", style(&t.id, &[c::MAGENTA], color), warn, style(&format!("  — {}", truncate(&last, last_w)), &[c::DIM], color)));
         }
     } else {
         out.push(style("  (none)", &[c::DIM], color));
@@ -590,19 +324,18 @@ fn render(data: &Yaml, color: bool, width: usize) -> String {
     out.push(String::new());
 
     // ---- blocked ----
-    let blocked: Vec<&Yaml> = tasks.iter().filter(|t| task_status(t) == "blocked").collect();
+    let blocked: Vec<&Task> = tasks.iter().filter(|t| t.status == "blocked").collect();
     out.push(style(&format!("⛔ Blocked ({})", blocked.len()), &[c::BOLD, c::RED], color));
     if !blocked.is_empty() {
         for t in &blocked {
-            let id = get_str(t, "id", "");
-            let reason = match t.get("blocked_reason").and_then(Yaml::as_str) {
+            let reason = match t.blocked_reason.as_deref() {
                 Some(r) if !r.is_empty() => r.to_string(),
                 _ => {
                     let deps = unmet_deps(t);
                     if deps.is_empty() { "no reason recorded".to_string() } else { format!("waiting on: {}", deps.join(", ")) }
                 }
             };
-            out.push(format!("  {}  {}{}", style(id, &[c::RED], color), truncate(get_str(t, "title", ""), 40), style(&format!("  — {reason}"), &[c::DIM], color)));
+            out.push(format!("  {}  {}{}", style(&t.id, &[c::RED], color), truncate(&t.title, 40), style(&format!("  — {reason}"), &[c::DIM], color)));
         }
     } else {
         out.push(style("  (none)", &[c::DIM], color));
@@ -673,70 +406,26 @@ fn default_tasks_file() -> Option<PathBuf> {
     None
 }
 
-fn print_help() {
-    println!(
-        "usage: dashboard [-h] [--file FILE] [--no-color] [--width WIDTH]\n\n\
-Console dashboard for a project's docs/roadmap/tasks.yaml.\n\n\
-options:\n  \
--h, --help       show this help message and exit\n  \
---file FILE      Path to tasks.yaml (default: ./docs/roadmap/tasks.yaml or\n                   \
-./tasks.yaml, resolved against the current directory).\n  \
---no-color       Disable ANSI colors.\n  \
---width WIDTH    Override detected terminal width."
-    );
-}
-
+/// Console dashboard for a project's docs/roadmap/tasks.yaml.
+#[derive(Parser)]
+#[command(name = "dashboard")]
 struct Args {
+    /// Path to tasks.yaml (default: ./docs/roadmap/tasks.yaml or ./tasks.yaml,
+    /// resolved against the current directory).
+    #[arg(long)]
     file: Option<PathBuf>,
+
+    /// Disable ANSI colors.
+    #[arg(long)]
     no_color: bool,
+
+    /// Override detected terminal width.
+    #[arg(long)]
     width: Option<u32>,
 }
 
-fn parse_args(argv: &[String]) -> Result<Args, String> {
-    let mut file = None;
-    let mut no_color = false;
-    let mut width = None;
-    let mut i = 0;
-    while i < argv.len() {
-        let arg = &argv[i];
-        if arg == "-h" || arg == "--help" {
-            print_help();
-            std::process::exit(0);
-        } else if arg == "--no-color" {
-            no_color = true;
-            i += 1;
-        } else if let Some(v) = arg.strip_prefix("--file=") {
-            file = Some(PathBuf::from(v));
-            i += 1;
-        } else if arg == "--file" {
-            i += 1;
-            let v = argv.get(i).ok_or("argument --file: expected one argument")?;
-            file = Some(PathBuf::from(v));
-            i += 1;
-        } else if let Some(v) = arg.strip_prefix("--width=") {
-            width = Some(v.parse::<u32>().map_err(|_| format!("argument --width: invalid int value: '{v}'"))?);
-            i += 1;
-        } else if arg == "--width" {
-            i += 1;
-            let v = argv.get(i).ok_or("argument --width: expected one argument")?;
-            width = Some(v.parse::<u32>().map_err(|_| format!("argument --width: invalid int value: '{v}'"))?);
-            i += 1;
-        } else {
-            return Err(format!("unrecognized arguments: {arg}"));
-        }
-    }
-    Ok(Args { file, no_color, width })
-}
-
 fn main() {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let args = match parse_args(&argv) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(2);
-        }
-    };
+    let args = Args::parse();
 
     let file = match args.file.or_else(default_tasks_file) {
         Some(f) => f,
@@ -758,7 +447,14 @@ fn main() {
         }
     };
 
-    let data = Yaml::Mapping(load_yaml_subset(&text));
+    let data: Roadmap = match serde_yaml::from_str(&text) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: {} is not valid: {e}", file.display());
+            std::process::exit(1);
+        }
+    };
+
     let width = detect_width(args.width);
     let color = !args.no_color && std::io::stdout().is_terminal();
 
