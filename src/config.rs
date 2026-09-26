@@ -2,7 +2,7 @@
 // with serde defaults so every section and field is optional.
 #![allow(dead_code)]
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -12,28 +12,28 @@ use std::str::FromStr;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct RoadmapConfig {
-    pub(crate) title: Option<String>,
-    pub(crate) phases: Vec<Phase>,
-    pub(crate) docs_paths: Vec<String>,
-    pub(crate) limits: Limits,
-    pub(crate) player: PlayerConfig,
+pub struct RoadmapConfig {
+    pub title: Option<String>,
+    pub phases: Vec<Phase>,
+    pub docs_paths: Vec<String>,
+    pub limits: Limits,
+    pub player: PlayerConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Phase {
-    pub(crate) id: String,
+pub struct Phase {
+    pub id: String,
     #[serde(default)]
-    pub(crate) title: Option<String>,
+    pub title: Option<String>,
     #[serde(default)]
-    pub(crate) goal: Option<String>,
+    pub goal: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub(crate) struct Limits {
-    pub(crate) max_review_rounds: u32,
-    pub(crate) strikes: StrikeLimits,
+pub struct Limits {
+    pub max_review_rounds: u32,
+    pub strikes: StrikeLimits,
 }
 
 impl Default for Limits {
@@ -44,16 +44,16 @@ impl Default for Limits {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub(crate) struct StrikeLimits {
-    pub(crate) history: u32,
-    pub(crate) ownership: u32,
-    pub(crate) pins: u32,
-    pub(crate) suite: u32,
-    pub(crate) plan: u32,
-    pub(crate) post: u32,
-    pub(crate) review: u32,
-    pub(crate) accept: u32,
-    pub(crate) retire: u32,
+pub struct StrikeLimits {
+    pub history: u32,
+    pub ownership: u32,
+    pub pins: u32,
+    pub suite: u32,
+    pub plan: u32,
+    pub post: u32,
+    pub review: u32,
+    pub accept: u32,
+    pub retire: u32,
 }
 
 impl Default for StrikeLimits {
@@ -63,7 +63,7 @@ impl Default for StrikeLimits {
 }
 
 impl StrikeLimits {
-    pub(crate) fn limit(&self, reason: Reason) -> u32 {
+    pub fn limit(&self, reason: Reason) -> u32 {
         match reason {
             Reason::History => self.history,
             Reason::Ownership => self.ownership,
@@ -80,8 +80,8 @@ impl StrikeLimits {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub(crate) struct PlayerConfig {
-    pub(crate) agent_cmd: String,
+pub struct PlayerConfig {
+    pub agent_cmd: String,
 }
 
 impl Default for PlayerConfig {
@@ -94,8 +94,9 @@ impl Default for PlayerConfig {
 // Rejection reasons (spec §10)
 // --------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Reason {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
     History,
     Ownership,
     Pins,
@@ -108,10 +109,10 @@ pub(crate) enum Reason {
 }
 
 impl Reason {
-    pub(crate) const ALL: [Reason; 9] =
+    pub const ALL: [Reason; 9] =
         [Reason::History, Reason::Ownership, Reason::Pins, Reason::Suite, Reason::Plan, Reason::Post, Reason::Review, Reason::Accept, Reason::Retire];
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Reason::History => "history",
             Reason::Ownership => "ownership",
@@ -208,12 +209,12 @@ impl TestsConfig {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
-pub(crate) struct TaskConfig {
-    pub(crate) title: String,
-    pub(crate) phase: String,
-    pub(crate) milestone: bool,
-    pub(crate) depends_on: Vec<String>,
-    pub(crate) check: Option<Check>,
+pub struct TaskConfig {
+    pub title: String,
+    pub phase: String,
+    pub milestone: bool,
+    pub depends_on: Vec<String>,
+    pub check: Option<Check>,
 }
 
 impl TaskConfig {
