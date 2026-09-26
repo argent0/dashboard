@@ -14,8 +14,9 @@ rather than pulling in PyYAML.
 Statuses: pending, in_progress (first pass), in_revision (sent back by a
 coordinator review for corrections), built, tested, blocked. Optional
 per-task `reviews:` list records each coordinator assessment as
-"r<N> <sent-back|accepted|escalated> <date> <notes>"; more than REVIEW_CAP
-sent-back rounds without acceptance is flagged for human escalation.
+"r<N> <sent-back|accepted|escalated> <date> <notes>". The REVIEW_CAP-th
+sent-back round is flagged as the final one: if that revision still isn't
+right, the coordinator escalates to a human instead of sending it back again.
 
 If PyYAML becomes a normal dependency, swap `load_yaml_subset` for
 `yaml.safe_load` and delete the parser — everything below that point works
@@ -243,7 +244,7 @@ def truncate(s: str, width: int) -> str:
 
 # A `reviews:` entry is the coordinator's assessment of one pass over a task:
 # "r<N> <sent-back|accepted|escalated> <date> <free text>". Sent-back rounds
-# are capped; past the cap the task should go to a human, not another round.
+# are capped: after the REVIEW_CAP-th, the next step is a human, not a round.
 REVIEW_RE = re.compile(r"^r(\d+)\s+(sent-back|accepted|escalated)\b")
 REVIEW_CAP = 2
 
@@ -362,7 +363,7 @@ def render(data: dict, color: bool, width: int) -> str:
     if revising:
         for t in revising:
             last = reviews(t)[-1] if reviews(t) else "no review recorded"
-            warn = style(f"  ⚠ cap hit ({REVIEW_CAP} rounds) — escalate", C.RED, enabled=color) if cap_hit(t) else ""
+            warn = style(f"  ⚠ final round ({REVIEW_CAP}/{REVIEW_CAP}) — escalate if still not right", C.RED, enabled=color) if cap_hit(t) else ""
             line("  " + style(t["id"], C.MAGENTA, enabled=color) + warn + style(f"  — {truncate(last, max(width - len(t['id']) - 8, 20))}", C.DIM, enabled=color))
     else:
         line(style("  (none)", C.DIM, enabled=color))
