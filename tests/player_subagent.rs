@@ -228,6 +228,63 @@ fn finish_happy_path_is_tested_with_a_note_sent() {
     assert!(sent.iter().any(|(slug, msg)| slug == "x" && msg.contains("awaiting director review")), "{sent:?}");
 }
 
+/// Once a task is accepted, its worktree — and the local branch that
+/// checked it out in the shared subagent workspace — should be gone: the
+/// hub's own `task/<slug>` ref is the permanent record (spec §8.1), so
+/// leaving every finished task's worktree registered forever in the one
+/// shared workspace repo would grow its bookkeeping without bound.
+#[test]
+fn accept_removes_the_subagent_worktree() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    plan_and_post(&repo, &mut player, "x");
+    let clone_dir = paths::subagent_clone(&repo.director_path(), "x");
+    assert!(clone_dir.exists(), "worktree should exist right after launch");
+
+    commit_in_clone(&repo, "x", "feature.txt", "done\n", "finish work");
+    player.tick().expect("finish tick should succeed");
+    assert_eq!(task_status(&hub, "x"), Status::Tested);
+
+    director_pull_task_branch(repo.path(), "x");
+    commit_empty(repo.path(), "accept: looks good");
+    let report = player.tick().expect("accept tick should succeed");
+    assert_eq!(report.imported[0].2, Transition::Accept, "{report}");
+
+    assert!(!clone_dir.exists(), "worktree should be removed once accepted");
+    let workspace = Git::new(paths::subagent_workspace(&repo.director_path()));
+    assert!(!workspace.ref_exists("refs/heads/task/x"), "the workspace's local branch should be dropped too");
+}
+
+/// Same cleanup, via retire instead of accept — an escalated task's
+/// worktree shouldn't linger either.
+#[test]
+fn retire_of_an_escalated_task_removes_the_subagent_worktree() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    plan_and_post(&repo, &mut player, "blk");
+    let clone_dir = paths::subagent_clone(&repo.director_path(), "blk");
+    assert!(clone_dir.exists(), "worktree should exist right after launch");
+
+    block_in_clone(&repo, "blk", "block: cannot be done as specified\n\nThe API this needs doesn't exist.");
+    player.tick().expect("block tick should succeed");
+    assert_eq!(task_status(&hub, "blk"), Status::Escalated);
+
+    director_pull_task_branch(repo.path(), "blk");
+    commit_empty(repo.path(), "retire: dead end, replanning");
+    let report = player.tick().expect("retire tick should succeed");
+    assert_eq!(report.imported[0].2, Transition::Retire, "{report}");
+
+    assert!(!clone_dir.exists(), "worktree should be removed once retired");
+    let workspace = Git::new(paths::subagent_workspace(&repo.director_path()));
+    assert!(!workspace.ref_exists("refs/heads/task/blk"), "the workspace's local branch should be dropped too");
+}
+
 #[test]
 fn finish_modifying_a_pinned_file_is_rejected_with_pins_and_relayed() {
     let repo = director_repo();

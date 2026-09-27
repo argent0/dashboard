@@ -934,8 +934,10 @@ impl<S: Sessions> Player<S> {
         report.imported.push(("refs/heads/main".to_string(), merge_sha, Transition::MergeAccept));
 
         // The task branch itself stays in the hub as a permanent record
-        // (spec §9); only the subagent's live session ends.
+        // (spec §9); only the subagent's live session and its now-unneeded
+        // worktree end.
         self.sessions.kill(slug);
+        self.cleanup_subagent_clone(slug);
         Ok(())
     }
 
@@ -961,6 +963,7 @@ impl<S: Sessions> Player<S> {
         report.imported.push((format!("refs/retired/{slug}"), candidate.to_string(), Transition::Retire));
 
         self.sessions.kill(slug);
+        self.cleanup_subagent_clone(slug);
         Ok(())
     }
 
@@ -1166,6 +1169,46 @@ impl<S: Sessions> Player<S> {
         let out = Git::new(clone_dir).run(&["rev-parse", "--git-dir"]).map_err(|e| e.to_string())?;
         let dir = PathBuf::from(out);
         Ok(if dir.is_absolute() { dir } else { clone_dir.join(dir) })
+    }
+
+    /// Removes `slug`'s subagent worktree and its local branch in the
+    /// shared workspace repo (`paths::subagent_workspace`), once its task
+    /// is finished (accepted or retired). The hub's own `refs/heads/
+    /// task/<slug>` (or `refs/retired/<slug>`) stays forever as the
+    /// permanent record (spec §8.1) — the worktree was only ever scratch
+    /// space for the subagent to work in, so nothing is lost by reclaiming
+    /// it. Unlike a plain clone (self-contained, harmless to leave forever),
+    /// a worktree's administrative footprint lives *inside* the shared
+    /// workspace repo, so leaving every finished task's worktree and branch
+    /// registered there would grow that one repo's bookkeeping without
+    /// bound over a long-lived project.
+    ///
+    /// Best-effort and silent on the common no-op cases (the task was never
+    /// launched, or the workspace itself doesn't exist yet); a real removal
+    /// failure is only a warning; the task's own transition already
+    /// succeeded by the time this runs, so it's too late for this to be a
+    /// rejection.
+    fn cleanup_subagent_clone(&self, slug: &str) {
+        let clone_dir = paths::subagent_clone(&self.director, slug);
+        if !clone_dir.exists() {
+            return;
+        }
+        let workspace_dir = paths::subagent_workspace(&self.director);
+        if !workspace_dir.join(".git").exists() {
+            return;
+        }
+        let workspace = Git::new(&workspace_dir);
+        let Ok(clone_str) = path_str(&clone_dir) else {
+            eprintln!("dashboard: task/{slug}'s clone {} is not valid UTF-8, leaving it in place", clone_dir.display());
+            return;
+        };
+        if let Err(e) = workspace.run(&["worktree", "remove", "--force", clone_str]) {
+            eprintln!("dashboard: removing task/{slug}'s worktree: {e}");
+            return;
+        }
+        // Now safe to drop: the worktree that checked it out is gone, and
+        // the hub's own ref is the permanent record, not this one.
+        let _ = workspace.run(&["branch", "-D", &format!("task/{slug}")]);
     }
 
     /// Writes the player's preamble plus `tasks/<slug>/prompt.md` at `tip`
