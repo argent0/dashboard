@@ -1,6 +1,5 @@
 // XDG-based on-disk layout for a project's dashboard home (hub, subagent
 // clones, player scratch worktree, event log, director cursor).
-#![allow(dead_code)]
 
 use crate::git::Git;
 use std::path::{Path, PathBuf};

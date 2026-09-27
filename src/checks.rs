@@ -3,7 +3,6 @@
 // number of times, and caches the verdict as a git note on the checked
 // commit so rendering and repeated finish-claims never re-run tests for a
 // commit already seen.
-#![allow(dead_code)]
 
 use crate::config::{self, Check};
 use crate::git::Git;

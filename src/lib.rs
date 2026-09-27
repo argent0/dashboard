@@ -6,7 +6,7 @@ pub mod config;
 pub mod git;
 pub mod paths;
 pub mod ui;
-pub mod legacy;
+pub mod render;
 pub mod init;
 pub mod checks;
 pub mod records;

@@ -5,7 +5,6 @@
 // `refs/notes/dashboard-*`. No transition validation lives here — that's the
 // player's job (steps 5-6); this module only records outcomes and reads them
 // back.
-#![allow(dead_code)]
 
 use crate::config::{self, Reason};
 use crate::git::Git;

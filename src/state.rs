@@ -3,7 +3,6 @@
 // task's subagent tmux session is alive. Nothing here mutates the hub — the
 // player (steps 5-6) does the writing; this module and src/records.rs only
 // read it back.
-#![allow(dead_code)]
 
 use crate::checks::{self, SuiteResult};
 use crate::config::{self, Reason, RoadmapConfig, TaskConfig};
@@ -72,6 +71,12 @@ pub struct TaskState {
     pub post_mortem: Option<String>,
     /// Cached check results at `tip`, read-only (never runs anything).
     pub suite: Option<SuiteResult>,
+    /// Whether this task's subagent tmux session is alive right now — the
+    /// same `live_session` call `derive` uses to distinguish `posted` from
+    /// `in_progress`, but recorded for every task so the renderer can show
+    /// it in the in-flight block even once the task has moved past `posted`
+    /// (the session persists across send-backs, spec §9).
+    pub alive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +85,9 @@ pub struct HubState {
     pub main_tip: String,
     pub tasks: Vec<TaskState>,
     pub rejections: Vec<RejectionRecord>,
+    /// `dashboard.project` from the hub's git config — used to name tmux
+    /// sessions for display, and as the header's fallback title.
+    pub project: String,
 }
 
 // --------------------------------------------------------------------------
@@ -98,6 +106,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
     let accepted = records::accepted_tasks(hub, &main_tip);
     let retired: Vec<String> = records::retired_slugs(hub);
     let rejections = records::rejections(hub);
+    let project = hub.config_get("dashboard.project").unwrap_or_default();
 
     // Every slug we know about: a live task branch, a retirement, or an
     // accepted merge (covering a hand-built or unusual hub where the branch
@@ -124,7 +133,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         a_idx.cmp(&b_idx).then_with(|| a.slug.cmp(&b.slug))
     });
 
-    Ok(HubState { roadmap, main_tip, tasks, rejections })
+    Ok(HubState { roadmap, main_tip, tasks, rejections, project })
 }
 
 /// The tip to read `slug`'s state from: the retirement, else the live task
@@ -152,6 +161,7 @@ fn derive_task(
 ) -> Result<TaskState, String> {
     let is_retired = retired.iter().any(|s| s == slug);
     let is_accepted = accepted.contains_key(slug);
+    let alive = live_session(slug);
 
     let tip = task_tip(hub, slug, accepted, retired).ok_or_else(|| format!("no branch, retirement, or merge found for task {slug}"))?;
 
@@ -199,7 +209,7 @@ fn derive_task(
             Some(Transition::Finish) => Status::Tested,
             Some(Transition::SendBack) => Status::InRevision,
             Some(Transition::Post) => {
-                if live_session(slug) {
+                if alive {
                     Status::InProgress
                 } else {
                     Status::Posted
@@ -223,7 +233,7 @@ fn derive_task(
         }
     };
 
-    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite })
+    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite, alive })
 }
 
 /// Escalation causes that aren't already covered by retired/accepted: a

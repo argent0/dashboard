@@ -1,6 +1,5 @@
 // Thin synchronous wrapper around the `git` CLI (spec.md's player shells out
 // to git rather than linking a git library).
-#![allow(dead_code)]
 
 use std::io::Write;
 use std::path::PathBuf;

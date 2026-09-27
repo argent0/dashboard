@@ -1,9 +1,7 @@
 // roadmap.toml / tests.toml / task.toml schemas (spec.md §6.2, §8.2, §10),
 // with serde defaults so every section and field is optional.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::str::FromStr;
 
 // --------------------------------------------------------------------------
@@ -234,31 +232,16 @@ pub(crate) fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> 
     toml::from_str(s).map_err(|e| e.to_string())
 }
 
-pub(crate) fn load_roadmap_config(path: &Path) -> Result<RoadmapConfig, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    roadmap_config_from_str(&text)
-}
-
 pub(crate) fn tests_config_from_str(s: &str) -> Result<TestsConfig, String> {
     let cfg: TestsConfig = toml::from_str(s).map_err(|e| e.to_string())?;
     cfg.validate()?;
     Ok(cfg)
 }
 
-pub(crate) fn load_tests_config(path: &Path) -> Result<TestsConfig, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    tests_config_from_str(&text)
-}
-
 pub(crate) fn task_config_from_str(s: &str) -> Result<TaskConfig, String> {
     let cfg: TaskConfig = toml::from_str(s).map_err(|e| e.to_string())?;
     cfg.validate()?;
     Ok(cfg)
-}
-
-pub(crate) fn load_task_config(path: &Path) -> Result<TaskConfig, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    task_config_from_str(&text)
 }
 
 // --------------------------------------------------------------------------

@@ -6,7 +6,6 @@
 // player's (src/player.rs) job; this module only records and reads events
 // back, plus the heartbeat file `dashboard wait` uses to notice a dead
 // player.
-#![allow(dead_code)]
 
 use crate::paths::Home;
 use serde::{Deserialize, Serialize};

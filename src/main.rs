@@ -1,6 +1,8 @@
-// Console dashboard for a director/player/subagent roadmap tracked in git
-// (spec.md), plus — until step 8 of the migration plan — the legacy
-// tasks.yaml renderer (src/legacy.rs) that this CLI grew up rendering.
+// The player for a git-hub-backed roadmap loop (spec.md): imports and
+// validates director/subagent commits, runs every check itself, launches
+// subagents in tmux, and merges accepted work — plus `dashboard status`
+// (the default when no subcommand is given), which renders the roadmap
+// purely from what's derived from the hub (src/state.rs, src/render.rs).
 //
 // This binary is a thin CLI over the `dashboard` library crate (src/lib.rs);
 // integration tests in tests/ exercise the library directly.
@@ -8,24 +10,18 @@
 use clap::{Parser, Subcommand};
 use dashboard::git::Git;
 use dashboard::paths::Home;
-use dashboard::{events, init, legacy, paths, player, ui};
+use dashboard::{events, init, paths, player, render, state, ui};
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // --------------------------------------------------------------------------
 // CLI
 // --------------------------------------------------------------------------
 
-fn default_tasks_file() -> Option<PathBuf> {
-    for candidate in [Path::new("docs/roadmap/tasks.yaml"), Path::new("tasks.yaml")] {
-        if candidate.exists() {
-            return std::fs::canonicalize(candidate).ok();
-        }
-    }
-    None
-}
-
-/// Console dashboard for a project's roadmap.
+/// The player for a git-hub-backed roadmap loop: imports and validates
+/// director/subagent commits, runs every check itself, launches subagents in
+/// tmux, and merges accepted work. With no subcommand, renders the roadmap
+/// derived from the hub (see spec.md).
 #[derive(Parser)]
 #[command(name = "dashboard")]
 struct Args {
@@ -38,18 +34,12 @@ struct Args {
     #[arg(long, global = true)]
     home: Option<PathBuf>,
 
-    /// Path to tasks.yaml (legacy renderer only; default:
-    /// ./docs/roadmap/tasks.yaml or ./tasks.yaml, resolved against the
-    /// current directory).
-    #[arg(long)]
-    file: Option<PathBuf>,
-
     /// Disable ANSI colors.
-    #[arg(long)]
+    #[arg(long, global = true)]
     no_color: bool,
 
     /// Override detected terminal width.
-    #[arg(long)]
+    #[arg(long, global = true)]
     width: Option<u32>,
 }
 
@@ -62,6 +52,9 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Render the roadmap derived from the hub (spec.md §12). The default
+    /// when no subcommand is given.
+    Status,
     /// Run the player loop: import and validate director/subagent commits,
     /// run checks, and merge accepted/unblocked work (spec.md §5, §9, §11).
     Player {
@@ -97,24 +90,31 @@ fn main() {
 
     match args.command {
         Some(Command::Init { name }) => run_init(name, args.home),
+        Some(Command::Status) | None => run_status(args.home, args.no_color, args.width),
         Some(Command::Player { once, interval }) => run_player(args.home, once, interval),
         Some(Command::Relaunch { slug }) => run_relaunch(args.home, &slug),
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
-        None => run_legacy(args.file, args.no_color, args.width),
     }
 }
 
-/// Builds the real tmux-backed `Sessions` for a resolved home, reading
-/// `dashboard.project` straight from the hub's git config — the same value
-/// `player::Player::open` reads internally, needed here a step earlier since
-/// `TmuxSessions` has to exist before the generic `Player<S>` can be opened.
-fn build_sessions(home: &Home) -> player::TmuxSessions {
-    let hub = Git::new(home.hub());
-    let project = hub.config_get("dashboard.project").unwrap_or_else(|| {
+/// Reads `dashboard.project` straight from the hub's git config, exiting
+/// with a message pointing at `dashboard init` when it's missing (a hub
+/// that wasn't created by `init` at all, or was hand-built by something
+/// else).
+fn hub_project(hub: &Git) -> String {
+    hub.config_get("dashboard.project").unwrap_or_else(|| {
         eprintln!("error: hub is missing dashboard.project — run `dashboard init`");
         std::process::exit(1);
-    });
-    player::TmuxSessions::new(project)
+    })
+}
+
+/// Builds the real tmux-backed `Sessions` for a resolved home — needed a step
+/// earlier than `player::Player::open` (which reads the same config key
+/// internally), since `TmuxSessions` has to exist before the generic
+/// `Player<S>` can be opened.
+fn build_sessions(home: &Home) -> player::TmuxSessions {
+    let hub = Git::new(home.hub());
+    player::TmuxSessions::new(hub_project(&hub))
 }
 
 // --------------------------------------------------------------------------
@@ -136,6 +136,40 @@ fn run_init(name: Option<String>, home: Option<PathBuf>) {
             std::process::exit(1);
         }
     }
+}
+
+// --------------------------------------------------------------------------
+// dashboard status (default subcommand)
+// --------------------------------------------------------------------------
+
+fn run_status(home: Option<PathBuf>, no_color: bool, width: Option<u32>) {
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot read current directory: {e}");
+            std::process::exit(1);
+        }
+    };
+    let home = match paths::resolve_home(home, &cwd) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    let hub = Git::new(home.hub());
+    let project = hub_project(&hub);
+    let hub_state = match state::derive(&hub, &|slug| state::tmux_alive(&state::tmux_session_name(&project, slug))) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e} — run `dashboard init`");
+            std::process::exit(1);
+        }
+    };
+    let events = events::read_all(&home);
+    let width = ui::detect_width(width);
+    let color = !no_color && std::io::stdout().is_terminal();
+    println!("{}", render::render(&hub_state, &events, color, width));
 }
 
 // --------------------------------------------------------------------------
@@ -292,43 +326,4 @@ fn run_wait(home: Option<PathBuf>, timeout: Option<u64>, all: bool) {
 
         std::thread::sleep(WAIT_POLL_INTERVAL);
     }
-}
-
-// --------------------------------------------------------------------------
-// legacy tasks.yaml renderer
-// --------------------------------------------------------------------------
-
-fn run_legacy(file: Option<PathBuf>, no_color: bool, width: Option<u32>) {
-    let file = match file.or_else(default_tasks_file) {
-        Some(f) => f,
-        None => {
-            eprintln!("error: no tasks.yaml found (tried ./docs/roadmap/tasks.yaml and ./tasks.yaml) — pass --file");
-            std::process::exit(1);
-        }
-    };
-    if !file.exists() {
-        eprintln!("error: {} not found", file.display());
-        std::process::exit(1);
-    }
-
-    let text = match std::fs::read_to_string(&file) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: {} could not be read: {e}", file.display());
-            std::process::exit(1);
-        }
-    };
-
-    let data: legacy::Roadmap = match serde_yaml::from_str(&text) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: {} is not valid: {e}", file.display());
-            std::process::exit(1);
-        }
-    };
-
-    let width = ui::detect_width(width);
-    let color = !no_color && std::io::stdout().is_terminal();
-
-    println!("{}", legacy::render(&data, color, width));
 }

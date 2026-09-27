@@ -15,7 +15,6 @@
 // in the fetched range is ever validated — each one is a whole finish claim,
 // spec's "Import semantics"), and relaying subagent rejections and
 // send-backs into its tmux session. Step 7 adds events and `dashboard wait`.
-#![allow(dead_code)]
 
 use crate::checks;
 use crate::config::{self, RoadmapConfig, Reason, TaskConfig};
