@@ -363,17 +363,38 @@ in-flight task with its per-reason strike counts and review round,
 escalated (with cause), orphaned, recent rejections, and retired tasks with
 their post-mortems.
 
-## 13. Parking lot (explicitly not yet decided)
+## 13. Parking lot
 
-- Timeout/crash handling: what the player does if the subagent session
-  hangs, crashes, or never commits.
+Decided by the implementation plan (see CLAUDE.md's "Decisions on the
+spec's parking lot" for the detail behind each pointer):
+
+- **CLI shape**: `dashboard init` / `status` (default) / `player [--once]`
+  / `relaunch <slug>` / `wait` — CLAUDE.md's CLI section.
+- **Hub/clone locations on disk, and how the hub is initialised**: XDG
+  (`$XDG_DATA_HOME/dashboard/<project>/`), created by `dashboard init` —
+  CLAUDE.md's On-disk layout section.
+- **The director must not poll**: `dashboard wait` blocks on an
+  append-only event log until the player has something director-relevant
+  to say — CLAUDE.md's Decisions section.
+- **Auto-relaunch**: deferred. A dead subagent session is shown and emitted
+  as an event, never restarted automatically; `dashboard relaunch <slug>`
+  is the manual trigger — CLAUDE.md's Decisions section.
+- **How a subagent is launched**: `[player] agent_cmd` in `roadmap.toml`
+  (default `claude --dangerously-skip-permissions`), run in a `tmux`
+  session per task, prompt.md passed as its first message — CLAUDE.md's
+  Decisions section.
+
+Still not decided:
+
+- Timeout/crash handling beyond manual relaunch: what the player does if
+  the subagent session hangs, crashes, or never commits, beyond leaving
+  that to the operator via `dashboard relaunch`.
 - Scope enforcement beyond pins: whether the player restricts which
   non-test paths a subagent commit may touch.
 - Suite runtime: the full suite (including multi-run checks) runs at every
   finish and merge; may need caching or subsetting for large projects.
 - Parallel tasks, and with them acceptance conflicts (`main` moving under an
   in-flight task, given agents can't merge or rebase).
-- CLI shape (e.g. `dashboard` renders, `dashboard player` runs the loop),
-  hub/clone locations on disk, and how the hub is initialised.
 - Whether the `dashboard` skill is rewritten as the director's playbook or
-  replaced entirely.
+  replaced entirely (CLAUDE.md's Installing section: it must happen before
+  `cargo install --path .` propagates this version to consumers).

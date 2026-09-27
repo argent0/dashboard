@@ -1,60 +1,221 @@
 # dashboard
 
-A standalone console dashboard for a project's `docs/roadmap/tasks.yaml`
-roadmap file — a progress bar, per-phase breakdown, milestones, an
-"actionable now" list computed from the dependency graph, in-revision and
-blocked sections. This repo isn't scoped to one consumer: it lives outside
-any single project and is installed as a `dashboard` binary on `PATH`
-(`cargo install --path .`), then invoked by other repos and by the
-`~/.claude/skills/dashboard` skill, which drives an entire subagent-loop
-workflow through this exact CLI (`dashboard --no-color`, `--file`, default
-resolution of `./docs/roadmap/tasks.yaml` then `./tasks.yaml`).
+The enforcement point for a subagent-per-task roadmap loop (see `spec.md`,
+the design source of truth). `dashboard` is no longer a stateless renderer
+of a hand-edited `tasks.yaml`: it's the **player** — a bare git hub plus a
+process that imports and validates every commit a director or subagent
+clone produces, runs every check itself, launches subagents in `tmux`,
+counts strikes, merges accepted work, retires dead ends, and renders a
+status that's a pure function of the hub. Nobody writes a status; git (plus
+whether a subagent's session is alive) is the only source of truth. This is
+greenfield: there is no compatibility with the old `tasks.yaml` format, and
+none is planned.
 
-## Current state
-
-Expansion phase. The project started as a byte-for-byte-duplicated Python
-script (`dashboard.py`, pulled out of `api-proxy` and `personal-assistant`),
-was migrated to a single hand-rolled-parser Rust file, and has since picked
-up real dependencies (`serde`/`serde_yaml` for parsing, `clap` for the CLI)
-in place of that hand-rolled code. Treat it as ordinary Rust that can grow
-more crates and more surface as needed — do not reintroduce a zero-deps
-constraint. There's no roadmap of its own (no `docs/roadmap/tasks.yaml`
-here) and no version/compat story with the repos that consume it: this repo
-is the source of truth for the rendering format, and a change here is
-expected to just propagate to every consumer via `cargo install --path .`,
-not to be gated on their needs.
+Installed as a `dashboard` binary on `PATH` (`cargo install --path .`) and
+invoked by other repos' directors and by `~/.claude/skills/dashboard`. See
+"Installing" below before running that — the skill still expects the old
+CLI and file format.
 
 ## Repo layout
 
 ```
-src/main.rs   everything: tasks.yaml schema (serde), rendering, CLI (clap)
-Cargo.toml    serde + serde_yaml (parsing), clap (CLI)
+src/main.rs     CLI (clap): init / status (default) / player / relaunch / wait
+src/lib.rs      the library crate every module below hangs off of
+src/config.rs   roadmap.toml / tests.toml / task.toml schemas (serde) + defaults
+src/git.rs      thin sync wrapper over the `git` CLI (rev-parse, diff, notes, merge-tree, …)
+src/paths.rs    XDG home layout and `--home` / `dashboard.home` resolution
+src/init.rs     `dashboard init`: creates the hub and wires up the director <-> hub links
+src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based result cache
+src/records.rs  provenance/enforcement records: import notes, rejections, pins, retirements, accepted-merge lookup
+src/state.rs    derives every task's status (spec §12) purely from the hub + session liveness
+src/player.rs   the player: fetch, validate, import, launch/relay, merge — spec §5/§7/§9/§11
+src/events.rs   the director-relevant event log, cursor, and heartbeat behind `dashboard wait`
+src/render.rs   renders `state::HubState` + recent events to the status text
+src/ui.rs       styling/width helpers (color codes, bars, truncation, terminal width)
 ```
 
-## tasks.yaml schema
+`Cargo.toml`: `serde`/`serde_json`/`toml` for parsing, `clap` for the CLI;
+`tempfile` as a dev-dependency for the integration tests in `tests/`, which
+build real throwaway git repos. Ordinary Rust that can keep growing more
+crates and surface — there's no zero-deps constraint.
 
-`Roadmap { title, phases: [Phase], tasks: [Task] }`
-- `Phase { id, title?, goal? }`
-- `Task { id, title, status = "pending", phase, depends_on: [id], milestone: bool, reviews: [String], blocked_reason? }`
+## On-disk layout (a project's dashboard home)
 
-`status` is one of `pending`, `in_progress`, `in_revision`, `built`,
-`tested`, `blocked`. "Actionable now" = `status == pending` and every
-`depends_on` id resolves to a task with `status == tested`. A `reviews`
-entry is free-form text matched against `^r(\d+)\s+(sent-back|accepted|escalated)`
-(see `review_verdict`) — `REVIEW_CAP` sent-back rounds on a task is flagged
-as the final round before a human should get involved (`cap_hit`).
+Resolved via `--home`, else `git config dashboard.home` read from the repo
+in the current directory (set by `dashboard init` in the director clone).
+`$XDG_DATA_HOME/dashboard/<project>/` (fallback `~/.local/share/dashboard`)
+unless `--home`/`--name` override it:
 
-Unknown fields in `tasks.yaml` are ignored by serde (no `deny_unknown_fields`)
-so consumer repos can carry extra fields without breaking this tool.
+```
+hub.git             bare repo — the only source of truth (spec §4)
+subagents/<slug>/   one clone per launched task, checked out on task/<slug>
+work/               the player's own scratch worktree for running checks
+events.jsonl        append-only, JSON per line — the director-event log
+director.cursor     the director's last-read event seq (dashboard wait)
+player-state.json   last-seen (status, session-alive) per slug, so a
+                     restarted player doesn't re-emit old events
+player.heartbeat     unix time of the last tick, so `wait` can tell the
+                     player looks dead (missing or >30s old)
+```
 
-## Build, install, run
+## Hub refs and notes
 
-- Build: `cargo build --release`
-- Install/refresh the PATH binary every consumer repo relies on:
-  `cargo install --path .`
-- Run against the current directory's roadmap: `dashboard` (or
-  `dashboard --no-color --file <path>` — see `dashboard --help`)
-- After changing the schema or output format, rebuild, reinstall, and
-  smoke-test against a real `tasks.yaml` from a consumer repo (e.g.
-  `api-proxy/docs/roadmap/tasks.yaml` or `personal-assistant/docs/roadmap/tasks.yaml`)
-  before calling it done — there's no test suite yet.
+```
+refs/heads/main            director-owned; player-only writes except
+                            roadmap.toml / docs_paths commits (spec §5)
+refs/heads/task/<slug>     one per task, never deleted even once accepted
+                            (spec §8.1) — moved, not deleted, on retire
+refs/retired/<slug>        a retired task's branch, moved here by the player
+refs/incoming/director/*   the director clone's main/task/* fetched in,
+                            pre-validation (src/player.rs's `fetch`)
+refs/incoming/subagent/<slug>  a subagent clone's task/<slug>, pre-validation
+refs/dashboard/pins/<slug> the commit pins were computed from (spec §8.3)
+refs/dashboard/escalated/<slug>  set when a send-back would exceed
+                            max_review_rounds (the other escalation causes —
+                            a strike limit, a block: marker — are read
+                            straight off strikes/notes, no separate ref)
+refs/rejected/<scope>/<n>  every rejected commit, kept as evidence
+                            (scope is a task slug, or `_main`)
+```
+
+Notes (JSON payloads, `git notes --ref <ref>`):
+
+```
+refs/notes/dashboard             check-result cache: {"checks": {name: CheckResult}}
+refs/notes/dashboard-imports     provenance per imported commit (actor, transition, slug, at)
+refs/notes/dashboard-rejections  reason/actor/message/at per refs/rejected/* commit
+refs/notes/dashboard-escalations cause/at per refs/dashboard/escalated/<slug>
+```
+
+Git config: the director clone carries `dashboard.home`; the hub carries
+`dashboard.director` (the director clone's path) and `dashboard.project`
+(used to name tmux sessions and as the header's fallback title).
+
+## File schemas
+
+`roadmap.toml` (on `main`):
+```toml
+title = "…"
+docs_paths = ["docs/adr"]        # paths the director may touch on main besides roadmap.toml itself
+
+[[phases]]
+id = "p1"
+title = "…"
+goal = "…"
+
+[limits]
+max_review_rounds = 2            # default 2
+
+[limits.strikes]                 # each defaults to 2 (spec §10)
+history = 2
+ownership = 2
+pins = 2
+suite = 2
+plan = 2
+post = 2
+review = 2
+accept = 2
+retire = 2
+
+[player]
+agent_cmd = "claude --dangerously-skip-permissions"   # default
+```
+
+`tests.toml` (project suite, on `main` and every task branch):
+```toml
+test_paths = ["tests/"]          # the pinned test tree (spec §6.2, §8.3)
+
+[[check]]
+name = "unit"
+cmd = "cargo test"
+runs = 1                         # default; >1 for a threshold check
+min_pass = 1                     # default; must be 1..=runs
+```
+
+`tasks/<slug>/task.toml`:
+```toml
+title = "…"
+phase = "p1"
+milestone = false
+depends_on = ["other-slug"]
+
+[check]                          # the task's own failing-at-post check; added
+name = "…"                       # to tests.toml in the same post commit
+cmd = "…"
+```
+
+Every struct uses `#[serde(default)]` field-by-field, and unknown fields are
+ignored — no `deny_unknown_fields` anywhere.
+
+## CLI
+
+- `dashboard init [--name N]` — run inside the director clone (must have a
+  local `main` with `roadmap.toml`/`tests.toml`). Creates the home, `git
+  clone --bare`s it into `hub.git`, and wires up the two-way config links.
+- `dashboard` / `dashboard status [--no-color] [--width N]` — the default:
+  renders the roadmap derived from the hub.
+- `dashboard player [--once] [--interval SECS]` — the player loop (default
+  interval 2s). `--once` runs a single tick, prints its report, and exits;
+  this is what drives `scripts/e2e.sh` and what a supervisor (systemd timer,
+  cron, a loop) should call if you don't want a long-running process.
+- `dashboard relaunch <slug>` — manually restarts a dead subagent session
+  with the same clone and prompt file. There is no automatic relaunch (see
+  Decisions below); a dead session just shows up in `status` and as a
+  `session_died` event.
+- `dashboard wait [--timeout SECS] [--all]` — the director's blocking
+  listener (see Decisions). Prints every event past the director's cursor,
+  advances it, and exits; `--timeout` exits 2 after N idle seconds; `--all`
+  dumps the whole history without touching the cursor.
+
+`--home`, `--no-color`, and `--width` are global flags valid on every
+subcommand.
+
+## Build, test, install
+
+- `cargo build` / `cargo build --release`
+- `cargo test` — unit tests inline in each module plus real-git integration
+  tests in `tests/*.rs` (throwaway repos in temp dirs via `tests/common/mod.rs`)
+- `scripts/e2e.sh [path-to-binary]` — an end-to-end scenario against the
+  real binary and real `tmux`: a throwaway director repo + hub, a small
+  fake-agent shell script standing in for a real Claude Code subagent, and
+  the full plan/post/launch/finish/send-back/accept/block/escalate/retire/
+  reject loop, asserted via `dashboard status --no-color` and raw hub ref
+  checks. Run it after any change that touches `src/player.rs`,
+  `src/state.rs`, or the on-disk/ref layout — it's the only test that
+  exercises real `tmux` sessions and a real subagent-style fetch/merge/
+  commit cycle.
+- **Installing** (`cargo install --path .`) overwrites the `dashboard`
+  binary every consumer repo and `~/.claude/skills/dashboard` already rely
+  on for the *old* `tasks.yaml` renderer — a format this version no longer
+  understands. Rewrite that skill as a director playbook against this CLI
+  (spec §13) before installing; until then, run this repo's binary from
+  `target/release/dashboard` directly for any project adopting the new
+  model.
+
+## Decisions on the spec's parking lot (§13)
+
+Resolved by the implementation plan (`spec.md` §13 has one-line pointers
+back here):
+
+- **CLI shape**: `init` / `status` (default) / `player [--once]` /
+  `relaunch <slug>` / `wait` — see CLI above.
+- **Hub/clone locations**: XDG (`paths::Home`) — see On-disk layout above.
+  `dashboard init` is how the hub gets created (`src/init.rs`).
+- **`dashboard wait`**: the director's listener, so the director's own
+  session never polls. It blocks on `events.jsonl` past `director.cursor`
+  and returns human-readable lines plus a per-kind hint (e.g. "fetch hub
+  and review it"). `dashboard player` still polls its clones internally —
+  it's a process, so that's fine; only the director-facing side had to stop.
+- **No auto-relaunch**: a dead subagent session is reported (`status`, a
+  `session_died` event) but never restarted automatically. `dashboard
+  relaunch <slug>` is the manual trigger, reusing the existing clone and
+  pins.
+- **`agent_cmd`**: `[player] agent_cmd` in `roadmap.toml`, default `claude
+  --dangerously-skip-permissions`. Launched as `tmux new-session -d -s
+  dash-<project>-<slug> -c <clone> sh -c '<agent_cmd> "$(cat
+  <prompt-file>)"'`; relays go through `tmux load-buffer`/`paste-buffer`/
+  `send-keys` into that same session.
+
+Still undecided (spec §13): timeout/crash handling beyond manual relaunch,
+scope enforcement beyond pins, suite-runtime cost at scale, parallel tasks,
+and the `~/.claude/skills/dashboard` rewrite itself.
