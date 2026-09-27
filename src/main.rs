@@ -8,7 +8,7 @@
 use clap::{Parser, Subcommand};
 use dashboard::git::Git;
 use dashboard::paths::Home;
-use dashboard::{init, legacy, paths, player, ui};
+use dashboard::{events, init, legacy, paths, player, ui};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -78,6 +78,18 @@ enum Command {
         /// The task's slug.
         slug: String,
     },
+    /// The director's listener: blocks until the player appends a new event,
+    /// prints every event past the cursor, advances it, and exits (step 7 —
+    /// the director runs this as a background command instead of polling).
+    Wait {
+        /// Give up (exit 2) after this many seconds with no new events.
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Print the whole event history and exit, without blocking or
+        /// moving the cursor.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 fn main() {
@@ -87,6 +99,7 @@ fn main() {
         Some(Command::Init { name }) => run_init(name, args.home),
         Some(Command::Player { once, interval }) => run_player(args.home, once, interval),
         Some(Command::Relaunch { slug }) => run_relaunch(args.home, &slug),
+        Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
         None => run_legacy(args.file, args.no_color, args.width),
     }
 }
@@ -210,6 +223,74 @@ fn run_relaunch(home: Option<PathBuf>, slug: &str) {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+// --------------------------------------------------------------------------
+// dashboard wait
+// --------------------------------------------------------------------------
+
+/// How often to re-check the event log while blocking. The point isn't a
+/// tight deadline — it's that the director's *own* session never polls; a
+/// background `dashboard wait` doing this internally is fine (step 7).
+const WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn run_wait(home: Option<PathBuf>, timeout: Option<u64>, all: bool) {
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot read current directory: {e}");
+            std::process::exit(1);
+        }
+    };
+    let home = match paths::resolve_home(home, &cwd) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if all {
+        for event in events::read_all(&home) {
+            println!("{}\n", event.human());
+        }
+        return;
+    }
+
+    let cursor = events::read_cursor(&home);
+    let deadline = timeout.map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
+    let mut warned_stale = false;
+
+    loop {
+        let new: Vec<_> = events::read_all(&home).into_iter().filter(|e| e.seq > cursor).collect();
+        if !new.is_empty() {
+            for event in &new {
+                println!("{}\n", event.human());
+            }
+            let last_seq = new.last().expect("checked non-empty above").seq;
+            if let Err(e) = events::write_cursor(&home, last_seq) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+
+        if !warned_stale {
+            if events::heartbeat_stale(&home) {
+                eprintln!("player doesn't seem to be running — start `dashboard player`");
+            }
+            warned_stale = true;
+        }
+
+        if let Some(deadline) = deadline {
+            if std::time::Instant::now() >= deadline {
+                eprintln!("no events within {} s", timeout.expect("deadline implies timeout"));
+                std::process::exit(2);
+            }
+        }
+
+        std::thread::sleep(WAIT_POLL_INTERVAL);
     }
 }
 

@@ -9,6 +9,7 @@ use crate::checks::{self, SuiteResult};
 use crate::config::{self, Reason, RoadmapConfig, TaskConfig};
 use crate::git::Git;
 use crate::records::{self, RejectionRecord, Transition};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
@@ -16,7 +17,11 @@ use std::process::Command;
 // Status (spec §12)
 // --------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Serialize`/`Deserialize` (snake_case, matching `as_str`) so the player can
+/// persist a slug's last-seen status across restarts (`src/events.rs`,
+/// `player-state.json`) without re-deriving history it already reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     Pending,
     Orphaned,

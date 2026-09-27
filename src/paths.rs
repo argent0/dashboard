@@ -50,6 +50,19 @@ impl Home {
     pub fn director_cursor(&self) -> PathBuf {
         self.root.join("director.cursor")
     }
+
+    /// The player's own per-tick status snapshot (spec.md's step 7: `last`,
+    /// persisted so a restart doesn't re-emit events for statuses the
+    /// director has already been told about).
+    pub fn player_state(&self) -> PathBuf {
+        self.root.join("player-state.json")
+    }
+
+    /// Written every tick with the current unix time, so `dashboard wait`
+    /// can tell the director when the player itself looks dead.
+    pub fn heartbeat(&self) -> PathBuf {
+        self.root.join("player.heartbeat")
+    }
 }
 
 /// Resolves the dashboard home: the explicit `--home` path if given, else
@@ -122,6 +135,8 @@ mod tests {
         assert_eq!(home.work(), PathBuf::from("/data/dashboard/myproj/work"));
         assert_eq!(home.events(), PathBuf::from("/data/dashboard/myproj/events.jsonl"));
         assert_eq!(home.director_cursor(), PathBuf::from("/data/dashboard/myproj/director.cursor"));
+        assert_eq!(home.player_state(), PathBuf::from("/data/dashboard/myproj/player-state.json"));
+        assert_eq!(home.heartbeat(), PathBuf::from("/data/dashboard/myproj/player.heartbeat"));
     }
 
     #[test]

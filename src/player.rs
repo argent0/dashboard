@@ -19,6 +19,7 @@
 
 use crate::checks;
 use crate::config::{self, RoadmapConfig, Reason, TaskConfig};
+use crate::events::{self, EventKind};
 use crate::git::Git;
 use crate::paths::Home;
 use crate::records::{self, Actor, RejectionRecord, Transition};
@@ -272,6 +273,16 @@ pub struct Player<S: Sessions> {
     project: String,
     runner: checks::Runner,
     sessions: S,
+    /// Every slug's status and session-liveness as of the end of the last
+    /// tick that ran `emit_events`, persisted to `home.player_state()` so a
+    /// restart doesn't re-emit events for statuses the director has already
+    /// been told about (step 7).
+    last: BTreeMap<String, (Status, bool)>,
+    /// True until the first `emit_events` call completes: with no state file
+    /// on disk at `open` time, that first call only initializes `last` (spec:
+    /// "The very first run with no state file initializes silently, without
+    /// emitting").
+    first_run: bool,
 }
 
 impl<S: Sessions> Player<S> {
@@ -282,7 +293,8 @@ impl<S: Sessions> Player<S> {
         let director = hub.config_get("dashboard.director").ok_or_else(|| "hub is missing dashboard.director — run `dashboard init`".to_string())?;
         let project = hub.config_get("dashboard.project").ok_or_else(|| "hub is missing dashboard.project — run `dashboard init`".to_string())?;
         let runner = checks::Runner::new(&home);
-        Ok(Self { home, hub, director: PathBuf::from(director), project, runner, sessions })
+        let (last, first_run) = load_player_state(&home);
+        Ok(Self { home, hub, director: PathBuf::from(director), project, runner, sessions, last, first_run })
     }
 
     /// Read access to the sessions backend, so tests using `NullSessions`
@@ -290,6 +302,14 @@ impl<S: Sessions> Player<S> {
     /// mutate it from outside `tick`.
     pub fn sessions(&self) -> &S {
         &self.sessions
+    }
+
+    /// Mutable access to the sessions backend. Only meant for tests that
+    /// need to simulate a session dying on its own — e.g. removing a slug
+    /// from `NullSessions::alive` directly, as opposed to going through
+    /// `kill` (see `NullSessions`'s own doc comment).
+    pub fn sessions_mut(&mut self) -> &mut S {
+        &mut self.sessions
     }
 
     /// One pass: fetch, import director `main`, import director `task/*`
@@ -306,7 +326,58 @@ impl<S: Sessions> Player<S> {
         self.launch_subagents(&mut report)?;
         self.import_subagents(&mut report)?;
         self.unblock_merges(&mut report)?;
+        self.emit_events(&report)?;
         Ok(report)
+    }
+
+    // ---- events (spec's "the director must not poll"; step 7) ----
+
+    /// Writes the heartbeat, emits `DirectorRejected`/`PlayerError` straight
+    /// from this tick's report, then diffs every task's (status, session
+    /// alive) against `self.last` to emit `Tested`/`Escalated`/`Ready`/
+    /// `Accepted`/`Retired`/`SessionDied`. `self.last` (and the "first run"
+    /// silence) is what makes this idempotent across player restarts.
+    fn emit_events(&mut self, report: &TickReport) -> Result<(), String> {
+        events::write_heartbeat(&self.home)?;
+
+        for rej in &report.rejected {
+            if rej.actor == Actor::Director {
+                let slug = if rej.scope == "_main" { None } else { Some(rej.scope.as_str()) };
+                events::append(&self.home, EventKind::DirectorRejected, slug, &rej.message)?;
+            }
+        }
+        for err in &report.errors {
+            events::append(&self.home, EventKind::PlayerError, None, err)?;
+        }
+
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let mut next: BTreeMap<String, (Status, bool)> = BTreeMap::new();
+        for task in &hub_state.tasks {
+            let alive = self.sessions.alive(&task.slug);
+            let prev = self.last.get(&task.slug).copied();
+            next.insert(task.slug.clone(), (task.status, alive));
+
+            if self.first_run {
+                continue;
+            }
+
+            if prev.map(|(s, _)| s) != Some(task.status) {
+                if let Some((kind, message)) = status_event(task) {
+                    events::append(&self.home, kind, Some(&task.slug), &message)?;
+                }
+            }
+
+            let session_just_died = matches!(prev, Some((_, true))) && !alive;
+            let still_in_flight = matches!(task.status, Status::Posted | Status::InProgress | Status::InRevision);
+            if session_just_died && still_in_flight {
+                events::append(&self.home, EventKind::SessionDied, Some(&task.slug), &format!("task/{}'s subagent session died", task.slug))?;
+            }
+        }
+
+        self.last = next;
+        self.first_run = false;
+        save_player_state(&self.home, &self.last)?;
+        Ok(())
     }
 
     // ---- fetch ----
@@ -1233,6 +1304,47 @@ impl<S: Sessions> Player<S> {
         }
         Ok(())
     }
+}
+
+// --------------------------------------------------------------------------
+// Player state persistence (step 7: `home.root/player-state.json`)
+// --------------------------------------------------------------------------
+
+/// Loads `last` from `home.player_state()`. The bool is `first_run`: true
+/// when no file was found at all (as opposed to a file that happens to parse
+/// to an empty map), which is the "very first run" spec's event emission
+/// stays silent for.
+fn load_player_state(home: &Home) -> (BTreeMap<String, (Status, bool)>, bool) {
+    match std::fs::read_to_string(home.player_state()) {
+        Ok(text) => (serde_json::from_str(&text).unwrap_or_default(), false),
+        Err(_) => (BTreeMap::new(), true),
+    }
+}
+
+fn save_player_state(home: &Home, last: &BTreeMap<String, (Status, bool)>) -> Result<(), String> {
+    let path = home.player_state();
+    let json = serde_json::to_string(last).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The event a task's *new* status is worth telling the director about, and
+/// its message (spec step 7). Statuses outside this set (pending, orphaned,
+/// posted, in_progress, in_revision) never get their own event — they're
+/// either not director-actionable or already covered by the transition that
+/// caused them (e.g. `in_revision` is the director's own send-back).
+fn status_event(task: &state::TaskState) -> Option<(EventKind, String)> {
+    match task.status {
+        Status::Tested => Some((EventKind::Tested, "finish accepted — tests passed, awaiting director review".to_string())),
+        Status::Escalated => Some((EventKind::Escalated, task.escalation.clone().unwrap_or_default())),
+        Status::Ready => Some((EventKind::Ready, format!("task/{}'s dependencies are all accepted and merged in", task.slug))),
+        Status::Accepted => Some((EventKind::Accepted, format!("task/{} accepted and merged into main", task.slug))),
+        Status::Retired => Some((EventKind::Retired, first_line(task.post_mortem.as_deref().unwrap_or("")))),
+        Status::Pending | Status::Orphaned | Status::Posted | Status::InProgress | Status::InRevision => None,
+    }
+}
+
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").to_string()
 }
 
 // --------------------------------------------------------------------------

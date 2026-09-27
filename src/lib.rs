@@ -12,3 +12,4 @@ pub mod checks;
 pub mod records;
 pub mod state;
 pub mod player;
+pub mod events;
