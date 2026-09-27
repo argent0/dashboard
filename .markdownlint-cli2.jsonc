@@ -1,0 +1,19 @@
+// Markdown lint config: every Markdown file is capped at 100 lines of at
+// most 80 characters (tables exempt from the width limit).
+{
+  "config": {
+    "default": true,
+    "MD013": {
+      "line_length": 80,
+      "code_blocks": true,
+      "headings": true,
+      "tables": false,
+      "strict": true
+    },
+    "max-lines": { "maximum": 100 }
+  },
+  "customRules": ["./.markdownlint/max-lines.cjs"],
+  "globs": ["**/*.md"],
+  // Predate this config; new Markdown files must comply.
+  "ignores": ["target/**", "CLAUDE.md", "spec.md", "prompt.md"]
+}
