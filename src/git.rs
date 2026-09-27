@@ -109,6 +109,13 @@ impl Git {
         self.run(&["update-ref", "-d", name]).map(|_| ())
     }
 
+    /// Compare-and-delete: removes `name` only if it currently points at
+    /// `old` (spec.md §9's retire transition: "delete the branch with an
+    /// old-value check").
+    pub fn delete_ref_cas(&self, name: &str, old: &str) -> Result<(), GitError> {
+        self.run(&["update-ref", "-d", name, old]).map(|_| ())
+    }
+
     /// Returns `(refname, sha)` pairs for every ref matching `pattern`.
     pub fn for_each_ref(&self, pattern: &str) -> Vec<(String, String)> {
         match self.run(&["for-each-ref", "--format=%(objectname) %(refname)", pattern]) {

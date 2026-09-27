@@ -1,11 +1,16 @@
 // The player (spec.md §4-§5, §9, §11): the only writer of the hub. Each tick
 // fetches the director's clone, imports and validates its commits onto the
-// hub's refs, and runs the player's own merges. Step 5a covers the skeleton,
-// history rules, director `main` (docs-only commits) and `task/*` branches'
-// plan/replan transitions, and unblock merges. Step 5b fills in post,
-// send-back, accept and retire (see the `// step 5b` dispatch point below);
-// step 6 adds subagent import and tmux launch (see `// step 6` in `tick`);
-// step 7 adds events.
+// hub's refs, and runs the player's own merges. Step 5a covered the
+// skeleton, history rules, director `main` (docs-only commits) and `task/*`
+// branches' plan/replan transitions, and unblock merges. Step 5b (this step)
+// fills in the rest of the director-side transitions on an existing branch:
+// post, send-back, accept and retire, plus the marker-commit dispatch
+// (`accept:`/`retire:`, and rejecting any other empty commit as `ownership`
+// since only the subagent may write `block:`). Every validation is against
+// the *cumulative* diff from the hub's current tip to the candidate, exactly
+// as in 5a, so a fixing commit on top of a rejected one still has a chance.
+// Step 6 adds subagent import and tmux launch (see `// step 6` markers in
+// `tick` and `try_post`); step 7 adds events.
 #![allow(dead_code)]
 
 use crate::checks;
@@ -58,20 +63,25 @@ impl Sessions for NullSessions {
 
 /// What one `Player::tick` call did. `imported` is `(ref, sha, transition)`
 /// for every commit the player advanced a hub ref to (director docs commits
-/// on main, plans, replans, and the player's own unblock merges land here
-/// too via their `Transition::MergeUnblock` note). `merges` carries a short
-/// human line per unblock-merge attempt, success or failure (spec §11)  —
-/// there's no reason to model it more richly than the CLI's report needs.
+/// on main, plans, replans, and the player's own unblock/accept merges land
+/// here too via their `Transition::MergeUnblock`/`MergeAccept` notes).
+/// `merges` carries a short human line per unblock-merge attempt, success or
+/// failure (spec §11) — there's no reason to model it more richly than the
+/// CLI's report needs. `escalated` is `(slug, cause)` for a send-back that
+/// would exceed `max_review_rounds` (spec §10): the offending commit is
+/// deliberately not imported and not recorded as a rejection, so it needs
+/// its own place in the report.
 #[derive(Debug, Default)]
 pub struct TickReport {
     pub imported: Vec<(String, String, Transition)>,
     pub rejected: Vec<RejectionRecord>,
     pub merges: Vec<String>,
+    pub escalated: Vec<(String, String)>,
 }
 
 impl TickReport {
     pub fn is_empty(&self) -> bool {
-        self.imported.is_empty() && self.rejected.is_empty() && self.merges.is_empty()
+        self.imported.is_empty() && self.rejected.is_empty() && self.merges.is_empty() && self.escalated.is_empty()
     }
 }
 
@@ -86,6 +96,9 @@ impl fmt::Display for TickReport {
         }
         for rej in &self.rejected {
             lines.push(format!("rejected {} [{}]: {}", rej.scope, rej.reason.as_str(), rej.message));
+        }
+        for (slug, cause) in &self.escalated {
+            lines.push(format!("escalated {slug}: {cause}"));
         }
         lines.extend(self.merges.iter().cloned());
         write!(f, "{}", lines.join("\n"))
@@ -118,6 +131,13 @@ impl<S: Sessions> Player<S> {
         let project = hub.config_get("dashboard.project").ok_or_else(|| "hub is missing dashboard.project — run `dashboard init`".to_string())?;
         let runner = checks::Runner::new(&home);
         Ok(Self { home, hub, director: PathBuf::from(director), project, runner, sessions })
+    }
+
+    /// Read access to the sessions backend, so tests using `NullSessions`
+    /// can assert on `sent`/`killed` without the player exposing any way to
+    /// mutate it from outside `tick`.
+    pub fn sessions(&self) -> &S {
+        &self.sessions
     }
 
     /// One pass: fetch, import director `main`, import director `task/*`
@@ -371,45 +391,307 @@ impl<S: Sessions> Player<S> {
         self.validate_task_config(slug, main_tip, &cfg)
     }
 
+    /// Dispatches a single cumulative candidate `C` on an existing
+    /// `task/<slug>` branch (tip `T` before this commit) to whichever
+    /// transition its shape matches (spec §9): an empty commit is a marker
+    /// (`accept:`/`retire:`, or `ownership` for anything else empty, e.g. a
+    /// director-authored `block:`); a non-empty commit is a `post` (adds
+    /// `prompt.md`), a `replan` (touches only `task.toml`, on a not-yet-
+    /// posted branch), a `send-back` (the task is `tested`), or `ownership`
+    /// (anything else, including any commit while the task is in a status
+    /// the director may not touch).
     fn try_existing(&mut self, slug: &str, tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        let pending_family = hub_state
-            .tasks
-            .iter()
-            .find(|t| t.slug == slug)
-            .map(|t| matches!(t.status, Status::Pending | Status::Ready | Status::Orphaned))
-            .unwrap_or(false);
+        let status = hub_state.tasks.iter().find(|t| t.slug == slug).map(|t| t.status);
 
-        let prompt_path = format!("tasks/{slug}/prompt.md");
-        let has_prompt = self.hub.blob_hash(candidate, &prompt_path).is_some();
         let diffs = self.hub.diff_names(tip, candidate);
-        let task_toml_path = format!("tasks/{slug}/task.toml");
-        let only_task_toml = diffs.len() == 1 && diffs[0].1 == task_toml_path;
+        let cumulative_empty = diffs.is_empty();
 
-        if pending_family && !has_prompt && only_task_toml {
-            match self.validate_replan(slug, tip, candidate) {
-                Ok(()) => {
-                    let hub_ref = format!("refs/heads/task/{slug}");
-                    self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
-                    records::record_import(&self.hub, candidate, Actor::Director, Transition::Replan, Some(slug))?;
-                    report.imported.push((hub_ref, candidate.to_string(), Transition::Replan));
+        if self.hub.is_empty_commit(candidate) {
+            return self.try_marker(slug, tip, candidate, cumulative_empty, status, report);
+        }
+
+        match status {
+            Some(Status::Pending | Status::Ready | Status::Orphaned) => {
+                let prompt_path = format!("tasks/{slug}/prompt.md");
+                let has_prompt = self.hub.blob_hash(candidate, &prompt_path).is_some();
+                if has_prompt {
+                    return self.try_post(slug, tip, candidate, status.unwrap(), &hub_state, report);
                 }
-                Err(msg) => {
-                    let rec = records::record_rejection(&self.hub, slug, candidate, Reason::Plan, Actor::Director, &msg)?;
-                    report.rejected.push(rec);
+                let task_toml_path = format!("tasks/{slug}/task.toml");
+                if diffs.len() == 1 && diffs[0].1 == task_toml_path {
+                    return self.try_replan(slug, tip, candidate, report);
+                }
+                let msg = format!(
+                    "task/{slug} is {}: this commit adds no prompt.md (not a post) and touches more than task.toml (not a replan)",
+                    status.unwrap().as_str()
+                );
+                self.reject(slug, candidate, Reason::Ownership, msg, report)
+            }
+            Some(Status::Tested) => self.try_send_back(slug, tip, candidate, &diffs, &hub_state, report),
+            Some(other) => {
+                let msg = format!("task/{slug} is {} — the director may not commit until the subagent finishes", other.as_str());
+                self.reject(slug, candidate, Reason::Ownership, msg, report)
+            }
+            None => {
+                let msg = format!("task/{slug} has no derivable status; refusing to guess a transition");
+                self.reject(slug, candidate, Reason::Ownership, msg, report)
+            }
+        }
+    }
+
+    /// Records a rejection under `reason` for `candidate` and pushes it onto
+    /// the report. Shared by every `try_existing` sub-handler's error path.
+    fn reject(&mut self, slug: &str, candidate: &str, reason: Reason, msg: String, report: &mut TickReport) -> Result<(), String> {
+        let rec = records::record_rejection(&self.hub, slug, candidate, reason, Actor::Director, &msg)?;
+        report.rejected.push(rec);
+        Ok(())
+    }
+
+    /// An empty commit on an existing branch: a marker (spec §5, §9). Only
+    /// meaningful when the cumulative diff from `tip` is *also* empty — if
+    /// it isn't, a rejected non-empty commit sits between `tip` and
+    /// `candidate` (this empty commit is just the tip of that same broken
+    /// stack), so it's rejected as `ownership` rather than silently treated
+    /// as a marker on old, already-rejected content.
+    fn try_marker(&mut self, slug: &str, tip: &str, candidate: &str, cumulative_empty: bool, status: Option<Status>, report: &mut TickReport) -> Result<(), String> {
+        if !cumulative_empty {
+            let msg = format!(
+                "task/{slug} commit {} is an empty marker, but its content since {} isn't (a rejected non-empty commit sits between): fix that commit instead",
+                short(candidate),
+                short(tip)
+            );
+            return self.reject(slug, candidate, Reason::Ownership, msg, report);
+        }
+
+        let subject = self.hub.commit_subject(candidate).unwrap_or_default();
+        if subject.starts_with("accept:") {
+            return self.try_accept(slug, tip, candidate, status, report);
+        }
+        if subject.starts_with("retire:") {
+            return self.try_retire(slug, tip, candidate, status, report);
+        }
+        let msg = format!("task/{slug} commit {} is an empty marker with subject {subject:?} — only `accept:`/`retire:` are the director's to make here", short(candidate));
+        self.reject(slug, candidate, Reason::Ownership, msg, report)
+    }
+
+    // ---- post (spec §9, §6.3) ----
+
+    fn try_post(&mut self, slug: &str, tip: &str, candidate: &str, status: Status, hub_state: &state::HubState, report: &mut TickReport) -> Result<(), String> {
+        match self.validate_post(slug, candidate, status, hub_state) {
+            Ok(()) => {
+                let hub_ref = format!("refs/heads/task/{slug}");
+                self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
+                records::record_import(&self.hub, candidate, Actor::Director, Transition::Post, Some(slug))?;
+                report.imported.push((hub_ref, candidate.to_string(), Transition::Post));
+                // step 6: launch a subagent clone + tmux session for `slug`
+                // at `candidate` here (records pins first, per spec §8.3).
+            }
+            Err(msg) => self.reject(slug, candidate, Reason::Post, msg, report)?,
+        }
+        Ok(())
+    }
+
+    /// spec §9's post row: status must be `ready`; no other task may be in
+    /// flight; every accepted dependency's merge must already be an
+    /// ancestor of `candidate` (else the branch hasn't been unblocked into
+    /// yet); `task.toml` must parse and declare a check; `tests.toml` must
+    /// carry a matching entry (spec §6.3); and that check must currently
+    /// *fail* (spec §3.1's evidence requirement).
+    fn validate_post(&self, slug: &str, candidate: &str, status: Status, hub_state: &state::HubState) -> Result<(), String> {
+        let task = hub_state.tasks.iter().find(|t| t.slug == slug).ok_or_else(|| format!("post: task/{slug}: no task state"))?;
+
+        if status != Status::Ready {
+            if status == Status::Orphaned {
+                let retired = records::retired_slugs(&self.hub);
+                let retired_deps: Vec<&str> = task.config.depends_on.iter().filter(|d| retired.iter().any(|r| r == *d)).map(|s| s.as_str()).collect();
+                return Err(format!("post: task/{slug} is orphaned: depends on retired {}", retired_deps.join(", ")));
+            }
+            let accepted = records::accepted_tasks(&self.hub, &hub_state.main_tip);
+            let unmet: Vec<&str> = task.config.depends_on.iter().filter(|d| !accepted.contains_key(*d)).map(|s| s.as_str()).collect();
+            return Err(format!("post: task/{slug}: dependencies not accepted: {}", unmet.join(", ")));
+        }
+
+        if let Some(other) = hub_state.tasks.iter().find(|t| t.slug != slug && matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision | Status::Escalated)) {
+            return Err(format!("post: task/{slug}: task/{} is already {} — only one task may be in flight at a time", other.slug, other.status.as_str()));
+        }
+
+        let accepted = records::accepted_tasks(&self.hub, &hub_state.main_tip);
+        for dep in &task.config.depends_on {
+            if let Some(merge_sha) = accepted.get(dep) {
+                if !self.hub.is_ancestor(merge_sha, candidate) {
+                    return Err(format!("post: task/{slug}: wait for the player to merge main into the branch, then fetch (missing {dep}'s acceptance merge)"));
                 }
             }
+        }
+
+        let task_toml_path = format!("tasks/{slug}/task.toml");
+        let text = self.hub.show_file(candidate, &task_toml_path).ok_or_else(|| format!("post: task/{slug}: {task_toml_path} missing"))?;
+        let cfg = config::task_config_from_str(&text).map_err(|e| format!("post: task/{slug}: {task_toml_path}: {e}"))?;
+        let check = cfg.check.ok_or_else(|| format!("post: task/{slug}: {task_toml_path} has no [check] section"))?;
+
+        let tests_text = self.hub.show_file(candidate, "tests.toml").ok_or_else(|| format!("post: task/{slug}: tests.toml missing"))?;
+        let tests_cfg = config::tests_config_from_str(&tests_text).map_err(|e| format!("post: task/{slug}: tests.toml: {e}"))?;
+        let has_matching_entry = tests_cfg.check.iter().any(|c| c.name == check.name && c.cmd == check.cmd && c.runs == check.runs && c.min_pass == check.min_pass);
+        if !has_matching_entry {
+            return Err(format!("post: task/{slug}: tests.toml has no [[check]] entry matching the task check {:?} (same name, cmd, runs, min_pass)", check.name));
+        }
+
+        let result = self.runner.run_task_check(candidate, slug).map_err(|e| format!("post: task/{slug}: {e}"))?;
+        if result.pass {
+            return Err(format!("post: task/{slug}: task check already passes — it must fail at post"));
+        }
+
+        Ok(())
+    }
+
+    // ---- send-back (spec §9, §8.3) ----
+
+    /// spec §9's send-back row: the cumulative diff must add exactly the
+    /// next review file (`reviews/r<N+1>.md`, `N` = the current review
+    /// round); every other changed path must be a test path (spec §6.2) or
+    /// `tests.toml` itself; a round beyond `max_review_rounds` escalates
+    /// instead of importing; and the project suite must now *fail* (spec
+    /// §3.1's evidence requirement for a send-back). On success, re-pins and
+    /// relays the review note to the subagent's session (spec §8.3).
+    fn try_send_back(&mut self, slug: &str, tip: &str, candidate: &str, diffs: &[(char, String)], hub_state: &state::HubState, report: &mut TickReport) -> Result<(), String> {
+        let task = hub_state.tasks.iter().find(|t| t.slug == slug).ok_or_else(|| format!("send-back: task/{slug}: no task state"))?;
+        let n = task.review_round;
+        let expected_path = format!("tasks/{slug}/reviews/r{}.md", n + 1);
+        let review_prefix = format!("tasks/{slug}/reviews/");
+
+        let added_a_review_file = diffs.iter().any(|(status, path)| *status == 'A' && path.starts_with(&review_prefix) && is_review_filename(path));
+        let added_expected_file = diffs.iter().any(|(status, path)| *status == 'A' && *path == expected_path);
+
+        if !added_expected_file {
+            if !added_a_review_file {
+                let msg = format!("task/{slug}'s commit doesn't add a review file (expected {expected_path})");
+                return self.reject(slug, candidate, Reason::Ownership, msg, report);
+            }
+            let msg = format!("send-back: task/{slug}: expected review round {} to add {expected_path}", n + 1);
+            return self.reject(slug, candidate, Reason::Review, msg, report);
+        }
+
+        let test_paths = self.hub.show_file(candidate, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).map(|c| c.test_paths).unwrap_or_default();
+        let task_prefix = format!("tasks/{slug}/");
+        for (_, path) in diffs {
+            if path == "tests.toml" || path.starts_with(&task_prefix) || path_under_test_paths(path, &test_paths) {
+                continue;
+            }
+            let msg = format!("send-back: task/{slug}: a send-back may only add the review note and tests, not {path:?}");
+            return self.reject(slug, candidate, Reason::Review, msg, report);
+        }
+
+        let round = n + 1;
+        if round > hub_state.roadmap.limits.max_review_rounds {
+            let cause = format!("review rounds exceeded: {round} > {}", hub_state.roadmap.limits.max_review_rounds);
+            records::record_escalation(&self.hub, slug, candidate, &cause)?;
+            report.escalated.push((slug.to_string(), cause));
             return Ok(());
         }
 
-        // step 5b: post, finish, block, send-back, accept, retire, and any
-        // other commit shape on an existing branch (prompt.md added,
-        // reviews/, accept:/retire:/block: markers, commits during in-flight
-        // states) all dispatch here. Until that lands, every one of them is
-        // rejected as ownership so nothing is silently accepted.
-        let msg = "unsupported transition (not yet implemented)".to_string();
-        let rec = records::record_rejection(&self.hub, slug, candidate, Reason::Ownership, Actor::Director, &msg)?;
-        report.rejected.push(rec);
+        let suite = self.runner.run_suite(candidate);
+        if suite.pass {
+            let msg = format!("send-back: task/{slug}: send-back without evidence: the project suite still passes");
+            return self.reject(slug, candidate, Reason::Review, msg, report);
+        }
+
+        let hub_ref = format!("refs/heads/task/{slug}");
+        self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, candidate, Actor::Director, Transition::SendBack, Some(slug))?;
+        report.imported.push((hub_ref, candidate.to_string(), Transition::SendBack));
+
+        records::set_pins(&self.hub, slug, candidate)?;
+        let review_body = self.hub.show_file(candidate, &expected_path).unwrap_or_default();
+        let header = format!("Review round {round} from the director. Fetch it: git pull --ff-only origin task/{slug}. Then make the whole project suite pass and commit.");
+        self.sessions.send(slug, &format!("{header}\n\n{review_body}"));
+        Ok(())
+    }
+
+    // ---- accept (spec §9, §11) ----
+
+    /// spec §9/§11's accept row: the task must be `tested`; the player
+    /// merges `task/<slug>` into `main` (`--no-ff`-equivalent via
+    /// `merge-tree`/`commit-tree`, since the hub is bare) and runs the
+    /// project suite on the merge result before it counts as accepted.
+    fn try_accept(&mut self, slug: &str, tip: &str, candidate: &str, status: Option<Status>, report: &mut TickReport) -> Result<(), String> {
+        if status != Some(Status::Tested) {
+            let msg = format!("accept: task/{slug} is {} — it must be tested before it can be accepted", status.map(|s| s.as_str()).unwrap_or("unknown"));
+            return self.reject(slug, candidate, Reason::Accept, msg, report);
+        }
+
+        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
+        let tree = match self.hub.merge_tree_write(&main_tip, candidate).map_err(|e| e.to_string())? {
+            Some(t) => t,
+            None => {
+                let msg = format!("accept: task/{slug} conflicts with main");
+                return self.reject(slug, candidate, Reason::Accept, msg, report);
+            }
+        };
+
+        let marker_body = self.hub.commit_body(candidate).unwrap_or_default();
+        let marker_body = marker_body.trim();
+        // The `Task: <slug>` trailer must be the merge commit's last
+        // paragraph, so `records::accepted_tasks`'s line scan finds it.
+        let message =
+            if marker_body.is_empty() { format!("Merge task/{slug}\n\nTask: {slug}") } else { format!("Merge task/{slug}\n\n{marker_body}\n\nTask: {slug}") };
+        let merge_sha = self.hub.commit_tree(&tree, &[&main_tip, candidate], &message).map_err(|e| e.to_string())?;
+
+        let suite = self.runner.run_suite(&merge_sha);
+        if !suite.pass {
+            let msg = format!("accept: task/{slug}: {}", suite.summary());
+            return self.reject(slug, candidate, Reason::Accept, msg, report);
+        }
+
+        let hub_ref = format!("refs/heads/task/{slug}");
+        self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
+        self.hub.update_ref_cas("refs/heads/main", &merge_sha, &main_tip).map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, candidate, Actor::Director, Transition::Accept, Some(slug))?;
+        records::record_import(&self.hub, &merge_sha, Actor::Player, Transition::MergeAccept, Some(slug))?;
+        report.imported.push((hub_ref, candidate.to_string(), Transition::Accept));
+        report.imported.push(("refs/heads/main".to_string(), merge_sha, Transition::MergeAccept));
+
+        // The task branch itself stays in the hub as a permanent record
+        // (spec §9); only the subagent's live session ends.
+        self.sessions.kill(slug);
+        Ok(())
+    }
+
+    // ---- retire (spec §9) ----
+
+    /// spec §9's retire row: allowed only when the task isn't posted or in
+    /// flight (pending/ready/orphaned), or is escalated. Moves the branch to
+    /// `refs/retired/<slug>` and ends the subagent session.
+    fn try_retire(&mut self, slug: &str, tip: &str, candidate: &str, status: Option<Status>, report: &mut TickReport) -> Result<(), String> {
+        let allowed = matches!(status, Some(Status::Pending | Status::Ready | Status::Orphaned | Status::Escalated));
+        if !allowed {
+            let msg = format!(
+                "retire: task/{slug} is {} — retire is only allowed while pending/ready/orphaned (not posted or in flight) or escalated",
+                status.map(|s| s.as_str()).unwrap_or("unknown")
+            );
+            return self.reject(slug, candidate, Reason::Retire, msg, report);
+        }
+
+        self.hub.update_ref(&format!("refs/retired/{slug}"), candidate).map_err(|e| e.to_string())?;
+        let hub_ref = format!("refs/heads/task/{slug}");
+        self.hub.delete_ref_cas(&hub_ref, tip).map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, candidate, Actor::Director, Transition::Retire, Some(slug))?;
+        report.imported.push((format!("refs/retired/{slug}"), candidate.to_string(), Transition::Retire));
+
+        self.sessions.kill(slug);
+        Ok(())
+    }
+
+    fn try_replan(&mut self, slug: &str, tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+        match self.validate_replan(slug, tip, candidate) {
+            Ok(()) => {
+                let hub_ref = format!("refs/heads/task/{slug}");
+                self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
+                records::record_import(&self.hub, candidate, Actor::Director, Transition::Replan, Some(slug))?;
+                report.imported.push((hub_ref, candidate.to_string(), Transition::Replan));
+            }
+            Err(msg) => self.reject(slug, candidate, Reason::Plan, msg, report)?,
+        }
         Ok(())
     }
 
@@ -564,6 +846,24 @@ fn path_allowed(path: &str, docs_paths: &[String]) -> bool {
         let prefix = d.trim_end_matches('/');
         path == prefix || path.starts_with(&format!("{prefix}/"))
     })
+}
+
+/// `path` is exactly one of `test_paths` (spec §6.2), or falls under one of
+/// them treated as a directory prefix. Shared by the send-back path check
+/// here and, per the spec, by step 6's subagent finish-claim scope check.
+fn path_under_test_paths(path: &str, test_paths: &[String]) -> bool {
+    test_paths.iter().any(|t| {
+        let prefix = t.trim_end_matches('/');
+        path == prefix || path.starts_with(&format!("{prefix}/"))
+    })
+}
+
+/// `path`'s basename looks like a review note (`tasks/<slug>/reviews/r<N>.md`):
+/// used only to tell "no review file at all" apart from "wrong round number"
+/// in a send-back rejection message (spec §9).
+fn is_review_filename(path: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or("");
+    base.starts_with('r') && base.ends_with(".md")
 }
 
 // --------------------------------------------------------------------------

@@ -324,7 +324,7 @@ fn merge_commit_on_a_task_branch_is_rejected_with_history() {
 }
 
 // --------------------------------------------------------------------------
-// Replan and the step 5b dispatch point
+// Replan
 // --------------------------------------------------------------------------
 
 #[test]
@@ -347,24 +347,30 @@ fn replan_happy_path() {
     assert_eq!(note.actor, Actor::Director);
 }
 
+// Post/send-back/accept/retire happy-path and rejection coverage lives in
+// tests/player_transitions.rs (step 5b); this file keeps its original
+// pre-5b scope (fetch, history rules, main docs commits, plan/replan,
+// unblock merges).
 #[test]
-fn unsupported_transition_is_rejected_with_ownership() {
+fn post_missing_a_check_in_task_toml_is_rejected_with_post() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
 
-    director_commit_on_branch(repo.path(), "task/unsupported", "tasks/unsupported/task.toml", "title = \"Unsupported\"\nphase = \"p1\"\n", "plan: unsupported");
+    director_commit_on_branch(repo.path(), "task/nocheck", "tasks/nocheck/task.toml", "title = \"No check\"\nphase = \"p1\"\n", "plan: nocheck");
     player.tick().expect("tick should succeed");
-    let tip_before = hub.rev_parse("refs/heads/task/unsupported").unwrap();
+    let tip_before = hub.rev_parse("refs/heads/task/nocheck").unwrap();
 
-    // Adding prompt.md is a `post` (spec §9) — not implemented until 5b.
-    director_commit_on_branch(repo.path(), "task/unsupported", "tasks/unsupported/prompt.md", "do the thing\n", "post: unsupported");
+    // Adding prompt.md is a `post` (spec §9) attempt, but task.toml declares
+    // no [check] section, so validate_post rejects it before ever running
+    // anything.
+    director_commit_on_branch(repo.path(), "task/nocheck", "tasks/nocheck/prompt.md", "do the thing\n", "post: nocheck");
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
-    assert_eq!(report.rejected[0].reason, Reason::Ownership);
-    assert!(report.rejected[0].message.contains("unsupported transition"), "{}", report.rejected[0].message);
-    assert_eq!(hub.rev_parse("refs/heads/task/unsupported").as_deref(), Some(tip_before.as_str()));
+    assert_eq!(report.rejected[0].reason, Reason::Post);
+    assert!(report.rejected[0].message.contains("[check]"), "{}", report.rejected[0].message);
+    assert_eq!(hub.rev_parse("refs/heads/task/nocheck").as_deref(), Some(tip_before.as_str()));
 }
 
 // --------------------------------------------------------------------------

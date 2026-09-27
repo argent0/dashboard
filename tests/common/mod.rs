@@ -112,3 +112,59 @@ pub fn push_main_to_hub(repo: &Path) {
     let git = Git::new(repo);
     git.run(&["push", "-q", "hub", "main"]).expect("push main to hub");
 }
+
+/// Fetches `task/<slug>` from the `hub` remote into the director repo and
+/// fast-forwards the local branch onto it, checking it out. This is what a
+/// real director does after the player validates a subagent's finish claim
+/// (or after any other player-side move, like an unblock merge), so the
+/// director's next commit on the branch (accept/retire/send-back) builds on
+/// top of it. Requires the repo to have been through `dashboard::init::init`
+/// (which sets up the `hub` remote).
+pub fn director_pull_task_branch(repo: &Path, slug: &str) {
+    checkout_branch(repo, &format!("task/{slug}"));
+    let git = Git::new(repo);
+    git.run(&["fetch", "-q", "hub", &format!("task/{slug}")]).expect("fetch task branch from hub");
+    git.run(&["merge", "-q", "--ff-only", "FETCH_HEAD"]).expect("fast-forward onto hub's task branch");
+}
+
+/// Clones `hub_path` into a fresh temp dir, checks out `task/<slug>`, and
+/// sets a committer identity — the shared setup behind `subagent_commit` and
+/// `subagent_empty_commit` below.
+fn subagent_clone(hub_path: &Path, slug: &str) -> TempDir {
+    let clone_dir = TempDir::new().expect("tempdir");
+    let hub_str = hub_path.to_str().expect("hub path is valid UTF-8");
+    let output = Command::new("git").args(["clone", "-q", hub_str, "."]).current_dir(clone_dir.path()).output().expect("failed to run git clone");
+    assert!(output.status.success(), "git clone {hub_str} failed: {}", String::from_utf8_lossy(&output.stderr));
+    let git = Git::new(clone_dir.path());
+    git.run(&["checkout", "-q", &format!("task/{slug}")]).expect("checkout task branch in subagent clone");
+    git.run(&["config", "user.name", "Test Subagent"]).expect("git config user.name");
+    git.run(&["config", "user.email", "subagent@example.com"]).expect("git config user.email");
+    git.run(&["config", "commit.gpgsign", "false"]).expect("git config commit.gpgsign");
+    clone_dir
+}
+
+/// Simulates the subagent side of a task, which step 6 (real subagent
+/// clones, launch, tmux) hasn't implemented yet: clones the hub, checks out
+/// `task/<slug>`, writes `rel`, commits, and pushes straight back to the
+/// hub's `refs/heads/task/<slug>` — a fast-forward, since the clone was made
+/// from that exact tip. This is the closest plumbing-level stand-in for what
+/// a real subagent clone will do in step 6. Returns the new commit's sha;
+/// the caller still records provenance itself, e.g. via
+/// `records::record_import(hub, &sha, Actor::Subagent, Transition::Finish, Some(slug))`,
+/// since that validation is the player's job and isn't exercised here.
+pub fn subagent_commit(hub_path: &Path, slug: &str, rel: &str, content: &str, msg: &str) -> String {
+    let clone_dir = subagent_clone(hub_path, slug);
+    write_file(clone_dir.path(), rel, content);
+    let sha = commit(clone_dir.path(), msg);
+    Git::new(clone_dir.path()).run(&["push", "-q", "origin", &format!("HEAD:refs/heads/task/{slug}")]).expect("push subagent commit to hub");
+    sha
+}
+
+/// Same as `subagent_commit`, for an empty marker commit — the subagent's
+/// only other legitimate commit shape (spec §7's `block:`).
+pub fn subagent_empty_commit(hub_path: &Path, slug: &str, msg: &str) -> String {
+    let clone_dir = subagent_clone(hub_path, slug);
+    let sha = commit_empty(clone_dir.path(), msg);
+    Git::new(clone_dir.path()).run(&["push", "-q", "origin", &format!("HEAD:refs/heads/task/{slug}")]).expect("push subagent marker commit to hub");
+    sha
+}
