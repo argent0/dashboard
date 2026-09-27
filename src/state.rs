@@ -258,6 +258,7 @@ fn escalation_cause(
 
     if matches!(note, Some(n) if n.transition == Transition::Block) {
         let subject = hub.commit_subject(tip).unwrap_or_default();
+        let subject = subject.strip_prefix("block:").map(str::trim_start).unwrap_or(&subject).to_string();
         let body = hub.commit_body(tip).unwrap_or_default();
         let body = body.trim();
         let text = if body.is_empty() { subject } else { format!("{subject}\n{body}") };
