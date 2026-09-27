@@ -6,6 +6,8 @@
 // integration tests in tests/ exercise the library directly.
 
 use clap::{Parser, Subcommand};
+use dashboard::git::Git;
+use dashboard::paths::Home;
 use dashboard::{init, legacy, paths, player, ui};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -70,6 +72,12 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         interval: u64,
     },
+    /// Manually restart a task's subagent tmux session after it died (spec.md
+    /// §9's launch row leaves automatic relaunch deferred).
+    Relaunch {
+        /// The task's slug.
+        slug: String,
+    },
 }
 
 fn main() {
@@ -78,8 +86,22 @@ fn main() {
     match args.command {
         Some(Command::Init { name }) => run_init(name, args.home),
         Some(Command::Player { once, interval }) => run_player(args.home, once, interval),
+        Some(Command::Relaunch { slug }) => run_relaunch(args.home, &slug),
         None => run_legacy(args.file, args.no_color, args.width),
     }
+}
+
+/// Builds the real tmux-backed `Sessions` for a resolved home, reading
+/// `dashboard.project` straight from the hub's git config — the same value
+/// `player::Player::open` reads internally, needed here a step earlier since
+/// `TmuxSessions` has to exist before the generic `Player<S>` can be opened.
+fn build_sessions(home: &Home) -> player::TmuxSessions {
+    let hub = Git::new(home.hub());
+    let project = hub.config_get("dashboard.project").unwrap_or_else(|| {
+        eprintln!("error: hub is missing dashboard.project — run `dashboard init`");
+        std::process::exit(1);
+    });
+    player::TmuxSessions::new(project)
 }
 
 // --------------------------------------------------------------------------
@@ -122,8 +144,8 @@ fn run_player(home: Option<PathBuf>, once: bool, interval: u64) {
             std::process::exit(1);
         }
     };
-    // step 6 swaps NullSessions for the real tmux-backed Sessions impl.
-    let mut player = match player::Player::open(home, player::NullSessions::default()) {
+    let sessions = build_sessions(&home);
+    let mut player = match player::Player::open(home, sessions) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
@@ -152,6 +174,42 @@ fn run_player(home: Option<PathBuf>, once: bool, interval: u64) {
             Err(e) => eprintln!("error: {e}"),
         }
         std::thread::sleep(std::time::Duration::from_secs(interval));
+    }
+}
+
+// --------------------------------------------------------------------------
+// dashboard relaunch
+// --------------------------------------------------------------------------
+
+fn run_relaunch(home: Option<PathBuf>, slug: &str) {
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot read current directory: {e}");
+            std::process::exit(1);
+        }
+    };
+    let home = match paths::resolve_home(home, &cwd) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    let sessions = build_sessions(&home);
+    let mut player = match player::Player::open(home, sessions) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    match player.relaunch(slug) {
+        Ok(()) => println!("relaunched task/{slug}"),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
     }
 }
 

@@ -19,7 +19,7 @@ use dashboard::config::Reason;
 use dashboard::git::Git;
 use dashboard::init;
 use dashboard::paths::Home;
-use dashboard::player::{NullSessions, Player};
+use dashboard::player::{NullSessions, Player, Sessions};
 use dashboard::records::{self, Actor, Transition};
 use dashboard::state::{self, Status};
 use tempfile::TempDir;
@@ -546,6 +546,14 @@ fn director_commit_while_posted_is_rejected_with_ownership() {
 
     plan(&repo, &mut player, "midflight", "title = \"Mid flight\"\nphase = \"p1\"\n");
     post(&repo, &mut player, "midflight");
+    // `post`'s tick also launches the subagent (step 6): `NullSessions`
+    // marks the session alive synchronously, exactly as a real `tmux
+    // has-session` would right after `tmux new-session`. The player's own
+    // status derivation (used below in the rejection message) sees this and
+    // reports `in_progress`; `task_status` here hardcodes every session as
+    // dead (it's shared by tests that predate step 6), so it still reports
+    // `posted` for the exact same hub state.
+    assert!(player.sessions().alive("midflight"), "post should have launched a subagent session");
 
     checkout_branch(repo.path(), "task/midflight");
     write_file(repo.path(), "tasks/midflight/prompt.md", "changed my mind\n");
@@ -554,7 +562,7 @@ fn director_commit_while_posted_is_rejected_with_ownership() {
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Ownership);
-    assert!(report.rejected[0].message.contains("posted"), "{}", report.rejected[0].message);
+    assert!(report.rejected[0].message.contains("in_progress"), "{}", report.rejected[0].message);
     assert_eq!(task_status(&hub, "midflight"), Status::Posted);
 }
 

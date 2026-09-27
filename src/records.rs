@@ -209,6 +209,12 @@ pub fn set_pins(hub: &Git, slug: &str, commit: &str) -> Result<(), String> {
     hub.update_ref(&format!("refs/dashboard/pins/{slug}"), commit).map_err(|e| e.to_string())
 }
 
+/// Whether `slug` has ever had pins recorded — the player's signal that a
+/// task was already launched (spec §9's launch row runs at most once).
+pub fn has_pins(hub: &Git, slug: &str) -> bool {
+    hub.ref_exists(&format!("refs/dashboard/pins/{slug}"))
+}
+
 /// Adds every file git resolves `path` to at `commit` (a single file, or
 /// every file under a directory prefix) to `map`, keyed by path with its
 /// blob hash. `ls_tree_files` already treats a plain file path and a

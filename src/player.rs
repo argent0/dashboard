@@ -2,15 +2,19 @@
 // fetches the director's clone, imports and validates its commits onto the
 // hub's refs, and runs the player's own merges. Step 5a covered the
 // skeleton, history rules, director `main` (docs-only commits) and `task/*`
-// branches' plan/replan transitions, and unblock merges. Step 5b (this step)
-// fills in the rest of the director-side transitions on an existing branch:
-// post, send-back, accept and retire, plus the marker-commit dispatch
+// branches' plan/replan transitions, and unblock merges. Step 5b filled in
+// the rest of the director-side transitions on an existing branch: post,
+// send-back, accept and retire, plus the marker-commit dispatch
 // (`accept:`/`retire:`, and rejecting any other empty commit as `ownership`
 // since only the subagent may write `block:`). Every validation is against
 // the *cumulative* diff from the hub's current tip to the candidate, exactly
 // as in 5a, so a fixing commit on top of a rejected one still has a chance.
-// Step 6 adds subagent import and tmux launch (see `// step 6` markers in
-// `tick` and `try_post`); step 7 adds events.
+// Step 6 (this step) adds the subagent side (spec §7, §8.3, §9's launch row):
+// launching a subagent clone + tmux session right after a task is posted,
+// importing and validating its finish/block claims (only the newest commit
+// in the fetched range is ever validated — each one is a whole finish claim,
+// spec's "Import semantics"), and relaying subagent rejections and
+// send-backs into its tmux session. Step 7 adds events and `dashboard wait`.
 #![allow(dead_code)]
 
 use crate::checks;
@@ -21,7 +25,9 @@ use crate::records::{self, Actor, RejectionRecord, Transition};
 use crate::state::{self, Status};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 // --------------------------------------------------------------------------
 // Sessions: the runtime tmux side (spec §9's launch/relay), abstracted so
@@ -31,21 +37,44 @@ use std::path::PathBuf;
 
 pub trait Sessions {
     fn alive(&self, slug: &str) -> bool;
+    /// Starts the subagent's session: `agent_cmd` run in `clone_dir` with
+    /// `prompt_file`'s contents as its first message (spec §9's launch row).
+    fn launch(&mut self, slug: &str, clone_dir: &Path, agent_cmd: &str, prompt_file: &Path) -> Result<(), String>;
     fn send(&mut self, slug: &str, message: &str);
     fn kill(&mut self, slug: &str);
 }
 
-/// A `Sessions` that never reports anything alive, and records every
-/// `send`/`kill` call so tests can assert on them instead of touching tmux.
+/// A `Sessions` that records every `launch`/`send`/`kill` call so tests can
+/// assert on them instead of touching tmux, with a configurable `alive` set
+/// so a test can mark a session dead again (or never alive at all) to drive
+/// the relaunch/no-relaunch paths. `launch` inserts the slug into `alive`;
+/// `kill` removes it — a test after that point can remove it directly too,
+/// to simulate a session dying on its own.
 #[derive(Debug, Default)]
 pub struct NullSessions {
     pub sent: Vec<(String, String)>,
     pub killed: Vec<String>,
+    pub launched: Vec<LaunchCall>,
+    pub alive: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LaunchCall {
+    pub slug: String,
+    pub clone_dir: PathBuf,
+    pub agent_cmd: String,
+    pub prompt_file: PathBuf,
 }
 
 impl Sessions for NullSessions {
-    fn alive(&self, _slug: &str) -> bool {
-        false
+    fn alive(&self, slug: &str) -> bool {
+        self.alive.contains(slug)
+    }
+
+    fn launch(&mut self, slug: &str, clone_dir: &Path, agent_cmd: &str, prompt_file: &Path) -> Result<(), String> {
+        self.launched.push(LaunchCall { slug: slug.to_string(), clone_dir: clone_dir.to_path_buf(), agent_cmd: agent_cmd.to_string(), prompt_file: prompt_file.to_path_buf() });
+        self.alive.insert(slug.to_string());
+        Ok(())
     }
 
     fn send(&mut self, slug: &str, message: &str) {
@@ -54,7 +83,111 @@ impl Sessions for NullSessions {
 
     fn kill(&mut self, slug: &str) {
         self.killed.push(slug.to_string());
+        self.alive.remove(slug);
     }
+}
+
+// --------------------------------------------------------------------------
+// TmuxSessions: the real backend (spec §9's launch/relay mechanism)
+// --------------------------------------------------------------------------
+
+pub struct TmuxSessions {
+    project: String,
+}
+
+impl TmuxSessions {
+    pub fn new(project: impl Into<String>) -> Self {
+        Self { project: project.into() }
+    }
+}
+
+impl Sessions for TmuxSessions {
+    fn alive(&self, slug: &str) -> bool {
+        state::tmux_alive(&state::tmux_session_name(&self.project, slug))
+    }
+
+    /// `tmux new-session -d -s <name> -c <clone_dir> sh -c '<agent_cmd>
+    /// "$(cat <prompt_file>)"'`. `clone_dir` and `agent_cmd` are passed as
+    /// plain argv elements (no shell involved for the outer `tmux` call), but
+    /// `prompt_file` is interpolated into the inner `sh -c` string, so it's
+    /// the one path that needs shell quoting.
+    fn launch(&mut self, slug: &str, clone_dir: &Path, agent_cmd: &str, prompt_file: &Path) -> Result<(), String> {
+        let name = state::tmux_session_name(&self.project, slug);
+        let clone_str = clone_dir.to_str().ok_or_else(|| format!("{} is not valid UTF-8", clone_dir.display()))?;
+        let prompt_str = prompt_file.to_str().ok_or_else(|| format!("{} is not valid UTF-8", prompt_file.display()))?;
+        let inner = format!("{agent_cmd} \"$(cat {})\"", shell_quote(prompt_str));
+        let status = Command::new("tmux")
+            .args(["new-session", "-d", "-s", &name, "-c", clone_str, "sh", "-c", &inner])
+            .status()
+            .map_err(|e| format!("tmux new-session for {name}: {e}"))?;
+        if !status.success() {
+            return Err(format!("tmux new-session for {name} failed (exit {:?})", status.code()));
+        }
+        Ok(())
+    }
+
+    /// `tmux load-buffer` (message on stdin) then `paste-buffer -d -p`
+    /// (bracketed paste, so embedded newlines don't submit early) then
+    /// `send-keys Enter`. Errors (e.g. the session died) are logged to
+    /// stderr and otherwise ignored — a relay to a dead session isn't a
+    /// player-fatal error.
+    fn send(&mut self, slug: &str, message: &str) {
+        let name = state::tmux_session_name(&self.project, slug);
+        let buf = format!("dash-{name}");
+
+        let child = Command::new("tmux").args(["load-buffer", "-b", &buf, "-"]).stdin(Stdio::piped()).spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("dashboard: tmux load-buffer for {name} failed to start: {e}");
+                return;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(message.as_bytes()) {
+                eprintln!("dashboard: tmux load-buffer for {name}: writing message failed: {e}");
+            }
+        }
+        match child.wait() {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                eprintln!("dashboard: tmux load-buffer for {name} failed (exit {:?})", status.code());
+                return;
+            }
+            Err(e) => {
+                eprintln!("dashboard: tmux load-buffer for {name} failed: {e}");
+                return;
+            }
+        }
+
+        // `paste-buffer -p` and `send-keys` need a *pane* target, not just a
+        // session target: `=<name>` alone (exact session match) resolves for
+        // `has-session`/`kill-session`, but tmux won't paste into or send
+        // keys to it without a window/pane component — `=<name>:` (session's
+        // current window's active pane) is the minimal target that resolves.
+        let target = format!("={name}:");
+        if let Err(e) = Command::new("tmux").args(["paste-buffer", "-d", "-p", "-b", &buf, "-t", &target]).status() {
+            eprintln!("dashboard: tmux paste-buffer for {name} failed: {e}");
+            return;
+        }
+        if let Err(e) = Command::new("tmux").args(["send-keys", "-t", &target, "Enter"]).status() {
+            eprintln!("dashboard: tmux send-keys for {name} failed: {e}");
+        }
+    }
+
+    /// `tmux kill-session`, ignoring "no such session" (and any other
+    /// failure — a task being killed twice, or a session that already died
+    /// on its own, are both fine outcomes here).
+    fn kill(&mut self, slug: &str) {
+        let name = state::tmux_session_name(&self.project, slug);
+        let _ = Command::new("tmux").args(["kill-session", "-t", &format!("={name}")]).output();
+    }
+}
+
+/// Wraps `s` in single quotes for safe interpolation into a `sh -c` string,
+/// escaping any single quote in `s` itself (`'` -> `'\''`).
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 // --------------------------------------------------------------------------
@@ -64,24 +197,37 @@ impl Sessions for NullSessions {
 /// What one `Player::tick` call did. `imported` is `(ref, sha, transition)`
 /// for every commit the player advanced a hub ref to (director docs commits
 /// on main, plans, replans, and the player's own unblock/accept merges land
-/// here too via their `Transition::MergeUnblock`/`MergeAccept` notes).
-/// `merges` carries a short human line per unblock-merge attempt, success or
-/// failure (spec §11) — there's no reason to model it more richly than the
-/// CLI's report needs. `escalated` is `(slug, cause)` for a send-back that
-/// would exceed `max_review_rounds` (spec §10): the offending commit is
+/// here too via their `Transition::MergeUnblock`/`MergeAccept` notes, as do
+/// subagent finish/block commits via `Transition::Finish`/`Block`). `merges`
+/// carries a short human line per unblock-merge attempt, success or failure
+/// (spec §11) — there's no reason to model it more richly than the CLI's
+/// report needs. `escalated` is `(slug, cause)` for a send-back that would
+/// exceed `max_review_rounds` (spec §10): the offending commit is
 /// deliberately not imported and not recorded as a rejection, so it needs
-/// its own place in the report.
+/// its own place in the report. `launched` is every slug a subagent session
+/// was started for this tick (spec §9's launch row); `errors` is everything
+/// that went wrong outside the reject/relay machinery — a launch attempt
+/// whose task check now unexpectedly passes, a leftover clone directory, or
+/// a `sessions.launch` failure — none of which is a rejection (there's no
+/// commit to reject) but all of which the operator needs to see.
 #[derive(Debug, Default)]
 pub struct TickReport {
     pub imported: Vec<(String, String, Transition)>,
     pub rejected: Vec<RejectionRecord>,
     pub merges: Vec<String>,
     pub escalated: Vec<(String, String)>,
+    pub launched: Vec<String>,
+    pub errors: Vec<String>,
 }
 
 impl TickReport {
     pub fn is_empty(&self) -> bool {
-        self.imported.is_empty() && self.rejected.is_empty() && self.merges.is_empty() && self.escalated.is_empty()
+        self.imported.is_empty()
+            && self.rejected.is_empty()
+            && self.merges.is_empty()
+            && self.escalated.is_empty()
+            && self.launched.is_empty()
+            && self.errors.is_empty()
     }
 }
 
@@ -100,7 +246,13 @@ impl fmt::Display for TickReport {
         for (slug, cause) in &self.escalated {
             lines.push(format!("escalated {slug}: {cause}"));
         }
+        for slug in &self.launched {
+            lines.push(format!("launched {slug}"));
+        }
         lines.extend(self.merges.iter().cloned());
+        for err in &self.errors {
+            lines.push(format!("error: {err}"));
+        }
         write!(f, "{}", lines.join("\n"))
     }
 }
@@ -151,7 +303,8 @@ impl<S: Sessions> Player<S> {
         self.fetch()?;
         self.import_main(&mut report)?;
         self.import_task_branches(&mut report)?;
-        // step 6: subagent import + launch
+        self.launch_subagents(&mut report)?;
+        self.import_subagents(&mut report)?;
         self.unblock_merges(&mut report)?;
         Ok(report)
     }
@@ -484,8 +637,10 @@ impl<S: Sessions> Player<S> {
                 self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
                 records::record_import(&self.hub, candidate, Actor::Director, Transition::Post, Some(slug))?;
                 report.imported.push((hub_ref, candidate.to_string(), Transition::Post));
-                // step 6: launch a subagent clone + tmux session for `slug`
-                // at `candidate` here (records pins first, per spec §8.3).
+                // Launching the subagent clone + tmux session happens in
+                // `launch_subagents`, later in the same tick (spec §8.3): it
+                // scans every `Posted` task without pins yet, which this one
+                // now is.
             }
             Err(msg) => self.reject(slug, candidate, Reason::Post, msg, report)?,
         }
@@ -771,6 +926,263 @@ impl<S: Sessions> Player<S> {
         config::roadmap_config_from_str(&text)
     }
 
+    // ---- launch (spec §8.3, §9's launch row) ----
+
+    /// Every `Posted` task that has never been launched (no
+    /// `refs/dashboard/pins/<slug>` yet — pins are only ever taken at launch
+    /// or send-back, and a `Posted` task hasn't been sent back) gets a
+    /// subagent clone and a tmux session. A launch failure never retries
+    /// itself: whatever went wrong, this method always records *some* trace
+    /// of the attempt (pins, at least) before returning, so the task isn't
+    /// silently re-attempted every tick forever (spec's deferred "not
+    /// relaunched automatically").
+    fn launch_subagents(&mut self, report: &mut TickReport) -> Result<(), String> {
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let candidates: Vec<(String, String)> =
+            hub_state.tasks.iter().filter(|t| t.status == Status::Posted && !records::has_pins(&self.hub, &t.slug)).map(|t| (t.slug.clone(), t.tip.clone())).collect();
+        for (slug, tip) in candidates {
+            self.try_launch(&slug, &tip, report)?;
+        }
+        Ok(())
+    }
+
+    fn try_launch(&mut self, slug: &str, tip: &str, report: &mut TickReport) -> Result<(), String> {
+        let result = self.runner.run_task_check(tip, slug).map_err(|e| format!("launch: task/{slug}: {e}"))?;
+        if result.pass {
+            report.errors.push(format!("launch: task/{slug}: the task check now passes at the tip — not launching a subagent for work that's already done"));
+            return Ok(());
+        }
+
+        // Pins are taken before anything else can fail, so a launch that
+        // goes wrong from here on is never silently retried next tick.
+        records::set_pins(&self.hub, slug, tip)?;
+
+        let clone_dir = self.home.subagent(slug);
+        if clone_dir.exists() {
+            report.errors.push(format!("launch: task/{slug}: {} already exists — refusing to touch a leftover agent clone (spec §5)", clone_dir.display()));
+            return Ok(());
+        }
+        if let Err(e) = self.create_subagent_clone(slug, &clone_dir) {
+            report.errors.push(format!("launch: task/{slug}: {e}"));
+            return Ok(());
+        }
+
+        let prompt_file = clone_dir.join(".git").join("dashboard-prompt.md");
+        if let Err(e) = self.write_prompt_file(slug, tip, &prompt_file) {
+            report.errors.push(format!("launch: task/{slug}: {e}"));
+            return Ok(());
+        }
+
+        match self.agent_cmd_at_main() {
+            Ok(agent_cmd) => match self.sessions.launch(slug, &clone_dir, &agent_cmd, &prompt_file) {
+                Ok(()) => report.launched.push(slug.to_string()),
+                Err(e) => report.errors.push(format!("launch: task/{slug}: {e}")),
+            },
+            Err(e) => report.errors.push(format!("launch: task/{slug}: {e}")),
+        }
+        Ok(())
+    }
+
+    fn agent_cmd_at_main(&self) -> Result<String, String> {
+        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
+        Ok(self.roadmap_at(&main_tip)?.player.agent_cmd)
+    }
+
+    /// `git clone --quiet <hub> <dir>`, then `git -C <dir> checkout -B
+    /// task/<slug> origin/task/<slug>` — a fresh clone on the task branch,
+    /// never touched again by the player except by fetching from it.
+    fn create_subagent_clone(&self, slug: &str, clone_dir: &Path) -> Result<(), String> {
+        if let Some(parent) = clone_dir.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let hub_str = path_str(&self.hub.dir)?;
+        let clone_str = path_str(clone_dir)?;
+        let cwd_git = Git::new(clone_dir.parent().unwrap_or_else(|| Path::new(".")));
+        cwd_git.run(&["clone", "--quiet", hub_str, clone_str]).map_err(|e| format!("git clone: {e}"))?;
+
+        let clone_git = Git::new(clone_dir);
+        clone_git.run(&["checkout", "-q", "-B", &format!("task/{slug}"), &format!("origin/task/{slug}")]).map_err(|e| format!("git checkout -B task/{slug}: {e}"))?;
+        Ok(())
+    }
+
+    /// Writes the player's preamble plus `tasks/<slug>/prompt.md` at `tip`
+    /// into `prompt_file`, which lives under `.git/` in the clone so it's
+    /// never part of the worktree and can't be committed by the subagent.
+    fn write_prompt_file(&self, slug: &str, tip: &str, prompt_file: &Path) -> Result<(), String> {
+        let prompt_body = self.hub.show_file(tip, &format!("tasks/{slug}/prompt.md")).ok_or_else(|| format!("tasks/{slug}/prompt.md missing at {tip}"))?;
+        let pinned = records::pinned_files(&self.hub, slug).unwrap_or_default();
+        let pinned_paths: Vec<&str> = pinned.keys().map(|s| s.as_str()).collect();
+        let content = format!("{}\n\n---\n\n{prompt_body}", launch_preamble(slug, &self.project, &pinned_paths));
+        std::fs::write(prompt_file, content).map_err(|e| format!("{}: {e}", prompt_file.display()))
+    }
+
+    /// Relaunches `slug`'s subagent session with the same clone and prompt
+    /// file it already has (spec's deferred "not relaunched automatically" —
+    /// this is the manual trigger, exposed as `dashboard relaunch <slug>`).
+    /// Only valid once pins exist (the task was actually launched before),
+    /// the session isn't already alive, and the task is still in a state the
+    /// subagent may work on.
+    pub fn relaunch(&mut self, slug: &str) -> Result<(), String> {
+        if !records::has_pins(&self.hub, slug) {
+            return Err(format!("relaunch: task/{slug} has no pins — it was never launched"));
+        }
+        if self.sessions.alive(slug) {
+            return Err(format!("relaunch: task/{slug}'s session is already alive"));
+        }
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let status = hub_state.tasks.iter().find(|t| t.slug == slug).map(|t| t.status);
+        if !matches!(status, Some(Status::Posted | Status::InProgress | Status::InRevision)) {
+            return Err(format!(
+                "relaunch: task/{slug} is {} — relaunch only applies while posted, in progress, or in revision",
+                status.map(|s| s.as_str()).unwrap_or("unknown")
+            ));
+        }
+
+        let clone_dir = self.home.subagent(slug);
+        if !clone_dir.exists() {
+            return Err(format!("relaunch: task/{slug}'s clone {} is missing", clone_dir.display()));
+        }
+        let prompt_file = clone_dir.join(".git").join("dashboard-prompt.md");
+        if !prompt_file.exists() {
+            return Err(format!("relaunch: task/{slug}'s prompt file {} is missing", prompt_file.display()));
+        }
+
+        let agent_cmd = self.agent_cmd_at_main()?;
+        self.sessions.launch(slug, &clone_dir, &agent_cmd, &prompt_file)
+    }
+
+    // ---- subagent import (spec §5, §7, §9) ----
+
+    /// Every task with pins whose status is `Posted`/`InProgress`/
+    /// `InRevision` and whose clone dir exists gets a fetch-and-validate
+    /// pass. A missing clone (never launched, or a relaunch pending) is
+    /// simply skipped — there's nothing to fetch from.
+    fn import_subagents(&mut self, report: &mut TickReport) -> Result<(), String> {
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let candidates: Vec<(String, String)> = hub_state
+            .tasks
+            .iter()
+            .filter(|t| matches!(t.status, Status::Posted | Status::InProgress | Status::InRevision) && records::has_pins(&self.hub, &t.slug))
+            .map(|t| (t.slug.clone(), t.tip.clone()))
+            .collect();
+
+        for (slug, hub_tip) in candidates {
+            let clone_dir = self.home.subagent(&slug);
+            if !clone_dir.exists() {
+                continue;
+            }
+            self.import_subagent(&slug, &hub_tip, &clone_dir, report)?;
+        }
+        Ok(())
+    }
+
+    /// `git fetch --no-tags <clone> +refs/heads/task/<slug>:refs/incoming/subagent/<slug>`,
+    /// then classifies the result exactly as spec's "Import semantics"
+    /// describes: behind/caught-up is a no-op, diverged is a `history`
+    /// rejection, a merge commit anywhere in the new range is a `history`
+    /// rejection, and otherwise only the newest commit (the finish claim) is
+    /// validated as a cumulative change from `hub_tip`.
+    fn import_subagent(&mut self, slug: &str, hub_tip: &str, clone_dir: &Path, report: &mut TickReport) -> Result<(), String> {
+        let clone_str = path_str(clone_dir)?;
+        let incoming_ref = format!("refs/incoming/subagent/{slug}");
+        let refspec = format!("+refs/heads/task/{slug}:{incoming_ref}");
+        if self.hub.run(&["fetch", "--no-tags", clone_str, &refspec]).is_err() {
+            return Ok(()); // the subagent hasn't pushed a commit yet, or the branch is missing
+        }
+        let incoming = match self.hub.rev_parse(&incoming_ref) {
+            Some(sha) => sha,
+            None => return Ok(()),
+        };
+
+        if self.hub.is_ancestor(&incoming, hub_tip) {
+            return Ok(()); // behind or caught up
+        }
+        if !self.hub.is_ancestor(hub_tip, &incoming) {
+            if !records::is_rejected(&self.hub, &incoming) {
+                let msg = format!("history: task/{slug}'s clone diverged from the hub");
+                self.reject_and_relay(slug, &incoming, Reason::History, msg, report)?;
+            }
+            return Ok(());
+        }
+
+        let commits = self.hub.rev_list(&[&format!("{hub_tip}..{incoming}"), "--reverse"]);
+        if commits.iter().any(|c| self.hub.parents(c).len() > 1) {
+            let msg = format!("history: task/{slug}'s clone contains a merge commit; only the player creates merges");
+            self.reject_and_relay(slug, &incoming, Reason::History, msg, report)?;
+            return Ok(());
+        }
+
+        if records::is_rejected(&self.hub, &incoming) {
+            return Ok(());
+        }
+
+        self.validate_finish_claim(slug, hub_tip, &incoming, report)
+    }
+
+    /// `candidate` (the newest commit fetched, `C` in spec's notation) is
+    /// either a block marker, a stray empty commit, or a finish claim —
+    /// dispatched exactly as spec's subagent-import bullets describe.
+    fn validate_finish_claim(&mut self, slug: &str, hub_tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+        if self.hub.is_empty_commit(candidate) {
+            let subject = self.hub.commit_subject(candidate).unwrap_or_default();
+            if subject.starts_with("block:") {
+                if !self.hub.diff_names(hub_tip, candidate).is_empty() {
+                    let msg = format!("history: task/{slug}'s block: commit isn't a clean reset to the hub tip — reset to hub, then block");
+                    return self.reject_and_relay(slug, candidate, Reason::History, msg, report);
+                }
+                let hub_ref = format!("refs/heads/task/{slug}");
+                self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
+                records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Block, Some(slug))?;
+                report.imported.push((hub_ref, candidate.to_string(), Transition::Block));
+                return Ok(());
+            }
+            let msg = "suite: empty commit is neither a finish claim nor a block: marker".to_string();
+            return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
+        }
+
+        let pins_violations = records::check_pins(&self.hub, slug, candidate);
+        if !pins_violations.is_empty() {
+            let msg = format!("pins: task/{slug}'s finish claim changed or removed pinned files: {}", pins_violations.join(", "));
+            return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
+        }
+
+        let suite = self.runner.run_suite(candidate);
+        if !suite.pass {
+            let msg = format!("suite: task/{slug}: {}", suite.summary());
+            return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
+        }
+
+        let hub_ref = format!("refs/heads/task/{slug}");
+        self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Finish, Some(slug))?;
+        report.imported.push((hub_ref, candidate.to_string(), Transition::Finish));
+        self.sessions.send(slug, "finish accepted — tests passed, awaiting director review; don't commit further");
+        Ok(())
+    }
+
+    /// Shared by every subagent-side rejection: records it, then re-derives
+    /// state and relays a recovery message to the subagent's session unless
+    /// this very rejection just escalated the task (spec §10: "the player
+    /// stops relaying"). Director rejections never go through here — only
+    /// `reject` (no relay), per spec.
+    fn reject_and_relay(&mut self, slug: &str, candidate: &str, reason: Reason, msg: String, report: &mut TickReport) -> Result<(), String> {
+        let rec = records::record_rejection(&self.hub, slug, candidate, reason, Actor::Subagent, &msg)?;
+        report.rejected.push(rec);
+
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let escalated = hub_state.tasks.iter().any(|t| t.slug == slug && t.status == Status::Escalated);
+        if escalated {
+            return Ok(());
+        }
+
+        let recovery = match reason {
+            Reason::History => format!("run `git fetch origin && git reset --hard origin/task/{slug}`, then redo your work and commit"),
+            _ => "fix it with a new commit on top".to_string(),
+        };
+        self.sessions.send(slug, &format!("{msg}\n\nRecovery: {recovery}"));
+        Ok(())
+    }
+
     // ---- unblock merges (spec §11) ----
 
     /// For every pending-family task branch whose deps are all accepted but
@@ -849,8 +1261,7 @@ fn path_allowed(path: &str, docs_paths: &[String]) -> bool {
 }
 
 /// `path` is exactly one of `test_paths` (spec §6.2), or falls under one of
-/// them treated as a directory prefix. Shared by the send-back path check
-/// here and, per the spec, by step 6's subagent finish-claim scope check.
+/// them treated as a directory prefix. Used by the send-back path check.
 fn path_under_test_paths(path: &str, test_paths: &[String]) -> bool {
     test_paths.iter().any(|t| {
         let prefix = t.trim_end_matches('/');
@@ -864,6 +1275,35 @@ fn path_under_test_paths(path: &str, test_paths: &[String]) -> bool {
 fn is_review_filename(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or("");
     base.starts_with('r') && base.ends_with(".md")
+}
+
+fn path_str(p: &Path) -> Result<&str, String> {
+    p.to_str().ok_or_else(|| format!("{} is not valid UTF-8", p.display()))
+}
+
+/// The player-written preamble that opens a subagent's prompt file (spec
+/// §8.3, §9's launch row): who it is, the commit discipline, the paths it
+/// must leave untouched (spelled out, not just described), the `block:`
+/// escape hatch, the history rules, and the fact that the player pastes
+/// messages into this same session later.
+fn launch_preamble(slug: &str, project: &str, pinned_paths: &[&str]) -> String {
+    let mut sorted = pinned_paths.to_vec();
+    sorted.sort_unstable();
+    let pinned_block = if sorted.is_empty() { "  (no pinned files recorded)".to_string() } else { sorted.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n") };
+    format!(
+        "You are the subagent for task `{slug}` in project `{project}`. Your clone's `origin` remote \
+is the hub: fetch from it, and never push anywhere else.\n\n\
+Commit only when you believe the whole project suite (every [[check]] in tests.toml) passes. Leave \
+work in progress uncommitted.\n\n\
+You may add new tests, but you must not modify or delete tests.toml, anything under its test_paths, \
+or tasks/{slug}/. The pinned files, which must stay byte-for-byte identical, are:\n\
+{pinned_block}\n\n\
+If the task can't be done as specified, make an empty commit explaining why instead of forcing it \
+through:\n  git commit --allow-empty -m \"block: <short reason>\" -m \"<explanation>\"\n\n\
+Never push, rebase, amend, reset published commits, or create merge commits.\n\n\
+The player will paste messages (rejections, director reviews) into this session as things happen — \
+follow their recovery instructions."
+    )
 }
 
 // --------------------------------------------------------------------------
