@@ -332,9 +332,12 @@ commits.
 ## 11. Merges (player-only)
 
 - **Unblocking a pending task.** When every `depends_on` of a pending task
-  is accepted, the player merges `main` into `task/<slug>` so the director's
-  post commit builds on the dependencies' code. A pending branch only
-  contains `tasks/<slug>/`, so this never conflicts.
+  is accepted (trivially, when it has none), the player merges `main` into
+  `task/<slug>` so the director's post commit builds on the dependencies'
+  code — and keeps doing so every time `main` moves, until the task is
+  posted, so the post can update any pinned test that landed on `main`
+  after the task first became ready. A pending branch only contains
+  `tasks/<slug>/`, so this never conflicts.
 - **Acceptance.** The player merges `task/<slug>` into `main` with `--no-ff`
   and a `Task: <slug>` trailer, after running the project suite on the
   merge result. `main` only moves this way (and via director-only paths),

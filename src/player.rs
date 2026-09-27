@@ -1392,10 +1392,13 @@ impl<S: Sessions> Player<S> {
 
     // ---- unblock merges (spec §11) ----
 
-    /// For every pending-family task branch whose deps are all accepted but
-    /// whose tip doesn't yet contain some dep's merge, merges `main` into
-    /// the branch in the bare hub (no worktree needed for a tree-level
-    /// merge).
+    /// For every not-yet-posted task branch whose deps are all accepted (or
+    /// that has none) and whose tip doesn't contain `main`'s tip, merges
+    /// `main` into the branch in the bare hub (no worktree needed for a
+    /// tree-level merge). Keyed on `main` itself, not only on the deps'
+    /// merges: a branch unblocked earlier must keep picking up whatever
+    /// lands on `main` afterwards, or the director's post commit can't
+    /// update pinned tests that only exist on the newer `main`.
     fn unblock_merges(&mut self, report: &mut TickReport) -> Result<(), String> {
         let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
         let accepted = records::accepted_tasks(&self.hub, &main_tip);
@@ -1407,18 +1410,14 @@ impl<S: Sessions> Player<S> {
                 continue;
             }
 
-            let Some(cfg) = self.task_config_at(&accepted, slug) else { continue };
-            if cfg.depends_on.is_empty() {
+            if accepted.contains_key(slug) {
                 continue;
             }
+            let Some(cfg) = self.task_config_at(&accepted, slug) else { continue };
             if !cfg.depends_on.iter().all(|d| accepted.contains_key(d)) {
                 continue;
             }
-            let needs_merge = cfg.depends_on.iter().any(|d| match accepted.get(d) {
-                Some(merge_sha) => !self.hub.is_ancestor(merge_sha, &tip),
-                None => false,
-            });
-            if !needs_merge {
+            if self.hub.is_ancestor(&main_tip, &tip) {
                 continue;
             }
 

@@ -438,6 +438,44 @@ fn unblock_merge_brings_an_accepted_dependency_into_the_branch() {
     assert_eq!(task_status(&hub, "b"), Status::Ready);
 }
 
+/// A branch unblocked earlier (or with no deps at all) must keep following
+/// `main` until it's posted: otherwise a later acceptance can add a pinned
+/// test the director's post commit has no way to update (the ai-director
+/// safety-schema-field case, 2026-09-27).
+#[test]
+fn unposted_ready_branch_keeps_picking_up_main() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    // A and C both have no deps, so C is ready from the start and never
+    // needed a dependency merge.
+    director_commit_on_branch(repo.path(), "task/a", "tasks/a/task.toml", "title = \"A\"\nphase = \"p1\"\n", "plan: a");
+    director_commit_on_branch(repo.path(), "task/c", "tasks/c/task.toml", "title = \"C\"\nphase = \"p1\"\n", "plan: c");
+    player.tick().expect("tick should succeed");
+    let c_tip_before = hub.rev_parse("refs/heads/task/c").unwrap();
+
+    // Hand-accept A (same plumbing as the unblock test above); main moves.
+    let a_tip = hub.rev_parse("refs/heads/task/a").unwrap();
+    let main_tip = hub.rev_parse("refs/heads/main").unwrap();
+    let tree = hub.merge_tree_write(&a_tip, &main_tip).expect("merge-tree should run").expect("no conflicts expected");
+    let merge_sha = hub.commit_tree(&tree, &[&main_tip, &a_tip], "Merge task/a\n\nTask: a").expect("commit-tree should succeed");
+    hub.update_ref_cas("refs/heads/main", &merge_sha, &main_tip).expect("main should fast-forward");
+
+    let report = player.tick().expect("tick should succeed");
+    assert!(report.merges.iter().any(|m| m.contains("task/c")), "{report}");
+    let c_tip_after = hub.rev_parse("refs/heads/task/c").unwrap();
+    assert_ne!(c_tip_after, c_tip_before);
+    assert!(hub.is_ancestor(&merge_sha, &c_tip_after), "task/c should now contain main");
+    assert_eq!(records::import_note(&hub, &c_tip_after).unwrap().transition, Transition::MergeUnblock);
+    assert_eq!(task_status(&hub, "c"), Status::Ready);
+
+    // Idempotent: nothing new on main, so no further merge.
+    let report = player.tick().expect("tick should succeed");
+    assert!(!report.merges.iter().any(|m| m.contains("task/c")), "{report}");
+}
+
 // --------------------------------------------------------------------------
 // CLI
 // --------------------------------------------------------------------------
