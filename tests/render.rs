@@ -10,7 +10,7 @@ mod common;
 use common::*;
 use dashboard::git::Git;
 use dashboard::init;
-use dashboard::paths::Home;
+use dashboard::paths::{self, Home};
 use dashboard::player::{NullSessions, Player};
 use tempfile::TempDir;
 
@@ -54,10 +54,10 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
 }
 
 /// Simulates the subagent's finish commit directly in the clone the player
-/// created (`home.subagent(slug)`) — the player fetches from that clone
+/// created (`paths::subagent_clone`) — the player fetches from that clone
 /// itself (spec's "provenance by fetch source"), no push needed.
-fn finish(home: &Home, player: &mut Player<NullSessions>, slug: &str) {
-    let dir = home.subagent(slug);
+fn finish(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
+    let dir = paths::subagent_clone(&repo.director_path(), slug);
     let git = Git::new(&dir);
     git.run(&["config", "user.name", "Test Subagent"]).expect("set user.name");
     git.run(&["config", "user.email", "subagent@example.com"]).expect("set user.email");
@@ -81,7 +81,7 @@ fn status_renders_ready_and_tested_tasks_from_a_real_hub() {
     plan(&repo, &mut player, "alpha");
     plan(&repo, &mut player, "beta");
     post(&repo, &mut player, "alpha");
-    finish(&home, &mut player, "alpha");
+    finish(&repo, &mut player, "alpha");
 
     let output = run_dashboard(&["--home", home.root.to_str().unwrap(), "--no-color", "--width", "100"], repo.path());
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));

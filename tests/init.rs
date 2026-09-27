@@ -8,7 +8,7 @@ mod common;
 use common::*;
 use dashboard::git::Git;
 use dashboard::init;
-use dashboard::paths::Home;
+use dashboard::paths::{self, Home};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -54,9 +54,15 @@ fn happy_path_via_library() {
     assert_eq!(std::fs::canonicalize(&remote_url).unwrap(), report.hub);
     assert!(repo.git().ref_exists("refs/remotes/hub/main"));
 
-    // subagents/ and events.jsonl exist.
-    assert!(Home { root: home_canon.clone() }.subagents_dir().is_dir());
+    // subagent clones nest under the director's own tree, not under home,
+    // and events.jsonl exists under home.
+    assert_eq!(report.director, director_toplevel);
+    assert!(paths::subagents_root(&report.director).is_dir());
     assert!(Home { root: home_canon }.events().is_file());
+
+    // the director repo's .gitignore now excludes it.
+    let gitignore = repo.git().show_file("refs/heads/main", ".gitignore").expect(".gitignore should exist on main");
+    assert!(gitignore.lines().any(|l| l.trim() == "/.dashboard/"), "gitignore missing /.dashboard/: {gitignore:?}");
 }
 
 #[test]

@@ -48,7 +48,6 @@ unless `--home`/`--name` override it:
 
 ```
 hub.git             bare repo — the only source of truth (spec §4)
-subagents/<slug>/   one clone per launched task, checked out on task/<slug>
 work/               the player's own scratch worktree for running checks
 events.jsonl        append-only, JSON per line — the director-event log
 director.cursor     the director's last-read event seq (dashboard wait)
@@ -57,6 +56,22 @@ player-state.json   last-seen (status, session-alive) per slug, so a
 player.heartbeat     unix time of the last tick, so `wait` can tell the
                      player looks dead (missing or >30s old)
 ```
+
+Subagent clones live *outside* this home, nested inside the **director's own
+working tree** instead (`paths::subagents_root`/`subagent_clone`):
+
+```
+<director-clone>/.dashboard/subagents/<slug>/   one clone per launched task
+```
+
+A subagent clone is a fresh directory the player creates with nobody present
+to click through an agent CLI's first-run workspace-trust dialog. Nesting it
+inside the director's project directory means it inherits whatever trust the
+operator already granted that directory through their own ordinary use,
+instead of the player needing to (and being unable to safely) grant that
+trust itself. `dashboard init` adds `/.dashboard/` to the director repo's
+`.gitignore` (committing the change on `main` if needed) so this never shows
+up as untracked noise in the operator's own `git status`.
 
 ## Hub refs and notes
 
@@ -199,7 +214,11 @@ back here):
 
 - **CLI shape**: `init` / `status` (default) / `player [--once]` /
   `relaunch <slug>` / `wait` — see CLI above.
-- **Hub/clone locations**: XDG (`paths::Home`) — see On-disk layout above.
+- **Hub/clone locations**: the hub home (hub.git, work/, events.jsonl, …) is
+  XDG (`paths::Home`); subagent clones are *not* — they nest inside the
+  director's own working tree (`paths::subagents_root`) so they inherit the
+  operator's own workspace trust instead of needing the player to grant it
+  to a directory it creates unattended. See On-disk layout above.
   `dashboard init` is how the hub gets created (`src/init.rs`).
 - **`dashboard wait`**: the director's listener, so the director's own
   session never polls. It blocks on `events.jsonl` past `director.cursor`

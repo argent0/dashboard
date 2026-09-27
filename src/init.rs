@@ -5,7 +5,7 @@
 
 use crate::config;
 use crate::git::Git;
-use crate::paths::Home;
+use crate::paths::{self, Home};
 use std::path::{Path, PathBuf};
 
 // --------------------------------------------------------------------------
@@ -17,6 +17,7 @@ pub struct InitReport {
     pub home: PathBuf,
     pub hub: PathBuf,
     pub project: String,
+    pub director: PathBuf,
 }
 
 impl InitReport {
@@ -79,6 +80,15 @@ pub fn init(director_dir: &Path, name: Option<&str>, home: Option<PathBuf>) -> R
     home.root = std::fs::canonicalize(&home.root).map_err(|e| format!("{}: {e}", home.root.display()))?;
     let hub_path = home.hub();
 
+    // Subagent clones nest inside the director's own working tree (see
+    // paths::subagents_root) so they inherit whatever workspace trust the
+    // operator already granted it, instead of the player needing to grant
+    // trust itself to a directory it creates with nobody present. Make sure
+    // the director repo ignores that subfolder before the hub ever fetches
+    // main, so the ignore rule ships with main's very first commit in the
+    // hub.
+    ensure_dashboard_gitignore(&toplevel, &home.root)?;
+
     let creator = Git::new(&home.root);
     creator.run(&["init", "--quiet", "--bare", path_str(&hub_path)?]).map_err(|e| e.to_string())?;
 
@@ -107,13 +117,71 @@ pub fn init(director_dir: &Path, name: Option<&str>, home: Option<PathBuf>) -> R
     director.run(&["fetch", "--quiet", "hub"]).map_err(|e| format!("fetching hub into the director clone: {e}"))?;
 
     // ---- home scaffolding ----
-    std::fs::create_dir_all(home.subagents_dir()).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(paths::subagents_root(&toplevel)).map_err(|e| e.to_string())?;
     let events = home.events();
     if !events.exists() {
         std::fs::write(&events, "").map_err(|e| e.to_string())?;
     }
 
-    Ok(InitReport { home: home.root, hub: hub_path, project })
+    Ok(InitReport { home: home.root, hub: hub_path, project, director: toplevel })
+}
+
+/// Ensures the director repo's `.gitignore` (on `refs/heads/main`) excludes
+/// `/.dashboard/` (where subagent clones live, `paths::subagents_root`),
+/// committing the change if needed.
+///
+/// When `main` is what's actually checked out here (the ordinary case —
+/// `dashboard init` runs from the director clone with `main` current), edits
+/// it in place, exactly like any other one-off setup commit the operator
+/// might make themselves. Otherwise `main` isn't checked out anywhere in
+/// this clone, so it's only safe to fast-forward its ref directly: building
+/// the commit in a throwaway `git worktree` first (never touching whatever
+/// *is* checked out or its index) and then advancing `refs/heads/main` to
+/// it. Moving that ref while `main` is the checked-out branch elsewhere
+/// would leave that worktree's index stale against its own HEAD — exactly
+/// the bug this split avoids.
+fn ensure_dashboard_gitignore(toplevel: &Path, scratch_parent: &Path) -> Result<(), String> {
+    let director = Git::new(toplevel);
+    let existing = director.show_file("refs/heads/main", ".gitignore").unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == "/.dashboard/") {
+        return Ok(());
+    }
+
+    let mut content = existing.clone();
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str("/.dashboard/\n");
+
+    if director.run(&["symbolic-ref", "-q", "HEAD"]).ok().as_deref() == Some("refs/heads/main") {
+        std::fs::write(toplevel.join(".gitignore"), content).map_err(|e| e.to_string())?;
+        director.run(&["add", ".gitignore"]).map_err(|e| e.to_string())?;
+        director.run(&["commit", "--quiet", "-m", "dashboard: ignore subagent clones (.dashboard/)"]).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let worktree_dir = scratch_parent.join("init-gitignore");
+    let _ = std::fs::remove_dir_all(&worktree_dir);
+    let tmp_branch = "__dashboard_init_gitignore";
+    let _ = director.run(&["branch", "-D", tmp_branch]);
+    director
+        .run(&["worktree", "add", "--quiet", "-B", tmp_branch, path_str(&worktree_dir)?, "refs/heads/main"])
+        .map_err(|e| format!("creating scratch worktree for .gitignore: {e}"))?;
+
+    let commit_result = (|| -> Result<String, String> {
+        std::fs::write(worktree_dir.join(".gitignore"), &content).map_err(|e| e.to_string())?;
+
+        let scratch = Git::new(&worktree_dir);
+        scratch.run(&["add", ".gitignore"]).map_err(|e| e.to_string())?;
+        scratch.run(&["commit", "--quiet", "-m", "dashboard: ignore subagent clones (.dashboard/)"]).map_err(|e| e.to_string())?;
+        scratch.rev_parse("HEAD").ok_or_else(|| "commit succeeded but HEAD is unreadable".to_string())
+    })();
+
+    let _ = director.run(&["worktree", "remove", "--force", path_str(&worktree_dir)?]);
+    let _ = director.run(&["branch", "-D", tmp_branch]);
+
+    let new_tip = commit_result?;
+    director.update_ref("refs/heads/main", &new_tip).map_err(|e| e.to_string())
 }
 
 // --------------------------------------------------------------------------

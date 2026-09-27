@@ -30,14 +30,6 @@ impl Home {
         self.root.join("hub.git")
     }
 
-    pub fn subagents_dir(&self) -> PathBuf {
-        self.root.join("subagents")
-    }
-
-    pub fn subagent(&self, slug: &str) -> PathBuf {
-        self.subagents_dir().join(slug)
-    }
-
     pub fn work(&self) -> PathBuf {
         self.root.join("work")
     }
@@ -62,6 +54,35 @@ impl Home {
     pub fn heartbeat(&self) -> PathBuf {
         self.root.join("player.heartbeat")
     }
+}
+
+/// Where a project's subagent clones live: nested inside the *director's*
+/// own working tree, never under the dashboard home. `dashboard init`
+/// gitignores this subfolder.
+///
+/// Each one is a `git worktree` of `subagent_workspace` (never a fresh
+/// `git clone`), because an agent CLI's workspace trust is scoped to a git
+/// *repository*, not a filesystem path: a fresh clone is always a fresh
+/// repository, and nobody is present to click through its first-run
+/// trust dialog. A worktree shares its repository's identity with
+/// `subagent_workspace`, so it inherits the one trust decision the operator
+/// already made for that single, permanent repo instead of needing a fresh
+/// one per task — safe because slugs are never reused (spec §8.1) and at
+/// most one task is ever in flight (spec §4), so worktrees never collide on
+/// a branch name or need concurrent access to the shared ref namespace.
+pub fn subagents_root(director: &Path) -> PathBuf {
+    director.join(".dashboard").join("subagents")
+}
+
+pub fn subagent_clone(director: &Path, slug: &str) -> PathBuf {
+    subagents_root(director).join(slug)
+}
+
+/// The one persistent clone of the hub every subagent's worktree hangs off
+/// (see `subagents_root`). Created lazily on first launch, trusted once by
+/// the operator, and never deleted.
+pub fn subagent_workspace(director: &Path) -> PathBuf {
+    director.join(".dashboard").join("workspace")
 }
 
 /// Resolves the dashboard home: the explicit `--home` path if given, else
@@ -129,13 +150,19 @@ mod tests {
     fn home_accessors() {
         let home = Home { root: PathBuf::from("/data/dashboard/myproj") };
         assert_eq!(home.hub(), PathBuf::from("/data/dashboard/myproj/hub.git"));
-        assert_eq!(home.subagents_dir(), PathBuf::from("/data/dashboard/myproj/subagents"));
-        assert_eq!(home.subagent("foo"), PathBuf::from("/data/dashboard/myproj/subagents/foo"));
         assert_eq!(home.work(), PathBuf::from("/data/dashboard/myproj/work"));
         assert_eq!(home.events(), PathBuf::from("/data/dashboard/myproj/events.jsonl"));
         assert_eq!(home.director_cursor(), PathBuf::from("/data/dashboard/myproj/director.cursor"));
         assert_eq!(home.player_state(), PathBuf::from("/data/dashboard/myproj/player-state.json"));
         assert_eq!(home.heartbeat(), PathBuf::from("/data/dashboard/myproj/player.heartbeat"));
+    }
+
+    #[test]
+    fn subagent_paths_nest_under_the_directors_own_tree() {
+        let director = PathBuf::from("/home/op/myproj");
+        assert_eq!(subagents_root(&director), PathBuf::from("/home/op/myproj/.dashboard/subagents"));
+        assert_eq!(subagent_clone(&director, "foo"), PathBuf::from("/home/op/myproj/.dashboard/subagents/foo"));
+        assert_eq!(subagent_workspace(&director), PathBuf::from("/home/op/myproj/.dashboard/workspace"));
     }
 
     #[test]

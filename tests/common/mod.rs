@@ -26,6 +26,13 @@ impl DirectorRepo {
     pub fn git(&self) -> Git {
         Git::new(self.path())
     }
+
+    /// The canonicalized toplevel — matches what `init::init` stores as
+    /// `dashboard.director` and what `Player`/`paths::subagent_clone`
+    /// resolve a subagent's clone directory against.
+    pub fn director_path(&self) -> std::path::PathBuf {
+        std::fs::canonicalize(self.path()).expect("canonicalize director repo path")
+    }
 }
 
 pub fn director_repo() -> DirectorRepo {

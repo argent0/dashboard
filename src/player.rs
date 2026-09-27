@@ -20,7 +20,7 @@ use crate::checks;
 use crate::config::{self, RoadmapConfig, Reason, TaskConfig};
 use crate::events::{self, EventKind};
 use crate::git::Git;
-use crate::paths::Home;
+use crate::paths::{self, Home};
 use crate::records::{self, Actor, RejectionRecord, Transition};
 use crate::state::{self, Status};
 use std::collections::{BTreeMap, BTreeSet};
@@ -189,6 +189,7 @@ impl Sessions for TmuxSessions {
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
+
 
 // --------------------------------------------------------------------------
 // TickReport
@@ -1027,7 +1028,7 @@ impl<S: Sessions> Player<S> {
         // goes wrong from here on is never silently retried next tick.
         records::set_pins(&self.hub, slug, tip)?;
 
-        let clone_dir = self.home.subagent(slug);
+        let clone_dir = paths::subagent_clone(&self.director, slug);
         if clone_dir.exists() {
             report.errors.push(format!("launch: task/{slug}: {} already exists — refusing to touch a leftover agent clone (spec §5)", clone_dir.display()));
             return Ok(());
@@ -1037,7 +1038,13 @@ impl<S: Sessions> Player<S> {
             return Ok(());
         }
 
-        let prompt_file = clone_dir.join(".git").join("dashboard-prompt.md");
+        let prompt_file = match Self::git_dir(&clone_dir) {
+            Ok(dir) => dir.join("dashboard-prompt.md"),
+            Err(e) => {
+                report.errors.push(format!("launch: task/{slug}: {e}"));
+                return Ok(());
+            }
+        };
         if let Err(e) = self.write_prompt_file(slug, tip, &prompt_file) {
             report.errors.push(format!("launch: task/{slug}: {e}"));
             return Ok(());
@@ -1058,26 +1065,57 @@ impl<S: Sessions> Player<S> {
         Ok(self.roadmap_at(&main_tip)?.player.agent_cmd)
     }
 
-    /// `git clone --quiet <hub> <dir>`, then `git -C <dir> checkout -B
-    /// task/<slug> origin/task/<slug>` — a fresh clone on the task branch,
-    /// never touched again by the player except by fetching from it.
+    /// Ensures the project's one, permanent subagent workspace exists (a
+    /// `git clone` of the hub — `paths::subagent_workspace` — created once
+    /// and trusted once by the operator), brings it up to date with the hub,
+    /// then `git worktree add -B task/<slug> <clone_dir> origin/task/<slug>`:
+    /// a fresh worktree on the task branch that shares the workspace's git
+    /// identity — and so its trust — instead of being a fresh repository of
+    /// its own. Never touched again by the player except by fetching from
+    /// it. Safe to share one repository across every task's worktree only
+    /// because slugs are never reused (spec §8.1) and at most one task is
+    /// ever in flight (spec §4): no two worktrees ever contend for the same
+    /// branch name or need concurrent access to the shared ref namespace.
     fn create_subagent_clone(&self, slug: &str, clone_dir: &Path) -> Result<(), String> {
+        let workspace_dir = paths::subagent_workspace(&self.director);
+        if !workspace_dir.join(".git").exists() {
+            if let Some(parent) = workspace_dir.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+            }
+            let hub_str = path_str(&self.hub.dir)?;
+            let workspace_str = path_str(&workspace_dir)?;
+            let cwd_git = Git::new(workspace_dir.parent().unwrap_or_else(|| Path::new(".")));
+            cwd_git.run(&["clone", "--quiet", hub_str, workspace_str]).map_err(|e| format!("git clone (subagent workspace): {e}"))?;
+        }
+
+        let workspace = Git::new(&workspace_dir);
+        workspace.run(&["fetch", "--quiet", "origin"]).map_err(|e| format!("fetching hub into the subagent workspace: {e}"))?;
+
         if let Some(parent) = clone_dir.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        let hub_str = path_str(&self.hub.dir)?;
         let clone_str = path_str(clone_dir)?;
-        let cwd_git = Git::new(clone_dir.parent().unwrap_or_else(|| Path::new(".")));
-        cwd_git.run(&["clone", "--quiet", hub_str, clone_str]).map_err(|e| format!("git clone: {e}"))?;
-
-        let clone_git = Git::new(clone_dir);
-        clone_git.run(&["checkout", "-q", "-B", &format!("task/{slug}"), &format!("origin/task/{slug}")]).map_err(|e| format!("git checkout -B task/{slug}: {e}"))?;
+        workspace
+            .run(&["worktree", "add", "--quiet", "-B", &format!("task/{slug}"), clone_str, &format!("origin/task/{slug}")])
+            .map_err(|e| format!("git worktree add: {e}"))?;
         Ok(())
     }
 
+    /// The real, private git-admin directory for `clone_dir`. For a plain
+    /// clone this is just `<clone_dir>/.git`, but a worktree's `.git` is a
+    /// *file* (pointing at `<workspace>/.git/worktrees/<name>`), so it can't
+    /// be joined into further like a directory — this asks git for the real
+    /// path instead of assuming the plain-clone shape.
+    fn git_dir(clone_dir: &Path) -> Result<PathBuf, String> {
+        let out = Git::new(clone_dir).run(&["rev-parse", "--git-dir"]).map_err(|e| e.to_string())?;
+        let dir = PathBuf::from(out);
+        Ok(if dir.is_absolute() { dir } else { clone_dir.join(dir) })
+    }
+
     /// Writes the player's preamble plus `tasks/<slug>/prompt.md` at `tip`
-    /// into `prompt_file`, which lives under `.git/` in the clone so it's
-    /// never part of the worktree and can't be committed by the subagent.
+    /// into `prompt_file`, which lives under the clone's private git-admin
+    /// directory (`git_dir`) so it's never part of the worktree and can't be
+    /// committed by the subagent.
     fn write_prompt_file(&self, slug: &str, tip: &str, prompt_file: &Path) -> Result<(), String> {
         let prompt_body = self.hub.show_file(tip, &format!("tasks/{slug}/prompt.md")).ok_or_else(|| format!("tasks/{slug}/prompt.md missing at {tip}"))?;
         let pinned = records::pinned_files(&self.hub, slug).unwrap_or_default();
@@ -1108,11 +1146,11 @@ impl<S: Sessions> Player<S> {
             ));
         }
 
-        let clone_dir = self.home.subagent(slug);
+        let clone_dir = paths::subagent_clone(&self.director, slug);
         if !clone_dir.exists() {
             return Err(format!("relaunch: task/{slug}'s clone {} is missing", clone_dir.display()));
         }
-        let prompt_file = clone_dir.join(".git").join("dashboard-prompt.md");
+        let prompt_file = Self::git_dir(&clone_dir)?.join("dashboard-prompt.md");
         if !prompt_file.exists() {
             return Err(format!("relaunch: task/{slug}'s prompt file {} is missing", prompt_file.display()));
         }
@@ -1137,7 +1175,7 @@ impl<S: Sessions> Player<S> {
             .collect();
 
         for (slug, hub_tip) in candidates {
-            let clone_dir = self.home.subagent(&slug);
+            let clone_dir = paths::subagent_clone(&self.director, &slug);
             if !clone_dir.exists() {
                 continue;
             }

@@ -12,7 +12,7 @@ use common::*;
 use dashboard::events::{self, EventKind};
 use dashboard::git::Git;
 use dashboard::init;
-use dashboard::paths::Home;
+use dashboard::paths::{self, Home};
 use dashboard::player::{NullSessions, Player, Sessions};
 use dashboard::records::Transition;
 use dashboard::state::{self, Status};
@@ -72,8 +72,8 @@ fn ensure_identity(dir: &Path) {
     git.run(&["config", "commit.gpgsign", "false"]).expect("disable gpgsign");
 }
 
-fn commit_in_clone(home: &Home, slug: &str, rel: &str, content: &str, msg: &str) -> String {
-    let dir = home.subagent(slug);
+fn commit_in_clone(repo: &DirectorRepo, slug: &str, rel: &str, content: &str, msg: &str) -> String {
+    let dir = paths::subagent_clone(&repo.director_path(), slug);
     ensure_identity(&dir);
     write_file(&dir, rel, content);
     commit(&dir, msg)
@@ -91,8 +91,8 @@ fn director_pull_main(repo: &Path) {
     git.run(&["merge", "-q", "--ff-only", "FETCH_HEAD"]).expect("fast-forward local main onto hub's main");
 }
 
-fn block_in_clone(home: &Home, slug: &str, msg: &str) -> String {
-    let dir = home.subagent(slug);
+fn block_in_clone(repo: &DirectorRepo, slug: &str, msg: &str) -> String {
+    let dir = paths::subagent_clone(&repo.director_path(), slug);
     ensure_identity(&dir);
     commit_empty(&dir, msg)
 }
@@ -124,7 +124,7 @@ fn player_tick_emits_the_full_set_of_director_relevant_events() {
     plan(&repo, &mut player, "dep", "title = \"Dep\"\nphase = \"p1\"\n");
     plan(&repo, &mut player, "depender", "title = \"Depender\"\nphase = \"p1\"\ndepends_on = [\"dep\"]\n");
     post(&repo, &mut player, "dep");
-    commit_in_clone(&home, "dep", "feature-dep.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "dep", "feature-dep.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
     assert_eq!(task_status(&hub, "dep"), Status::Tested);
     let tested = events_for(&home, "dep", EventKind::Tested);
@@ -146,7 +146,7 @@ fn player_tick_emits_the_full_set_of_director_relevant_events() {
     director_pull_main(repo.path());
     plan(&repo, &mut player, "blk", "title = \"Blocked\"\nphase = \"p1\"\n");
     post(&repo, &mut player, "blk");
-    block_in_clone(&home, "blk", "block: cannot be done\n\nThe API this needs doesn't exist.");
+    block_in_clone(&repo, "blk", "block: cannot be done\n\nThe API this needs doesn't exist.");
     player.tick().expect("block tick should succeed");
     assert_eq!(task_status(&hub, "blk"), Status::Escalated);
     let escalated = events_for(&home, "blk", EventKind::Escalated);
@@ -185,7 +185,7 @@ fn no_reemission_after_reconstructing_the_player() {
 
     plan(&repo, &mut player, "x", "title = \"X\"\nphase = \"p1\"\n");
     post(&repo, &mut player, "x");
-    commit_in_clone(&home, "x", "feature-x.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "x", "feature-x.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
     assert_eq!(task_status(&hub, "x"), Status::Tested);
     assert_eq!(events_for(&home, "x", EventKind::Tested).len(), 1);
@@ -215,7 +215,7 @@ fn first_run_with_no_state_file_emits_nothing_for_preexisting_statuses() {
 
     plan(&repo, &mut player, "already", "title = \"Already\"\nphase = \"p1\"\n");
     post(&repo, &mut player, "already");
-    commit_in_clone(&home, "already", "feature-already.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "already", "feature-already.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
     assert_eq!(task_status(&hub, "already"), Status::Tested);
     assert_eq!(events_for(&home, "already", EventKind::Tested).len(), 1);
@@ -267,7 +267,7 @@ fn killing_a_session_via_accept_does_not_emit_session_died() {
 
     plan(&repo, &mut player, "ok", "title = \"Ok\"\nphase = \"p1\"\n");
     post(&repo, &mut player, "ok");
-    commit_in_clone(&home, "ok", "feature-ok.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "ok", "feature-ok.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
 
     director_pull_task_branch(repo.path(), "ok");

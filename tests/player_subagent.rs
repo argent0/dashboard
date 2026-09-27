@@ -5,7 +5,7 @@
 // builds a real director repo and a real hub via `dashboard::init::init`,
 // drives `Player::tick` with `NullSessions`, and simulates the subagent by
 // committing directly in the clone the player itself created
-// (`home.subagent(slug)`) — exactly as spec.md's "provenance by fetch
+// (`paths::subagent_clone`) — exactly as spec.md's "provenance by fetch
 // source" model expects the player to pull from that clone, no push needed.
 //
 // The one exception is `tmux_smoke_test`, which drives the real
@@ -18,11 +18,11 @@ use common::*;
 use dashboard::config::Reason;
 use dashboard::git::Git;
 use dashboard::init;
-use dashboard::paths::Home;
+use dashboard::paths::{self, Home};
 use dashboard::player::{self, NullSessions, Player, Sessions};
 use dashboard::records::{self, Transition};
 use dashboard::state::{self, Status};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -95,11 +95,11 @@ fn ensure_identity(dir: &Path) {
 
 /// Writes every `(rel, content)` pair into `slug`'s clone and commits them
 /// together — simulating the subagent's own commit, made directly in the
-/// clone the player created (`home.subagent(slug)`), never pushed anywhere:
-/// the player fetches from this clone itself (spec's "provenance by fetch
-/// source").
-fn commit_multi_in_clone(home: &Home, slug: &str, files: &[(&str, &str)], msg: &str) -> String {
-    let dir = home.subagent(slug);
+/// clone the player created (`paths::subagent_clone`), never pushed
+/// anywhere: the player fetches from this clone itself (spec's "provenance
+/// by fetch source").
+fn commit_multi_in_clone(repo: &DirectorRepo, slug: &str, files: &[(&str, &str)], msg: &str) -> String {
+    let dir = paths::subagent_clone(&repo.director_path(), slug);
     ensure_identity(&dir);
     for (rel, content) in files {
         write_file(&dir, rel, content);
@@ -107,12 +107,12 @@ fn commit_multi_in_clone(home: &Home, slug: &str, files: &[(&str, &str)], msg: &
     commit(&dir, msg)
 }
 
-fn commit_in_clone(home: &Home, slug: &str, rel: &str, content: &str, msg: &str) -> String {
-    commit_multi_in_clone(home, slug, &[(rel, content)], msg)
+fn commit_in_clone(repo: &DirectorRepo, slug: &str, rel: &str, content: &str, msg: &str) -> String {
+    commit_multi_in_clone(repo, slug, &[(rel, content)], msg)
 }
 
-fn block_in_clone(home: &Home, slug: &str, msg: &str) -> String {
-    let dir = home.subagent(slug);
+fn block_in_clone(repo: &DirectorRepo, slug: &str, msg: &str) -> String {
+    let dir = paths::subagent_clone(&repo.director_path(), slug);
     ensure_identity(&dir);
     commit_empty(&dir, msg)
 }
@@ -133,7 +133,7 @@ fn post_launches_a_subagent_clone_with_pins_and_a_prompt_file() {
 
     assert!(records::has_pins(&hub, "foo"), "pins should be recorded at launch");
 
-    let clone_dir = home.subagent("foo");
+    let clone_dir = paths::subagent_clone(&repo.director_path(), "foo");
     let clone_git = Git::new(&clone_dir);
     let branch = clone_git.run(&["rev-parse", "--abbrev-ref", "HEAD"]).expect("clone should be on a branch");
     assert_eq!(branch, "task/foo");
@@ -141,7 +141,14 @@ fn post_launches_a_subagent_clone_with_pins_and_a_prompt_file() {
     let hub_tip = hub.rev_parse("refs/heads/task/foo").expect("hub should have task/foo");
     assert_eq!(clone_tip, hub_tip, "the clone should be checked out exactly at the hub's post tip");
 
-    let prompt_file = clone_dir.join(".git").join("dashboard-prompt.md");
+    // The clone is a worktree, so its `.git` is a *file* pointing at its
+    // real, private admin dir under the shared workspace's `.git/worktrees/`
+    // — resolve that the same way the player does, rather than assuming the
+    // plain-clone shape.
+    let git_dir_raw = clone_git.run(&["rev-parse", "--git-dir"]).expect("git-dir should resolve");
+    let git_dir = PathBuf::from(&git_dir_raw);
+    let git_dir = if git_dir.is_absolute() { git_dir } else { clone_dir.join(git_dir) };
+    let prompt_file = git_dir.join("dashboard-prompt.md");
     let prompt_content = std::fs::read_to_string(&prompt_file).expect("prompt file should exist");
     assert!(prompt_content.contains("subagent for task `foo`"), "{prompt_content}");
     assert!(prompt_content.contains("do the thing"), "prompt.md's body should be appended: {prompt_content}");
@@ -179,8 +186,8 @@ fn launch_skipped_with_an_error_when_the_clone_dir_already_exists() {
 
     // A leftover directory from some previous, unrelated run — the player
     // must never touch it (spec §5).
-    std::fs::create_dir_all(home.subagent("leftover")).expect("create leftover dir");
-    std::fs::write(home.subagent("leftover").join("marker.txt"), "leftover\n").expect("write marker");
+    std::fs::create_dir_all(paths::subagent_clone(&repo.director_path(), "leftover")).expect("create leftover dir");
+    std::fs::write(paths::subagent_clone(&repo.director_path(), "leftover").join("marker.txt"), "leftover\n").expect("write marker");
 
     checkout_branch(repo.path(), "task/leftover");
     write_file(repo.path(), "tasks/leftover/prompt.md", "do it\n");
@@ -194,7 +201,7 @@ fn launch_skipped_with_an_error_when_the_clone_dir_already_exists() {
     assert_eq!(report.errors.len(), 1, "{report}");
     assert!(report.errors[0].contains("already exists"), "{}", report.errors[0]);
     assert!(player.sessions().launched.is_empty(), "no session should have been started");
-    assert!(home.subagent("leftover").join("marker.txt").exists(), "the leftover clone must be untouched");
+    assert!(paths::subagent_clone(&repo.director_path(), "leftover").join("marker.txt").exists(), "the leftover clone must be untouched");
     assert_eq!(task_status(&hub, "leftover"), Status::Posted);
 }
 
@@ -210,7 +217,7 @@ fn finish_happy_path_is_tested_with_a_note_sent() {
     let mut player = open_player(&home);
 
     plan_and_post(&repo, &mut player, "x");
-    commit_in_clone(&home, "x", "feature.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "x", "feature.txt", "done\n", "finish work");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.imported.len(), 1, "{report}");
@@ -229,7 +236,7 @@ fn finish_modifying_a_pinned_file_is_rejected_with_pins_and_relayed() {
     let mut player = open_player(&home);
 
     plan_and_post(&repo, &mut player, "y");
-    commit_in_clone(&home, "y", "tasks/y/task.toml", "title = \"Y (tampered)\"\nphase = \"p1\"\n\n[check]\nname = \"y-check\"\ncmd = \"true\"\n", "tamper with the pinned task.toml");
+    commit_in_clone(&repo, "y", "tasks/y/task.toml", "title = \"Y (tampered)\"\nphase = \"p1\"\n\n[check]\nname = \"y-check\"\ncmd = \"true\"\n", "tamper with the pinned task.toml");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
@@ -249,7 +256,7 @@ fn finish_with_a_failing_suite_is_rejected_then_a_fix_on_top_passes() {
     let mut player = open_player(&home);
 
     plan_and_post(&repo, &mut player, "z");
-    commit_in_clone(&home, "z", "unrelated.txt", "still working\n", "not done yet");
+    commit_in_clone(&repo, "z", "unrelated.txt", "still working\n", "not done yet");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
@@ -261,7 +268,7 @@ fn finish_with_a_failing_suite_is_rejected_then_a_fix_on_top_passes() {
     // The cumulative diff from the hub tip includes both commits: adding
     // feature.txt now makes it pass even though the first commit alone did
     // not (spec's "each is a finish claim, validated cumulatively").
-    commit_in_clone(&home, "z", "feature.txt", "done\n", "actually finish it");
+    commit_in_clone(&repo, "z", "feature.txt", "done\n", "actually finish it");
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.imported.len(), 1, "{report}");
     assert_eq!(report.imported[0].2, Transition::Finish);
@@ -276,7 +283,7 @@ fn subagent_adding_a_new_test_file_is_allowed() {
     let mut player = open_player(&home);
 
     plan_and_post(&repo, &mut player, "w");
-    commit_multi_in_clone(&home, "w", &[("feature.txt", "done\n"), ("tests/extra_test.txt", "some new test scaffolding\n")], "finish, plus a new test file");
+    commit_multi_in_clone(&repo, "w", &[("feature.txt", "done\n"), ("tests/extra_test.txt", "some new test scaffolding\n")], "finish, plus a new test file");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.imported.len(), 1, "{report}");
@@ -293,7 +300,7 @@ fn subagent_merge_commit_is_rejected_with_history() {
 
     plan_and_post(&repo, &mut player, "m");
 
-    let clone_dir = home.subagent("m");
+    let clone_dir = paths::subagent_clone(&repo.director_path(), "m");
     let clone_git = Git::new(&clone_dir);
     let head = clone_git.rev_parse("HEAD").expect("clone should have a tip");
     let origin_main = clone_git.rev_parse("origin/main").expect("clone should track origin/main");
@@ -316,7 +323,7 @@ fn subagent_commit_built_on_a_stale_pre_send_back_tip_is_diverged_history() {
     let mut player = open_player(&home);
 
     plan_and_post(&repo, &mut player, "d");
-    commit_in_clone(&home, "d", "feature.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "d", "feature.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
     assert_eq!(task_status(&hub, "d"), Status::Tested);
 
@@ -331,7 +338,7 @@ fn subagent_commit_built_on_a_stale_pre_send_back_tip_is_diverged_history() {
 
     // The subagent keeps committing on its stale pre-send-back tip instead
     // of pulling first — its history no longer contains the hub's new tip.
-    commit_in_clone(&home, "d", "feature2.txt", "done too\n", "add feature2 without pulling first");
+    commit_in_clone(&repo, "d", "feature2.txt", "done too\n", "add feature2 without pulling first");
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::History);
@@ -352,7 +359,7 @@ fn block_marker_escalates_with_the_cause() {
     let mut player = open_player(&home);
 
     plan_and_post(&repo, &mut player, "blk");
-    block_in_clone(&home, "blk", "block: cannot be done as specified\n\nThe API this needs doesn't exist.");
+    block_in_clone(&repo, "blk", "block: cannot be done as specified\n\nThe API this needs doesn't exist.");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.imported.len(), 1, "{report}");
@@ -377,7 +384,7 @@ fn two_suite_strikes_escalate_and_the_second_rejection_is_not_relayed() {
 
     plan_and_post(&repo, &mut player, "s");
 
-    commit_in_clone(&home, "s", "attempt1.txt", "no feature yet\n", "attempt 1 (suite still fails)");
+    commit_in_clone(&repo, "s", "attempt1.txt", "no feature yet\n", "attempt 1 (suite still fails)");
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Suite);
@@ -385,7 +392,7 @@ fn two_suite_strikes_escalate_and_the_second_rejection_is_not_relayed() {
     let relayed_before = player.sessions().sent.iter().filter(|(slug, _)| slug == "s").count();
     assert_eq!(relayed_before, 1, "the first strike should be relayed");
 
-    commit_in_clone(&home, "s", "attempt2.txt", "still no feature\n", "attempt 2 (suite still fails)");
+    commit_in_clone(&repo, "s", "attempt2.txt", "still no feature\n", "attempt 2 (suite still fails)");
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Suite);
@@ -406,7 +413,7 @@ fn full_loop_post_finish_send_back_fix_finish_accept() {
     let mut player = open_player(&home);
 
     plan_and_post(&repo, &mut player, "full");
-    commit_in_clone(&home, "full", "feature.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "full", "feature.txt", "done\n", "finish work");
     let report = player.tick().expect("finish tick should succeed");
     assert_eq!(report.imported[0].2, Transition::Finish);
     assert_eq!(task_status(&hub, "full"), Status::Tested);
@@ -423,12 +430,12 @@ fn full_loop_post_finish_send_back_fix_finish_accept() {
 
     // The subagent pulls the send-back commit from origin (the hub) before
     // continuing to work.
-    let clone_dir = home.subagent("full");
+    let clone_dir = paths::subagent_clone(&repo.director_path(), "full");
     let clone_git = Git::new(&clone_dir);
     clone_git.run(&["fetch", "-q", "origin", "task/full"]).expect("fetch origin");
     clone_git.run(&["merge", "-q", "--ff-only", "FETCH_HEAD"]).expect("fast-forward onto the send-back commit");
 
-    commit_in_clone(&home, "full", "feature2.txt", "done too\n", "address the review");
+    commit_in_clone(&repo, "full", "feature2.txt", "done too\n", "address the review");
     let report = player.tick().expect("second finish tick should succeed");
     assert_eq!(report.imported.len(), 1, "{report}");
     assert_eq!(report.imported[0].2, Transition::Finish);
