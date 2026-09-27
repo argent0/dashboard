@@ -88,21 +88,29 @@ pub(crate) mod term {
         fn ioctl(fd: i32, request: u64, argp: *mut Winsize) -> i32;
     }
 
-    pub fn columns() -> Option<u32> {
+    fn winsize() -> Option<Winsize> {
         let mut ws = Winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
         let fd = std::io::stdout().as_raw_fd();
         let ret = unsafe { ioctl(fd, TIOCGWINSZ, &mut ws) };
-        if ret == 0 && ws.ws_col > 0 {
-            Some(ws.ws_col as u32)
-        } else {
-            None
-        }
+        (ret == 0).then_some(ws)
+    }
+
+    pub fn columns() -> Option<u32> {
+        winsize().map(|ws| ws.ws_col as u32).filter(|&c| c > 0)
+    }
+
+    pub fn rows() -> Option<u32> {
+        winsize().map(|ws| ws.ws_row as u32).filter(|&r| r > 0)
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) mod term {
     pub fn columns() -> Option<u32> {
+        None
+    }
+
+    pub fn rows() -> Option<u32> {
         None
     }
 }
@@ -113,4 +121,12 @@ pub fn detect_width(explicit: Option<u32>) -> usize {
         .or_else(term::columns)
         .unwrap_or(96);
     width.clamp(60, 140) as usize
+}
+
+/// The terminal's height in rows. Asks the terminal first (unlike width) so
+/// `dashboard watch` tracks resizes even when a stale `LINES` is exported.
+pub fn detect_height() -> Option<usize> {
+    term::rows()
+        .or_else(|| std::env::var("LINES").ok().and_then(|v| v.parse::<u32>().ok()).filter(|&v| v > 0))
+        .map(|r| r as usize)
 }

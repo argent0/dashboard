@@ -19,7 +19,7 @@ CLI and file format.
 ## Repo layout
 
 ```
-src/main.rs     CLI (clap): init / status (default) / player / relaunch / wait
+src/main.rs     CLI (clap): init / status (default) / watch / player / relaunch / wait
 src/lib.rs      the library crate every module below hangs off of
 src/config.rs   roadmap.toml / tests.toml / task.toml schemas (serde) + defaults
 src/git.rs      thin sync wrapper over the `git` CLI (rev-parse, diff, notes, merge-tree, …)
@@ -169,6 +169,10 @@ ignored — no `deny_unknown_fields` anywhere.
   clone --bare`s it into `hub.git`, and wires up the two-way config links.
 - `dashboard` / `dashboard status [--no-color] [--width N]` — the default:
   renders the roadmap derived from the hub.
+- `dashboard watch [-n SECS]` — `status` re-rendered in place every N
+  seconds (default 2) until Ctrl-C. Flicker-free: alternate screen, and each
+  frame overwrites the last in one write (cursor-home + per-line clear-to-EOL)
+  rather than clearing first; redraws immediately on terminal resize.
 - `dashboard player [--once] [--interval SECS]` — the player loop (default
   interval 2s). `--once` runs a single tick, prints its report, and exits;
   this is what drives `scripts/e2e.sh` and what a supervisor (systemd timer,

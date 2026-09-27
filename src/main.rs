@@ -65,6 +65,13 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         interval: u64,
     },
+    /// Re-render the status in place every few seconds, without flicker,
+    /// until interrupted (Ctrl-C).
+    Watch {
+        /// Seconds between refreshes.
+        #[arg(long, short = 'n', default_value_t = 2)]
+        interval: u64,
+    },
     /// Manually restart a task's subagent tmux session after it died (spec.md
     /// §9's launch row leaves automatic relaunch deferred).
     Relaunch {
@@ -91,6 +98,7 @@ fn main() {
     match args.command {
         Some(Command::Init { name }) => run_init(name, args.home),
         Some(Command::Status) | None => run_status(args.home, args.no_color, args.width),
+        Some(Command::Watch { interval }) => run_watch(args.home, args.no_color, args.width, interval),
         Some(Command::Player { once, interval }) => run_player(args.home, once, interval),
         Some(Command::Relaunch { slug }) => run_relaunch(args.home, &slug),
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
@@ -143,33 +151,118 @@ fn run_init(name: Option<String>, home: Option<PathBuf>) {
 // --------------------------------------------------------------------------
 
 fn run_status(home: Option<PathBuf>, no_color: bool, width: Option<u32>) {
-    let cwd = match std::env::current_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: cannot read current directory: {e}");
-            std::process::exit(1);
-        }
-    };
-    let home = match paths::resolve_home(home, &cwd) {
-        Ok(h) => h,
+    let color = !no_color && std::io::stdout().is_terminal();
+    match render_status(home, color, width) {
+        Ok(text) => println!("{text}"),
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
-    };
+    }
+}
+
+/// Resolves the home, derives the hub state, and renders it — everything
+/// `status` prints, shared with `watch`'s per-frame redraw.
+fn render_status(home: Option<PathBuf>, color: bool, width: Option<u32>) -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot read current directory: {e}"))?;
+    let home = paths::resolve_home(home, &cwd).map_err(|e| e.to_string())?;
     let hub = Git::new(home.hub());
-    let project = hub_project(&hub);
-    let hub_state = match state::derive(&hub, &|slug| state::tmux_alive(&state::tmux_session_name(&project, slug))) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: {e} — run `dashboard init`");
-            std::process::exit(1);
-        }
-    };
+    let project = hub
+        .config_get("dashboard.project")
+        .ok_or("hub is missing dashboard.project — run `dashboard init`")?;
+    let hub_state = state::derive(&hub, &|slug| state::tmux_alive(&state::tmux_session_name(&project, slug)))
+        .map_err(|e| format!("{e} — run `dashboard init`"))?;
     let events = events::read_all(&home);
-    let width = ui::detect_width(width);
-    let color = !no_color && std::io::stdout().is_terminal();
-    println!("{}", render::render(&hub_state, &events, color, width));
+    Ok(render::render(&hub_state, &events, color, ui::detect_width(width)))
+}
+
+// --------------------------------------------------------------------------
+// dashboard watch
+// --------------------------------------------------------------------------
+
+/// Set from a signal handler: SIGINT/SIGTERM ask the loop to stop, SIGWINCH
+/// asks for an immediate redraw at the new size.
+static WATCH_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WATCH_RESIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+fn install_watch_signals() {
+    use std::sync::atomic::Ordering;
+    const SIGINT: i32 = 2;
+    const SIGTERM: i32 = 15;
+    const SIGWINCH: i32 = 28;
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+    extern "C" fn on_signal(signum: i32) {
+        if signum == SIGWINCH {
+            WATCH_RESIZED.store(true, Ordering::SeqCst);
+        } else {
+            WATCH_STOP.store(true, Ordering::SeqCst);
+        }
+    }
+    unsafe {
+        signal(SIGINT, on_signal);
+        signal(SIGTERM, on_signal);
+        signal(SIGWINCH, on_signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn install_watch_signals() {}
+
+/// Like `while true; do dashboard; sleep N; clear; done`, minus the flicker:
+/// draws on the alternate screen, and each frame homes the cursor and
+/// overwrites the previous one in a single write (clearing only each line's
+/// tail and whatever is left below), instead of blanking the screen first.
+fn run_watch(home: Option<PathBuf>, no_color: bool, width: Option<u32>, interval: u64) {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+
+    if !std::io::stdout().is_terminal() {
+        eprintln!("error: `dashboard watch` needs a terminal — use `dashboard status` instead");
+        std::process::exit(1);
+    }
+    install_watch_signals();
+
+    let mut out = std::io::stdout().lock();
+    // Alternate screen, hide cursor, disable auto-wrap (so an overlong line
+    // can't push the frame down a row).
+    let _ = write!(out, "\x1b[?1049h\x1b[?25l\x1b[?7l");
+    let _ = out.flush();
+
+    let tick = std::time::Duration::from_millis(100);
+    let interval = std::time::Duration::from_secs(interval.max(1));
+    while !WATCH_STOP.load(Ordering::SeqCst) {
+        let text = render_status(home.clone(), !no_color, width).unwrap_or_else(|e| format!("error: {e}"));
+        let mut lines: Vec<&str> = text.lines().collect();
+        if let Some(rows) = ui::detect_height() {
+            lines.truncate(rows);
+        }
+        let mut frame = String::from("\x1b[H");
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                frame.push_str("\r\n");
+            }
+            frame.push_str(line);
+            frame.push_str("\x1b[0m\x1b[K");
+        }
+        frame.push_str("\x1b[J");
+        let _ = out.write_all(frame.as_bytes());
+        let _ = out.flush();
+
+        let next = std::time::Instant::now() + interval;
+        while std::time::Instant::now() < next
+            && !WATCH_STOP.load(Ordering::SeqCst)
+            && !WATCH_RESIZED.swap(false, Ordering::SeqCst)
+        {
+            std::thread::sleep(tick);
+        }
+    }
+
+    // Restore auto-wrap, cursor, and the main screen.
+    let _ = write!(out, "\x1b[?7h\x1b[?25h\x1b[?1049l");
+    let _ = out.flush();
 }
 
 // --------------------------------------------------------------------------
