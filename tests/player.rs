@@ -179,6 +179,28 @@ fn plan_rejects_unknown_dependency() {
 }
 
 #[test]
+fn plan_batch_resolves_same_tick_dependency_regardless_of_ref_order() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    // "alpha" depends on "zeta" but sorts before it alphabetically — the
+    // order `for_each_ref` returns branches in. Both are planned before a
+    // single tick, landing in the same fetch batch: alpha's dependency must
+    // still resolve even though, in ref order, the player would reach
+    // alpha before it has validated zeta at all.
+    director_commit_on_branch(repo.path(), "task/zeta", "tasks/zeta/task.toml", "title = \"Zeta\"\nphase = \"p1\"\n", "plan: zeta");
+    director_commit_on_branch(repo.path(), "task/alpha", "tasks/alpha/task.toml", "title = \"Alpha\"\nphase = \"p1\"\ndepends_on = [\"zeta\"]\n", "plan: alpha");
+
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.rejected.len(), 0, "{report}");
+    assert_eq!(report.imported.len(), 2, "{report}");
+    assert!(hub.ref_exists("refs/heads/task/alpha"));
+    assert!(hub.ref_exists("refs/heads/task/zeta"));
+}
+
+#[test]
 fn plan_rejects_retired_dependency() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);

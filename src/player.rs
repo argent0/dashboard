@@ -475,14 +475,70 @@ impl<S: Sessions> Player<S> {
     // ---- director task/<slug> branches ----
 
     fn import_task_branches(&mut self, report: &mut TickReport) -> Result<(), String> {
-        for (refname, sha) in self.hub.for_each_ref("refs/incoming/director/task/*") {
-            let Some(slug) = refname.strip_prefix("refs/incoming/director/task/") else { continue };
-            if slug.is_empty() {
-                continue;
-            }
-            self.import_task_branch(slug, &sha, report)?;
+        let incoming: Vec<(String, String)> = self
+            .hub
+            .for_each_ref("refs/incoming/director/task/*")
+            .into_iter()
+            .filter_map(|(refname, sha)| {
+                let slug = refname.strip_prefix("refs/incoming/director/task/")?;
+                if slug.is_empty() { None } else { Some((slug.to_string(), sha)) }
+            })
+            .collect();
+
+        for (slug, sha) in self.order_incoming_task_branches(incoming) {
+            self.import_task_branch(&slug, &sha, report)?;
         }
         Ok(())
+    }
+
+    /// Orders one tick's batch of incoming task branches so a slug whose
+    /// plan depends on another slug arriving in the very same fetch is
+    /// processed after that dependency, not before. Without this,
+    /// `for_each_ref`'s (alphabetical) order can make a perfectly valid
+    /// plan look like it depends on an "unknown task" purely because its
+    /// dependency's branch happens to sort later — spuriously burning a
+    /// `plan` strike (and possibly escalating the task) for a batching
+    /// artifact, not a real planning mistake.
+    ///
+    /// This is a best-effort scheduling hint, not a validation: it peeks at
+    /// each candidate's `depends_on` without rejecting anything, so a slug
+    /// whose dependency truly doesn't exist (in this batch or the hub), or
+    /// that's genuinely part of a cycle, is still rejected exactly as
+    /// before by the real validator — just no longer position-dependent.
+    fn order_incoming_task_branches(&self, incoming: Vec<(String, String)>) -> Vec<(String, String)> {
+        let slugs_in_batch: BTreeSet<String> = incoming.iter().map(|(s, _)| s.clone()).collect();
+        let deps: BTreeMap<String, BTreeSet<String>> = incoming
+            .iter()
+            .map(|(slug, sha)| {
+                let path = format!("tasks/{slug}/task.toml");
+                let within_batch = self
+                    .hub
+                    .show_file(sha, &path)
+                    .and_then(|text| config::task_config_from_str(&text).ok())
+                    .map(|cfg| cfg.depends_on.into_iter().filter(|d| d != slug && slugs_in_batch.contains(d)).collect())
+                    .unwrap_or_default();
+                (slug.clone(), within_batch)
+            })
+            .collect();
+
+        let mut ordered: Vec<(String, String)> = Vec::with_capacity(incoming.len());
+        let mut remaining = incoming;
+        while !remaining.is_empty() {
+            let placed: BTreeSet<&str> = ordered.iter().map(|(s, _)| s.as_str()).collect();
+            let ready = remaining.iter().position(|(slug, _)| deps.get(slug.as_str()).is_none_or(|d| d.iter().all(|dep| placed.contains(dep.as_str()))));
+            match ready {
+                Some(i) => ordered.push(remaining.remove(i)),
+                // A dependency cycle within the batch (or an unreadable
+                // task.toml): nothing more can be scheduled by dependency.
+                // The real validator rejects a genuine cycle regardless of
+                // order, so just append the rest in their original order.
+                None => {
+                    ordered.extend(remaining);
+                    break;
+                }
+            }
+        }
+        ordered
     }
 
     fn import_task_branch(&mut self, slug: &str, incoming: &str, report: &mut TickReport) -> Result<(), String> {
