@@ -468,6 +468,7 @@ impl<S: Sessions> Player<S> {
             None => return Err((Reason::Ownership, "ownership: roadmap.toml missing".to_string())),
         }
         let suite = self.runner.run_suite(candidate);
+        self.note_flakes("_main", candidate, &suite);
         if !suite.pass {
             return Err((Reason::Suite, format!("suite: {}", suite.summary())));
         }
@@ -943,6 +944,7 @@ impl<S: Sessions> Player<S> {
         }
 
         let suite = self.runner.run_suite(candidate);
+        self.note_flakes(slug, candidate, &suite);
         if suite.pass {
             let msg = format!("send-back: task/{slug}: send-back without evidence: the project suite still passes");
             return self.reject(slug, candidate, Reason::Review, msg, report);
@@ -995,6 +997,7 @@ impl<S: Sessions> Player<S> {
         let merge_sha = self.hub.commit_tree(&tree, &[&main_tip, candidate], &message).map_err(|e| e.to_string())?;
 
         let suite = self.runner.run_suite(&merge_sha);
+        self.note_flakes(slug, &merge_sha, &suite);
         if !suite.pass {
             let msg = format!("accept: task/{slug}: {}", suite.summary());
             return self.reject(slug, candidate, Reason::Accept, msg, report);
@@ -1669,6 +1672,7 @@ Answer it in one new commit adding {} and {}.",
         }
 
         let suite = self.runner.run_suite(candidate);
+        self.note_flakes(slug, candidate, &suite);
         if !suite.pass {
             let msg = format!("suite: task/{slug}: {}", suite.summary());
             return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
@@ -1685,6 +1689,15 @@ Answer it in one new commit adding {} and {}.",
         report.imported.push((hub_ref, candidate.to_string(), Transition::Finish));
         self.sessions.send(slug, "finish accepted — tests passed, awaiting director review; don't commit further");
         Ok(())
+    }
+
+    /// Files every check in `suite` that passed only on a retry into the
+    /// flake ledger under `scope`, so the director can plan a hygiene task
+    /// with evidence. Best effort: a ledger write never fails a transition.
+    fn note_flakes(&self, scope: &str, commit: &str, suite: &checks::SuiteResult) {
+        for c in &suite.checks {
+            let _ = records::record_flake(&self.hub, scope, commit, c);
+        }
     }
 
     /// A flaky-test-fix's finish, on top of the passing suite: the director's

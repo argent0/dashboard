@@ -23,7 +23,7 @@ fn init_hub(repo: &DirectorRepo) -> (TempDir, Home) {
 }
 
 fn check(name: &str, cmd: &str, runs: u32, min_pass: u32) -> Check {
-    Check { name: name.to_string(), cmd: cmd.to_string(), runs, min_pass }
+    Check { name: name.to_string(), cmd: cmd.to_string(), runs, min_pass, retry_failed: 0, retry_on: vec![] }
 }
 
 // --------------------------------------------------------------------------
@@ -266,4 +266,76 @@ fn output_tail_is_captured_on_failure() {
     assert!(!result.pass);
     let tail = result.output_tail.expect("a failing check must capture an output tail");
     assert!(tail.contains("failmsg"), "unexpected tail: {tail}");
+}
+
+// --------------------------------------------------------------------------
+// retry_failed / retry_on (feature request 1a, 1b)
+// --------------------------------------------------------------------------
+
+/// A command that fails (printing `msg`) until it has been run `fails` times
+/// in total, counting in a file under `dir`.
+fn fails_first(dir: &std::path::Path, fails: u32, msg: &str) -> String {
+    let f = dir.join("n");
+    format!("n=$(cat {f} 2>/dev/null || echo 0); echo $((n+1)) > {f}; if [ $n -lt {fails} ]; then echo '{msg}'; exit 1; fi", f = f.display())
+}
+
+fn retrying(name: &str, cmd: &str, retry_failed: u32, retry_on: &[&str]) -> Check {
+    Check { retry_failed, retry_on: retry_on.iter().map(|s| s.to_string()).collect(), ..check(name, cmd, 1, 1) }
+}
+
+#[test]
+fn a_failing_check_passes_on_retry_and_says_so() {
+    let repo = director_repo();
+    let (home_dir, home) = init_hub(&repo);
+    let runner = Runner::new(&home);
+    let commit = repo.git().rev_parse("HEAD").unwrap();
+
+    let c = retrying("flaky", &fails_first(home_dir.path(), 1, "Text file busy"), 1, &[]);
+    let result = runner.run_check(&commit, &c);
+    assert!(result.pass && result.flaky(), "{result:?}");
+    assert_eq!(result.retries, 1);
+    assert!(result.retry_outputs[0].contains("Text file busy"));
+    // Cached: no third run.
+    assert_eq!(runner.run_check(&commit, &c).retries, 1);
+}
+
+#[test]
+fn a_check_failing_every_attempt_fails_once_after_n_retries() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let runner = Runner::new(&home);
+    let commit = repo.git().rev_parse("HEAD").unwrap();
+
+    let result = runner.run_check(&commit, &retrying("bad", "false", 2, &[]));
+    assert!(!result.pass && !result.flaky());
+    assert_eq!(result.retries, 2);
+    assert_eq!(result.retry_outputs.len(), 2);
+}
+
+#[test]
+fn retry_on_only_retries_matching_failures() {
+    let repo = director_repo();
+    let (home_dir, home) = init_hub(&repo);
+    let runner = Runner::new(&home);
+    let commit = repo.git().rev_parse("HEAD").unwrap();
+
+    let real = retrying("real", &fails_first(home_dir.path(), 1, "assertion failed"), 3, &["Text file busy", "os error 26"]);
+    let result = runner.run_check(&commit, &real);
+    assert!(!result.pass);
+    assert_eq!(result.retries, 0, "an unlisted failure is a strike immediately");
+
+    let other = TempDir::new().unwrap();
+    let env = retrying("env", &fails_first(other.path(), 1, "oops: os error 26"), 3, &["Text file busy", "os error 26"]);
+    assert!(runner.run_check(&commit, &env).flaky());
+}
+
+#[test]
+fn changing_the_retry_policy_invalidates_the_cached_verdict() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let runner = Runner::new(&home);
+    let commit = repo.git().rev_parse("HEAD").unwrap();
+
+    assert_eq!(runner.run_check(&commit, &retrying("c", "false", 0, &[])).retries, 0);
+    assert_eq!(runner.run_check(&commit, &retrying("c", "false", 1, &[])).retries, 1);
 }

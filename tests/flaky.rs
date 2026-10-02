@@ -182,3 +182,45 @@ fn finish_with_the_replacement_is_tested() {
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(status_of(&hub, "fix"), Status::Tested);
 }
+
+// --------------------------------------------------------------------------
+// The flake ledger (feature request 1c)
+// --------------------------------------------------------------------------
+
+#[test]
+fn a_finish_that_needed_a_retry_is_in_the_ledger_and_the_status() {
+    let repo = director_repo();
+    let (home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    // `unit` fails on its first run only, then passes: one retry saves it.
+    let counter = home_dir.path().join("unit-count");
+    let unit = format!(
+        "n=$(cat {c} 2>/dev/null || echo 0); echo $((n+1)) > {c}; if [ $n -lt 1 ]; then echo 'Text file busy'; exit 1; fi",
+        c = counter.display()
+    );
+    let tests = format!("test_paths = [\"tests/\"]\nlist_cmd = \"cat tests/inventory.txt\"\n\n[[check]]\nname = \"unit\"\ncmd = {unit:?}\nretry_failed = 1\nretry_on = [\"Text file busy\"]\n");
+    let (mut player, _) = plan_and_post(&repo, &home, &alternating(home_dir.path()), &tests);
+    let clone = paths::subagent_clone(&repo.director_path(), "fix");
+    let git = Git::new(&clone);
+    git.run(&["config", "user.name", "Test Subagent"]).unwrap();
+    git.run(&["config", "user.email", "subagent@example.com"]).unwrap();
+    git.run(&["config", "commit.gpgsign", "false"]).unwrap();
+
+    write_file(&clone, "tests/inventory.txt", "keep\nflaky_stable\n");
+    commit(&clone, "finish: replace the flaky test");
+    let report = player.tick().unwrap();
+    assert!(report.rejected.is_empty(), "no strike for an environmental flake: {report}");
+    assert_eq!(status_of(&hub, "fix"), Status::Tested);
+
+    let hub_state = state::derive(&hub, &|_| false).unwrap();
+    assert_eq!(hub_state.flakes.len(), 1);
+    assert_eq!(hub_state.flakes[0].scope, "fix");
+    assert_eq!(hub_state.flakes[0].check, "unit");
+    assert!(hub_state.flakes[0].outputs[0].contains("Text file busy"));
+    assert_eq!(hub_state.tasks[0].flaky, 1);
+
+    let out = dashboard::render::render(&hub_state, &[], false, 100);
+    assert!(out.contains("flaky: 1"), "{out}");
+    assert!(out.contains("Flaky checks (1)"), "{out}");
+    assert!(out.contains("passed on retry 1/1"), "{out}");
+}

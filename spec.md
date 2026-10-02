@@ -528,3 +528,22 @@ test per line.
   inventory, and every `new` exists. Any miss is a `suite` strike.
 - *Not enforced*: weakened assertions or a helper that neuters other tests;
   the task agent's review reads the diff for that.
+
+## 16. Check retries and the flake ledger
+
+A `[[check]]` may set `retry_failed = N` (default 0) and `retry_on`, a list
+of regexes. When the check fails, the player re-runs it, all its `runs`, up
+to N more times; it passes if any attempt does, and failing every attempt is
+still one `suite` strike. With `retry_on`, only a failure whose output
+matches is retried, so any other failure is a strike at once. Both fields are
+director-owned and pinned with `tests.toml`.
+
+Retries never apply to a task's own `[check]` (§6.3) or to evidence (§15),
+and the subagent's verdict stays plain: it is never told of them.
+
+Every attempt is in the cached result. A check that passed only on a retry
+goes in the *flake ledger* (`refs/flakes/<scope>/<n>`, notes under
+`refs/notes/dashboard-flakes`): the check, the retries used and the failing
+outputs. `status` shows `passed on retry k/N`, `flaky: N` per task and a
+list of recent entries, so the director can plan a hygiene task, e.g. a
+`flaky-test-fix`, from evidence instead of anecdote.

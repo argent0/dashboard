@@ -24,7 +24,7 @@ const OUTPUT_TAIL_MAX: usize = 4000;
 // CheckResult
 // --------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CheckResult {
     pub name: String,
     pub cmd: String,
@@ -34,6 +34,19 @@ pub struct CheckResult {
     /// (the check *must* fail sometimes). Absent from older cached notes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pass: Option<u32>,
+    /// The check's `retry_failed` / `retry_on` when it ran, so a changed
+    /// policy never reuses an old verdict. Absent from older cached notes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retry_failed: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_on: Vec<String>,
+    /// How many times the check was re-run after a failing attempt.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retries: u32,
+    /// Output tail of each failing attempt that was retried (the flake
+    /// ledger's evidence). `exits`/`runs`/`pass` describe the last attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_outputs: Vec<String>,
     pub exits: Vec<i32>,
     pub pass: bool,
     pub output_tail: Option<String>,
@@ -44,12 +57,25 @@ pub struct CheckResult {
     pub metrics: Option<serde_json::Value>,
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 impl CheckResult {
+    /// Passed, but only on a retry: a flake the director should know about.
+    pub fn flaky(&self) -> bool {
+        self.pass && self.retries > 0
+    }
+
     /// A cached result is reusable for `check` only if the name, cmd and
     /// threshold all still match — otherwise it's evidence for a different
     /// check that happens to share a name.
     fn reusable_for(&self, check: &Check, max_pass: Option<u32>) -> bool {
-        self.name == check.name && self.cmd == check.cmd && self.runs == check.runs && self.min_pass == check.min_pass && self.max_pass == max_pass
+        self.name == check.name && self.cmd == check.cmd && self.runs == check.runs
+            && self.min_pass == check.min_pass
+            && self.max_pass == max_pass
+            && self.retry_failed == check.retry_failed
+            && self.retry_on == check.retry_on
     }
 }
 
@@ -252,39 +278,68 @@ impl Runner {
         result
     }
 
-    /// Prepares the worktree and actually runs `check.cmd` up to `check.runs`
-    /// times, stopping early once the verdict is decided.
+    /// Prepares the worktree and runs the check: one attempt, then up to
+    /// `retry_failed` more after a failing verdict (only when the failure's
+    /// output matches `retry_on`, if set). The check passes if any attempt
+    /// does; the result describes the last attempt plus what the retries saw.
     fn execute(&self, commit: &str, check: &Check, timeout: Option<Duration>, max_pass: Option<u32>) -> CheckResult {
+        let base = CheckResult {
+            name: check.name.clone(),
+            cmd: check.cmd.clone(),
+            runs: check.runs,
+            min_pass: check.min_pass,
+            max_pass,
+            retry_failed: check.retry_failed,
+            retry_on: check.retry_on.clone(),
+            retries: 0,
+            retry_outputs: Vec::new(),
+            exits: Vec::new(),
+            pass: false,
+            output_tail: None,
+            metrics: None,
+        };
         if let Err(e) = self.prepare(commit) {
-            return CheckResult {
-                name: check.name.clone(),
-                cmd: check.cmd.clone(),
-                runs: check.runs,
-                min_pass: check.min_pass,
-                max_pass,
-                exits: Vec::new(),
-                pass: false,
-                output_tail: Some(format!("worktree setup failed: {e}")),
-                metrics: None,
-            };
+            return CheckResult { output_tail: Some(format!("worktree setup failed: {e}")), ..base };
         }
 
+        let patterns: Vec<regex::Regex> = check.retry_on.iter().filter_map(|p| regex::Regex::new(p).ok()).collect();
+        let mut retries = 0;
+        let mut retry_outputs = Vec::new();
+        loop {
+            let (mut result, failed_output) = self.attempt(check, timeout, max_pass, base.clone());
+            let retry = !result.pass && retries < check.retry_failed && (patterns.is_empty() || patterns.iter().any(|p| p.is_match(&failed_output)));
+            if !retry {
+                result.retries = retries;
+                result.retry_outputs = retry_outputs;
+                return result;
+            }
+            retries += 1;
+            retry_outputs.push(result.output_tail.unwrap_or_default());
+        }
+    }
+
+    /// One attempt: runs `check.cmd` up to `check.runs` times, stopping early
+    /// once the verdict is decided. Also returns the full output of every
+    /// failing run, which `retry_on` is matched against.
+    fn attempt(&self, check: &Check, timeout: Option<Duration>, max_pass: Option<u32>, mut result: CheckResult) -> (CheckResult, String) {
         let mut exits = Vec::new();
         let mut passes: u32 = 0;
-        let mut output_tail: Option<String> = None;
-        let mut metrics: Option<serde_json::Value> = None;
+        let mut failed_output = String::new();
 
         for i in 0..check.runs {
             let remaining_after_this = check.runs - i - 1;
 
             let (code, stdout, combined) = run_command(&check.cmd, &self.work, timeout);
-            metrics = parse_metrics(&stdout);
+            result.metrics = parse_metrics(&stdout);
 
             exits.push(code);
             if code == 0 {
                 passes += 1;
-            } else if output_tail.is_none() {
-                output_tail = Some(tail_str(&combined));
+            } else {
+                if result.output_tail.is_none() {
+                    result.output_tail = Some(tail_str(&combined));
+                }
+                failed_output.push_str(&String::from_utf8_lossy(&combined));
             }
 
             // Stop early once the verdict can't change: enough passes
@@ -295,8 +350,10 @@ impl Runner {
             }
         }
 
-        let pass = passes >= check.min_pass && max_pass.is_none_or(|m| passes <= m);
-        CheckResult { name: check.name.clone(), cmd: check.cmd.clone(), runs: exits.len() as u32, min_pass: check.min_pass, max_pass, exits, pass, output_tail, metrics }
+        result.pass = passes >= check.min_pass && max_pass.is_none_or(|m| passes <= m);
+        result.runs = exits.len() as u32;
+        result.exits = exits;
+        (result, failed_output)
     }
 
     /// Reads `tests.toml` at `commit` and runs every `[[check]]`. Missing or
@@ -330,7 +387,9 @@ impl Runner {
         let text = self.hub.show_file(commit, &path).ok_or_else(|| format!("{path} not found at {commit}"))?;
         let cfg = config::task_config_from_str(&text).map_err(|e| format!("{path}: {e}"))?;
         let check = cfg.check.ok_or_else(|| format!("{path}: no [check] section"))?;
-        Ok(self.run_check(commit, &check))
+        // A task check that fails must keep meaning "fails for the reason
+        // the task exists" (spec §6.3): no retries here.
+        Ok(self.run_check(commit, &check.without_retries()))
     }
 }
 
@@ -456,8 +515,8 @@ mod tests {
 
     #[test]
     fn reusable_for_checks_name_cmd_and_threshold() {
-        let check = Check { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2 };
-        let result = CheckResult { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2, max_pass: None, exits: vec![0, 0, 0], pass: true, output_tail: None, metrics: None };
+        let check = Check { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2, retry_failed: 0, retry_on: vec![] };
+        let result = CheckResult { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2, max_pass: None, retry_failed: 0, retry_on: vec![], retries: 0, retry_outputs: vec![], exits: vec![0, 0, 0], pass: true, output_tail: None, metrics: None };
         assert!(result.reusable_for(&check, None));
         assert!(!result.reusable_for(&check, Some(2)));
 
@@ -483,7 +542,7 @@ mod tests {
                 exits: vec![1],
                 pass: false,
                 output_tail: Some("boom".into()),
-                metrics: None,
+                ..Default::default()
             }],
             error: None,
         };

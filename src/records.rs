@@ -171,6 +171,74 @@ pub fn rejections(hub: &Git) -> Vec<RejectionRecord> {
 }
 
 // --------------------------------------------------------------------------
+// Flake ledger: refs/flakes/<scope>/<n> (feature request: retry_failed)
+// --------------------------------------------------------------------------
+
+const FLAKES_NOTES_REF: &str = "refs/notes/dashboard-flakes";
+
+/// What the player saw when a check passed only after a retry. The note on a
+/// commit is a JSON array of these (one per scope and check).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlakeRecord {
+    pub scope: String,
+    pub check: String,
+    pub retries: u32,
+    pub retry_failed: u32,
+    /// Output tail of each failing attempt before the passing one.
+    pub outputs: Vec<String>,
+    pub at: u64,
+    #[serde(default)]
+    pub commit: String,
+}
+
+fn read_flake_note(hub: &Git, commit: &str) -> Vec<FlakeRecord> {
+    hub.notes_show(FLAKES_NOTES_REF, commit).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// Records that `result` (a cached check result at `commit`) passed only on a
+/// retry, under `scope` (a task slug, or `_main`). A no-op for a result that
+/// didn't, and for a (scope, check, commit) already recorded — the player
+/// re-reads cached suites, so this is called repeatedly.
+pub fn record_flake(hub: &Git, scope: &str, commit: &str, result: &crate::checks::CheckResult) -> Result<(), String> {
+    if !result.flaky() {
+        return Ok(());
+    }
+    let mut entries = read_flake_note(hub, commit);
+    if entries.iter().any(|e| e.scope == scope && e.check == result.name) {
+        return Ok(());
+    }
+    entries.push(FlakeRecord {
+        scope: scope.to_string(),
+        check: result.name.clone(),
+        retries: result.retries,
+        retry_failed: result.retry_failed,
+        outputs: result.retry_outputs.clone(),
+        at: now_unix(),
+        commit: String::new(),
+    });
+    let json = serde_json::to_string(&entries).map_err(|e| e.to_string())?;
+    hub.notes_add(FLAKES_NOTES_REF, commit, &json).map_err(|e| e.to_string())?;
+
+    let existing = hub.for_each_ref(&format!("refs/flakes/{scope}/*"));
+    if !existing.iter().any(|(_, sha)| sha == commit) {
+        let n = existing.iter().filter_map(|(r, _)| r.rsplit('/').next()?.parse::<u32>().ok()).max().unwrap_or(0) + 1;
+        hub.update_ref(&format!("refs/flakes/{scope}/{n}"), commit).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Every recorded flake, oldest first.
+pub fn flakes(hub: &Git) -> Vec<FlakeRecord> {
+    let mut out = Vec::new();
+    for (refname, sha) in hub.for_each_ref("refs/flakes/*/*") {
+        let scope = refname.trim_start_matches("refs/flakes/").rsplit_once('/').map(|(s, _)| s.to_string()).unwrap_or_default();
+        out.extend(read_flake_note(hub, &sha).into_iter().filter(|e| e.scope == scope).map(|e| FlakeRecord { commit: sha.clone(), ..e }));
+    }
+    out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.check.cmp(&b.check)));
+    out
+}
+
+// --------------------------------------------------------------------------
 // Escalation records: refs/dashboard/escalated/<slug> (spec §10)
 // --------------------------------------------------------------------------
 

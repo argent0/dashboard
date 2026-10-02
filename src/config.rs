@@ -185,6 +185,15 @@ pub struct Check {
     pub runs: u32,
     #[serde(default = "default_min_pass")]
     pub min_pass: u32,
+    /// On a failing verdict, re-run the whole check up to this many more
+    /// times; it passes if any attempt passes. Director-owned, like the rest
+    /// of the check. Never applied to a task's own `[check]` (spec §6.3).
+    #[serde(default)]
+    pub retry_failed: u32,
+    /// Regexes: only retry when a failing run's output matches one of them.
+    /// Empty means every failure is retried (while `retry_failed` lasts).
+    #[serde(default)]
+    pub retry_on: Vec<String>,
 }
 
 fn default_runs() -> u32 {
@@ -203,7 +212,18 @@ impl Check {
         if self.min_pass < 1 || self.min_pass > self.runs {
             return Err(format!("check {:?}: min_pass must be between 1 and runs ({}), got {}", self.name, self.runs, self.min_pass));
         }
+        for pattern in &self.retry_on {
+            regex::Regex::new(pattern).map_err(|e| format!("check {:?}: retry_on {pattern:?}: {e}", self.name))?;
+        }
+        if !self.retry_on.is_empty() && self.retry_failed == 0 {
+            return Err(format!("check {:?}: retry_on needs retry_failed >= 1", self.name));
+        }
         Ok(())
+    }
+
+    /// A copy that never retries.
+    pub fn without_retries(&self) -> Check {
+        Check { retry_failed: 0, retry_on: Vec::new(), ..self.clone() }
     }
 }
 
@@ -275,7 +295,7 @@ impl Evidence {
     /// The runner's view of this evidence. Prefixed so it can't share a
     /// result-cache slot with a suite check of the same name.
     pub fn as_check(&self) -> Check {
-        Check { name: format!("evidence:{}", self.name), cmd: self.cmd.clone(), runs: self.runs, min_pass: self.min_pass }
+        Check { name: format!("evidence:{}", self.name), cmd: self.cmd.clone(), runs: self.runs, min_pass: self.min_pass, retry_failed: 0, retry_on: Vec::new() }
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -456,7 +476,7 @@ impl Claim {
     /// The runner's view of this claim. The name is prefixed so a claim can
     /// never share a result-cache slot with a suite check of the same name.
     pub fn as_check(&self) -> Check {
-        Check { name: format!("claim:{}", self.name), cmd: self.cmd.clone(), runs: self.runs, min_pass: self.min_pass }
+        Check { name: format!("claim:{}", self.name), cmd: self.cmd.clone(), runs: self.runs, min_pass: self.min_pass, retry_failed: 0, retry_on: Vec::new() }
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -729,6 +749,16 @@ mod tests {
         assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\n").is_ok());
         assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nkind = \"spike\"\n").is_err());
         assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nsupports = \"yes\"\n").is_err());
+    }
+
+    #[test]
+    fn retry_policy_is_parsed_and_validated() {
+        let ok = tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_failed = 2\nretry_on = [\"Text file busy\", \"os error \\\\d+\"]\n").unwrap();
+        assert_eq!(ok.check[0].retry_failed, 2);
+        assert_eq!(ok.check[0].retry_on.len(), 2);
+        assert_eq!(tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\n").unwrap().check[0].retry_failed, 0);
+        assert!(tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_failed = 1\nretry_on = [\"(\"]\n").is_err(), "bad regex");
+        assert!(tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_on = [\"a\"]\n").is_err(), "retry_on alone");
     }
 
     #[test]

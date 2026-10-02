@@ -226,6 +226,16 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     }
     out.push(String::new());
 
+    // ---- flaky checks (the flake ledger) ----
+    if !state.flakes.is_empty() {
+        out.push(style(&format!("Flaky checks ({})", state.flakes.len()), &[c::BOLD, c::YELLOW], color));
+        for f in state.flakes.iter().rev().take(5) {
+            let seen = f.outputs.iter().find_map(|o| o.lines().rev().find(|l| !l.trim().is_empty())).unwrap_or("(no output)");
+            out.push(format!("  {} {} passed on retry {}/{} — {}", f.scope, f.check, f.retries, f.retry_failed, truncate(seen.trim(), width.saturating_sub(40).max(10))));
+        }
+        out.push(String::new());
+    }
+
     // ---- retired ----
     out.push(style(&format!("{} Retired ({})", retired_style.icon, retired.len()), retired_style.codes, color));
     if retired.is_empty() {
@@ -271,7 +281,8 @@ fn render_phase(out: &mut Vec<String>, header: &str, goal: Option<&str>, tasks: 
         let slug = format!("{:<24}", t.slug);
         let status_label = format!("{:<11}", t.status.as_str());
         let title_w = width.saturating_sub(46).max(10);
-        out.push(format!("  {} {} {}{} {}", ss.icon, style(&status_label, ss.codes, color), style(&slug, &[c::DIM], color), mark, truncate(&t.config.title, title_w)));
+        let flaky = if t.flaky > 0 { style(&format!("  flaky: {}", t.flaky), &[c::YELLOW], color) } else { String::new() };
+        out.push(format!("  {} {} {}{} {}{}", ss.icon, style(&status_label, ss.codes, color), style(&slug, &[c::DIM], color), mark, truncate(&t.config.title, title_w), flaky));
     }
     out.push(String::new());
 }
@@ -353,7 +364,12 @@ fn format_suite(suite: &SuiteResult) -> String {
         .iter()
         .map(|c| {
             let passed = c.exits.iter().filter(|&&e| e == 0).count();
-            format!("{}: {} ({}/{})", c.name, if c.pass { "pass" } else { "fail" }, passed, c.runs)
+            let retry = match (c.retries, c.pass) {
+                (0, _) => String::new(),
+                (n, true) => format!(", passed on retry {n}/{}", c.retry_failed),
+                (n, false) => format!(", retried {n}/{}", c.retry_failed),
+            };
+            format!("{}: {} ({}/{}{retry})", c.name, if c.pass { "pass" } else { "fail" }, passed, c.runs)
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -394,11 +410,12 @@ mod tests {
             suite: None,
             alive: false,
             spike: None,
+            flaky: 0,
         }
     }
 
     fn hub_state(tasks: Vec<TaskState>) -> HubState {
-        HubState { roadmap: roadmap(), main_tip: "deadbeef".to_string(), tasks, rejections: vec![], project: "widget".to_string() }
+        HubState { roadmap: roadmap(), main_tip: "deadbeef".to_string(), tasks, rejections: vec![], flakes: vec![], project: "widget".to_string() }
     }
 
     fn render_plain(state: &HubState) -> String {
@@ -487,7 +504,7 @@ mod tests {
         t.strikes.insert(Reason::Pins, 0); // zero strikes never show
         t.suite = Some(SuiteResult {
             pass: true,
-            checks: vec![CheckResult { name: "unit".to_string(), cmd: "true".to_string(), runs: 1, min_pass: 1, max_pass: None, exits: vec![0], pass: true, output_tail: None, metrics: None }],
+            checks: vec![CheckResult { name: "unit".to_string(), cmd: "true".to_string(), runs: 1, min_pass: 1, max_pass: None, exits: vec![0], pass: true, output_tail: None, ..Default::default() }],
             error: None,
         });
         t.alive = true;

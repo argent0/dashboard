@@ -104,6 +104,7 @@ refs/notes/dashboard             check-result cache: {"checks": {name: CheckResu
 refs/notes/dashboard-imports     provenance per imported commit (actor, transition, slug, at)
 refs/notes/dashboard-rejections  reason/actor/message/at per refs/rejected/* commit
 refs/notes/dashboard-escalations cause/at per refs/dashboard/escalated/<slug>
+refs/notes/dashboard-flakes       the flake ledger: checks that passed only on a retry (refs/flakes/<scope>/<n>)
 refs/notes/dashboard-explorations a spike round's verified answer + claim results, on each validated
                                  finish commit; {concluded: true, ...} on the `conclude:` commit
 ```
@@ -154,6 +155,8 @@ name = "unit"
 cmd = "cargo test"
 runs = 1                         # default; >1 for a threshold check
 min_pass = 1                     # default; must be 1..=runs
+retry_failed = 1                 # default 0; re-run a failing check up to N more times
+retry_on = ["Text file busy"]    # optional regexes: retry only if a failing run's output matches
 ```
 
 `tasks/<slug>/task.toml`:
@@ -286,8 +289,16 @@ back here):
   of the suite, the task check must pass and the `list_cmd` inventory at the
   pins commit minus the `old` names must still be in the branch's, with every
   `new` present (a `suite` strike otherwise). Evidence runs in full, never
-  early-stopping, so its cached result and k/N are exact. `retry_failed`
-  (feature request §1) is not implemented.
+  early-stopping, so its cached result and k/N are exact.
+- **Check retries**: `retry_failed = N` re-runs a failing check (all its
+  `runs`) up to N more times; any passing attempt passes it, a check failing
+  every attempt is still one `suite` strike. `retry_on` limits retries to
+  failures whose output matches a regex. Never applied to a task's own
+  `[check]` (`Runner::run_task_check`) or evidence. Every retry is in the
+  cached result; a pass after a retry goes in the flake ledger
+  (`records::record_flake`, per task or `_main`), shown in `status` as
+  `flaky: N`, a "Flaky checks" list and `passed on retry k/N`. The subagent
+  is never told about retries.
 - **Spikes** (spec §14): `kind = "spike"`, operator-initiated by process
   rule (the player doesn't check it), nothing may depend on one, never
   merges. The player runs the claims itself: baseline claims against the

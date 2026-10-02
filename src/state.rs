@@ -7,7 +7,7 @@
 use crate::checks::{self, SuiteResult};
 use crate::config::{self, Reason, RoadmapConfig, TaskConfig, TaskKind};
 use crate::git::Git;
-use crate::records::{self, RejectionRecord, Transition};
+use crate::records::{self, FlakeRecord, RejectionRecord, Transition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
@@ -83,6 +83,8 @@ pub struct TaskState {
     pub alive: bool,
     /// Only for `kind = "spike"` tasks.
     pub spike: Option<SpikeState>,
+    /// How many flake-ledger entries this task has.
+    pub flaky: u32,
 }
 
 /// A spike's progress, read from the hub (spec §14).
@@ -103,6 +105,8 @@ pub struct HubState {
     pub main_tip: String,
     pub tasks: Vec<TaskState>,
     pub rejections: Vec<RejectionRecord>,
+    /// Checks that passed only on a retry (the flake ledger).
+    pub flakes: Vec<FlakeRecord>,
     /// `dashboard.project` from the hub's git config — used to name tmux
     /// sessions for display, and as the header's fallback title.
     pub project: String,
@@ -124,6 +128,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
     let accepted = records::accepted_tasks(hub, &main_tip);
     let retired: Vec<String> = records::retired_slugs(hub);
     let rejections = records::rejections(hub);
+    let flakes = records::flakes(hub);
     let project = hub.config_get("dashboard.project").unwrap_or_default();
 
     // Every slug we know about: a live task branch, a retirement, or an
@@ -141,7 +146,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
 
     let mut tasks = Vec::with_capacity(slugs.len());
     for slug in &slugs {
-        tasks.push(derive_task(hub, &roadmap, slug, &accepted, &retired, &rejections, live_session)?);
+        tasks.push(derive_task(hub, &roadmap, slug, &accepted, &retired, &rejections, &flakes, live_session)?);
     }
 
     // Task list order: the order of phases in roadmap.toml, then slug.
@@ -152,7 +157,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         a_idx.cmp(&b_idx).then_with(|| a.slug.cmp(&b.slug))
     });
 
-    Ok(HubState { roadmap, main_tip, tasks, rejections, project })
+    Ok(HubState { roadmap, main_tip, tasks, rejections, flakes, project })
 }
 
 /// The tip to read `slug`'s state from: the retirement, else the live task
@@ -179,6 +184,7 @@ fn derive_task(
     accepted: &BTreeMap<String, String>,
     retired: &[String],
     rejections: &[RejectionRecord],
+    flakes: &[FlakeRecord],
     live_session: &dyn Fn(&str) -> bool,
 ) -> Result<TaskState, String> {
     let is_retired = retired.iter().any(|s| s == slug);
@@ -225,6 +231,7 @@ fn derive_task(
             .count() as u32,
     };
 
+    let flaky = flakes.iter().filter(|f| f.scope == slug).count() as u32;
     let suite = cached_suite_summary(hub, &tip);
     let note = records::import_note(hub, &tip);
 
@@ -275,7 +282,7 @@ fn derive_task(
         }
     };
 
-    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite, alive, spike })
+    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite, alive, spike, flaky })
 }
 
 /// Escalation causes that aren't already covered by retired/accepted: a
