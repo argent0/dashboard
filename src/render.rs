@@ -5,7 +5,7 @@
 // ui.rs's color/truncation helpers.
 
 use crate::checks::SuiteResult;
-use crate::config::Reason;
+use crate::config::{Reason, TaskKind};
 use crate::events::Event;
 use crate::records::{Actor, RejectionRecord};
 use crate::state::{HubState, Status, TaskState};
@@ -24,6 +24,7 @@ struct StatusStyle {
 fn status_style(status: Status) -> StatusStyle {
     match status {
         Status::Accepted => StatusStyle { icon: "✓", codes: &[c::GREEN] },
+        Status::Explored => StatusStyle { icon: "◇", codes: &[c::BLUE] },
         Status::Tested => StatusStyle { icon: "◆", codes: &[c::CYAN] },
         Status::InProgress => StatusStyle { icon: "◐", codes: &[c::YELLOW] },
         Status::Posted => StatusStyle { icon: "▶", codes: &[c::YELLOW] },
@@ -71,7 +72,13 @@ fn none_line(color: bool) -> String {
 pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> String {
     let mut out: Vec<String> = Vec::new();
 
-    let live: Vec<&TaskState> = state.tasks.iter().filter(|t| t.status != Status::Retired).collect();
+    // Spikes never merge and nothing depends on them (spec §14), so they stay
+    // out of the progress counts, phases, milestones and ready list; they get
+    // their own section, and still show up wherever a task is in flight or
+    // escalated.
+    let is_spike = |t: &&TaskState| t.config.kind == TaskKind::Spike;
+    let live: Vec<&TaskState> = state.tasks.iter().filter(|t| t.status != Status::Retired && !is_spike(t)).collect();
+    let spikes: Vec<&TaskState> = state.tasks.iter().filter(|t| t.status != Status::Retired && is_spike(t)).collect();
     let retired: Vec<&TaskState> = state.tasks.iter().filter(|t| t.status == Status::Retired).collect();
 
     // ---- header ----
@@ -146,8 +153,25 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     }
     out.push(String::new());
 
+    // ---- spikes ----
+    if !spikes.is_empty() {
+        out.push(style(&format!("◇ Spikes ({})", spikes.len()), &[c::BOLD, c::BLUE], color));
+        for t in &spikes {
+            let ss = status_style(t.status);
+            let detail = spike_detail(t);
+            out.push(format!(
+                "  {} {} {:<24} {}",
+                ss.icon,
+                style(&format!("{:<11}", t.status.as_str()), ss.codes, color),
+                style(&t.slug, &[c::DIM], color),
+                truncate(&detail, width.saturating_sub(42).max(10))
+            ));
+        }
+        out.push(String::new());
+    }
+
     // ---- in flight ----
-    let in_flight = live.iter().find(|t| matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision)).copied();
+    let in_flight = live.iter().chain(spikes.iter()).find(|t| matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision)).copied();
     out.push(style("In flight", &[c::BOLD], color));
     match in_flight {
         None => out.push(none_line(color)),
@@ -156,7 +180,7 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     out.push(String::new());
 
     // ---- escalated ----
-    let escalated: Vec<&TaskState> = live.iter().filter(|t| t.status == Status::Escalated).copied().collect();
+    let escalated: Vec<&TaskState> = live.iter().chain(spikes.iter()).filter(|t| t.status == Status::Escalated).copied().collect();
     out.push(style(&format!("✗ Escalated ({})", escalated.len()), &[c::BOLD, c::RED], color));
     if escalated.is_empty() {
         out.push(none_line(color));
@@ -256,10 +280,27 @@ fn render_phase(out: &mut Vec<String>, header: &str, goal: Option<&str>, tasks: 
 // In-flight block
 // --------------------------------------------------------------------------
 
+/// One line about a spike: its title with the question round and, once a
+/// round has been validated, the answer the player recorded for it.
+fn spike_detail(t: &TaskState) -> String {
+    let Some(sp) = &t.spike else { return t.config.title.clone() };
+    let progress = match (&sp.answer, sp.concluded) {
+        (Some(a), true) => format!("answer: {a} (round {})", sp.round),
+        (Some(a), false) => format!("round {}, latest answer: {a}", sp.round),
+        (None, _) if sp.round > 0 => format!("round {}", sp.round),
+        (None, _) => "not posted".to_string(),
+    };
+    format!("{progress} — {}", t.config.title)
+}
+
 fn render_in_flight(out: &mut Vec<String>, state: &HubState, t: &TaskState, color: bool, width: usize) {
     let ss = status_style(t.status);
     out.push(format!("  {} {}  {}", ss.icon, style(t.status.as_str(), ss.codes, color), style(&t.slug, &[c::BOLD], color)));
     out.push(format!("  {}", truncate(&t.config.title, width.saturating_sub(2))));
+
+    if let Some(sp) = &t.spike {
+        out.push(format!("  spike round {}{}", sp.round, sp.answer.as_ref().map(|a| format!(", latest answer: {a}")).unwrap_or_default()));
+    }
 
     let max_rounds = state.roadmap.limits.max_review_rounds;
     let round_codes: &[&str] = if t.review_round >= max_rounds { &[c::RED] } else { &[] };
@@ -282,7 +323,17 @@ fn render_in_flight(out: &mut Vec<String>, state: &HubState, t: &TaskState, colo
     }
 
     if let Some(suite) = &t.suite {
-        out.push(format!("  suite: {}", format_suite(suite)));
+        if t.spike.is_some() {
+            // A spike's cached results are its claims (prefixed `claim:`),
+            // not a project suite.
+            let claims: Vec<_> = suite.checks.iter().filter(|c| c.name.starts_with("claim:")).cloned().collect();
+            if !claims.is_empty() {
+                let claims = SuiteResult { pass: claims.iter().all(|c| c.pass), checks: claims, error: None };
+                out.push(format!("  claims: {}", format_suite(&claims)));
+            }
+        } else {
+            out.push(format!("  suite: {}", format_suite(suite)));
+        }
     }
 
     let session = crate::state::tmux_session_name(&state.project, &t.slug);
@@ -333,7 +384,7 @@ mod tests {
     fn task(slug: &str, phase: &str, status: Status) -> TaskState {
         TaskState {
             slug: slug.to_string(),
-            config: TaskConfig { title: format!("Title for {slug}"), phase: phase.to_string(), milestone: false, depends_on: vec![], check: None },
+            config: TaskConfig { title: format!("Title for {slug}"), phase: phase.to_string(), milestone: false, depends_on: vec![], check: None, kind: TaskKind::Task },
             status,
             tip: "deadbeef".to_string(),
             strikes: BTreeMap::new(),
@@ -342,6 +393,7 @@ mod tests {
             post_mortem: None,
             suite: None,
             alive: false,
+            spike: None,
         }
     }
 
@@ -435,7 +487,7 @@ mod tests {
         t.strikes.insert(Reason::Pins, 0); // zero strikes never show
         t.suite = Some(SuiteResult {
             pass: true,
-            checks: vec![CheckResult { name: "unit".to_string(), cmd: "true".to_string(), runs: 1, min_pass: 1, exits: vec![0], pass: true, output_tail: None }],
+            checks: vec![CheckResult { name: "unit".to_string(), cmd: "true".to_string(), runs: 1, min_pass: 1, exits: vec![0], pass: true, output_tail: None, metrics: None }],
             error: None,
         });
         t.alive = true;

@@ -29,6 +29,7 @@ pub enum EventKind {
     Escalated,
     Ready,
     Accepted,
+    Explored,
     Retired,
     SessionDied,
     PlayerError,
@@ -42,6 +43,7 @@ impl EventKind {
             EventKind::Escalated => "escalated",
             EventKind::Ready => "ready",
             EventKind::Accepted => "accepted",
+            EventKind::Explored => "explored",
             EventKind::Retired => "retired",
             EventKind::SessionDied => "session_died",
             EventKind::PlayerError => "player_error",
@@ -82,6 +84,7 @@ impl Event {
             EventKind::Ready => Some(format!("git fetch hub && git merge (or checkout) hub/task/{slug} before posting")),
             EventKind::DirectorRejected => Some("fetch hub and fix with a new commit / reset".to_string()),
             EventKind::Accepted => Some("on main: git fetch hub; git merge --ff-only hub/main".to_string()),
+            EventKind::Explored => None, // informational: the spike is concluded
             EventKind::Retired => None, // informational
             EventKind::SessionDied => Some(format!("dashboard relaunch {slug} or retire")),
             EventKind::PlayerError => None, // the message is the whole story

@@ -317,6 +317,13 @@ weaken it.
 
 ## 15. A `spike` task kind for exploratory work (v1)
 
+**Status: implemented** as designed below (spec §14, `src/spike.rs`, tests
+in `tests/spike.rs`, a scenario in `scripts/e2e.sh`). Deviation: the
+director's post may add any file under `tasks/<slug>/` except the
+subagent's `claims/` and `findings/` (baseline scripts live under
+`baseline/`). The open question about `METRICS` is settled as a last
+stdout line.
+
 **Pain.** Everything must be a failing check up front. That suits well-scoped
 tasks but not design spikes, where nobody knows yet what "working" looks like
 and escalate-and-retire is the only escape hatch. The fix is to change what

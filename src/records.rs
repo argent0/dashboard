@@ -6,7 +6,7 @@
 // player's job (steps 5-6); this module only records outcomes and reads them
 // back.
 
-use crate::config::{self, Reason};
+use crate::config::{self, ClaimKind, Reason, TaskKind};
 use crate::git::Git;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -45,6 +45,8 @@ pub enum Transition {
     Docs,
     MergeUnblock,
     MergeAccept,
+    /// A spike's `conclude:` marker (spec §14).
+    Conclude,
 }
 
 impl Transition {
@@ -61,6 +63,7 @@ impl Transition {
             Transition::Docs => "docs",
             Transition::MergeUnblock => "merge_unblock",
             Transition::MergeAccept => "merge_accept",
+            Transition::Conclude => "conclude",
         }
     }
 }
@@ -229,22 +232,33 @@ fn add_pinned_path(hub: &Git, commit: &str, path: &str, map: &mut BTreeMap<Strin
 /// The pinned path -> blob hash map for `slug`, computed fresh from the
 /// commit `set_pins` last recorded (`None` if pins were never taken):
 /// `tests.toml`, every `test_paths` entry of the tests.toml *at that
-/// commit*, and everything under `tasks/<slug>/`.
+/// commit*, and everything under `tasks/<slug>/`. A spike pins only
+/// `tasks/<slug>/` (spec §14): it never merges, so the project's tests are
+/// the subagent's to change while exploring.
 pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     let commit = hub.rev_parse(&format!("refs/dashboard/pins/{slug}"))?;
     let mut map = BTreeMap::new();
 
-    add_pinned_path(hub, &commit, "tests.toml", &mut map);
-    if let Some(text) = hub.show_file(&commit, "tests.toml") {
-        if let Ok(cfg) = config::tests_config_from_str(&text) {
-            for test_path in &cfg.test_paths {
-                add_pinned_path(hub, &commit, test_path, &mut map);
+    if !is_spike_at(hub, &commit, slug) {
+        add_pinned_path(hub, &commit, "tests.toml", &mut map);
+        if let Some(text) = hub.show_file(&commit, "tests.toml") {
+            if let Ok(cfg) = config::tests_config_from_str(&text) {
+                for test_path in &cfg.test_paths {
+                    add_pinned_path(hub, &commit, test_path, &mut map);
+                }
             }
         }
     }
     add_pinned_path(hub, &commit, &format!("tasks/{slug}/"), &mut map);
 
     Some(map)
+}
+
+/// Whether `tasks/<slug>/task.toml` at `commit` declares `kind = "spike"`.
+pub fn is_spike_at(hub: &Git, commit: &str, slug: &str) -> bool {
+    hub.show_file(commit, &format!("tasks/{slug}/task.toml"))
+        .and_then(|text| config::task_config_from_str(&text).ok())
+        .is_some_and(|cfg| cfg.kind == TaskKind::Spike)
 }
 
 /// Every pinned path that `candidate_commit` leaves missing or changed. A
@@ -262,6 +276,101 @@ pub fn check_pins(hub: &Git, slug: &str, candidate_commit: &str) -> Vec<String> 
             _ => Some(path),
         })
         .collect()
+}
+
+// --------------------------------------------------------------------------
+// Spike base commit: refs/dashboard/base/<slug> (spec §14)
+// --------------------------------------------------------------------------
+
+/// Records the commit a spike's claims are measured against: the tip at
+/// launch, which is `main`'s code plus the director's post. Set once and
+/// never moved, unlike pins, so every round compares against the same code.
+pub fn set_base(hub: &Git, slug: &str, commit: &str) -> Result<(), String> {
+    hub.update_ref(&format!("refs/dashboard/base/{slug}"), commit).map_err(|e| e.to_string())
+}
+
+pub fn base_commit(hub: &Git, slug: &str) -> Option<String> {
+    hub.rev_parse(&format!("refs/dashboard/base/{slug}"))
+}
+
+// --------------------------------------------------------------------------
+// Explorations: refs/notes/dashboard-explorations (spec §14)
+// --------------------------------------------------------------------------
+
+const EXPLORATIONS_NOTES_REF: &str = "refs/notes/dashboard-explorations";
+
+/// What the player recorded about one claim when it validated a finish.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimNote {
+    pub kind: ClaimKind,
+    pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<serde_json::Value>,
+}
+
+/// The player's verified record of one spike round: attached to every
+/// validated finish commit, and (with `concluded` set) to the director's
+/// `conclude:` commit. The free-form findings stay in the tree; this is the
+/// copy `status` reads so it never parses markdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplorationNote {
+    pub slug: String,
+    pub round: u32,
+    pub question: String,
+    pub answer: String,
+    #[serde(default)]
+    pub claims: BTreeMap<String, ClaimNote>,
+    #[serde(default)]
+    pub concluded: bool,
+    pub at: u64,
+}
+
+pub fn record_exploration(hub: &Git, commit: &str, mut note: ExplorationNote) -> Result<ExplorationNote, String> {
+    note.at = now_unix();
+    let json = serde_json::to_string(&note).map_err(|e| e.to_string())?;
+    hub.notes_add(EXPLORATIONS_NOTES_REF, commit, &json).map_err(|e| e.to_string())?;
+    Ok(note)
+}
+
+/// The exploration note attached directly to `commit`, if any.
+pub fn exploration(hub: &Git, commit: &str) -> Option<ExplorationNote> {
+    let text = hub.notes_show(EXPLORATIONS_NOTES_REF, commit)?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The newest exploration note on `tip`'s first-parent history: a running
+/// spike's latest validated round, or (at a concluded spike's tip) its
+/// conclusion.
+pub fn latest_exploration(hub: &Git, tip: &str) -> Option<ExplorationNote> {
+    hub.rev_list(&["--first-parent", tip]).into_iter().find_map(|c| exploration(hub, &c))
+}
+
+/// The newest round of `slug`'s spike at `commit`: the highest `<n>` among
+/// `tasks/<slug>/questions/<n>.toml` (0 before the post adds the first).
+pub fn spike_round(hub: &Git, commit: &str, slug: &str) -> u32 {
+    question_rounds(hub, commit, slug).into_iter().max().unwrap_or(0)
+}
+
+/// Every `<n>` with a `tasks/<slug>/questions/<n>.toml` at `commit`.
+pub fn question_rounds(hub: &Git, commit: &str, slug: &str) -> Vec<u32> {
+    let prefix = format!("tasks/{slug}/questions/");
+    hub.ls_tree_files(commit, &prefix)
+        .iter()
+        .filter_map(|f| f.strip_prefix(&prefix)?.strip_suffix(".toml")?.parse::<u32>().ok())
+        .collect()
+}
+
+// --------------------------------------------------------------------------
+// Explored: refs/explored/<slug> (spec §14)
+// --------------------------------------------------------------------------
+
+/// Every slug currently explored (a concluded spike).
+pub fn explored_slugs(hub: &Git) -> Vec<String> {
+    hub.for_each_ref("refs/explored/*").into_iter().filter_map(|(refname, _)| refname.strip_prefix("refs/explored/").map(|s| s.to_string())).collect()
+}
+
+pub fn is_explored(hub: &Git, slug: &str) -> bool {
+    hub.ref_exists(&format!("refs/explored/{slug}"))
 }
 
 // --------------------------------------------------------------------------

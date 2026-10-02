@@ -5,7 +5,7 @@
 // read it back.
 
 use crate::checks::{self, SuiteResult};
-use crate::config::{self, Reason, RoadmapConfig, TaskConfig};
+use crate::config::{self, Reason, RoadmapConfig, TaskConfig, TaskKind};
 use crate::git::Git;
 use crate::records::{self, RejectionRecord, Transition};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,9 @@ pub enum Status {
     InRevision,
     Escalated,
     Accepted,
+    /// A concluded spike (spec §14): never merged, its branch kept under
+    /// `refs/explored/<slug>`.
+    Explored,
     Retired,
 }
 
@@ -46,6 +49,7 @@ impl Status {
             Status::InRevision => "in_revision",
             Status::Escalated => "escalated",
             Status::Accepted => "accepted",
+            Status::Explored => "explored",
             Status::Retired => "retired",
         }
     }
@@ -77,6 +81,20 @@ pub struct TaskState {
     /// it in the in-flight block even once the task has moved past `posted`
     /// (the session persists across send-backs, spec §9).
     pub alive: bool,
+    /// Only for `kind = "spike"` tasks.
+    pub spike: Option<SpikeState>,
+}
+
+/// A spike's progress, read from the hub (spec §14).
+#[derive(Debug, Clone)]
+pub struct SpikeState {
+    /// Questions posted so far (the current round); 0 before the post.
+    pub round: u32,
+    /// The player-verified answer of the latest validated round (or, once
+    /// concluded, the final one), straight from the exploration note.
+    pub answer: Option<String>,
+    pub question: Option<String>,
+    pub concluded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +136,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         }
     }
     slugs.extend(retired.iter().cloned());
+    slugs.extend(records::explored_slugs(hub));
     slugs.extend(accepted.keys().cloned());
 
     let mut tasks = Vec::with_capacity(slugs.len());
@@ -144,6 +163,9 @@ fn task_tip(hub: &Git, slug: &str, accepted: &BTreeMap<String, String>, retired:
     if retired.iter().any(|s| s == slug) {
         return hub.rev_parse(&format!("refs/retired/{slug}"));
     }
+    if let Some(tip) = hub.rev_parse(&format!("refs/explored/{slug}")) {
+        return Some(tip);
+    }
     if let Some(tip) = hub.rev_parse(&format!("refs/heads/task/{slug}")) {
         return Some(tip);
     }
@@ -161,6 +183,7 @@ fn derive_task(
 ) -> Result<TaskState, String> {
     let is_retired = retired.iter().any(|s| s == slug);
     let is_accepted = accepted.contains_key(slug);
+    let is_explored = records::is_explored(hub, slug);
     let alive = live_session(slug);
 
     let tip = task_tip(hub, slug, accepted, retired).ok_or_else(|| format!("no branch, retirement, or merge found for task {slug}"))?;
@@ -175,15 +198,32 @@ fn derive_task(
         *strikes.entry(r.reason).or_insert(0) += 1;
     }
 
-    // ---- review round: tasks/<slug>/reviews/r*.md files at the tip ----
-    let review_round = hub
-        .ls_tree_files(&tip, &format!("tasks/{slug}/reviews/"))
-        .iter()
-        .filter(|f| {
-            let base = f.rsplit('/').next().unwrap_or("");
-            base.starts_with('r') && base.ends_with(".md")
+    // ---- review round: tasks/<slug>/reviews/r*.md files at the tip; for a
+    // spike, the send-backs so far are the questions after the first ----
+    let is_spike = task_config.kind == TaskKind::Spike;
+    let spike = if is_spike {
+        let round = records::spike_round(hub, &tip, slug);
+        let note = records::latest_exploration(hub, &tip);
+        Some(SpikeState {
+            round,
+            answer: note.as_ref().map(|n| n.answer.clone()),
+            question: note.as_ref().map(|n| n.question.clone()),
+            concluded: note.as_ref().is_some_and(|n| n.concluded),
         })
-        .count() as u32;
+    } else {
+        None
+    };
+    let review_round = match &spike {
+        Some(sp) => sp.round.saturating_sub(1),
+        None => hub
+            .ls_tree_files(&tip, &format!("tasks/{slug}/reviews/"))
+            .iter()
+            .filter(|f| {
+                let base = f.rsplit('/').next().unwrap_or("");
+                base.starts_with('r') && base.ends_with(".md")
+            })
+            .count() as u32,
+    };
 
     let suite = cached_suite_summary(hub, &tip);
     let note = records::import_note(hub, &tip);
@@ -201,6 +241,8 @@ fn derive_task(
         Status::Retired
     } else if is_accepted {
         Status::Accepted
+    } else if is_explored {
+        Status::Explored
     } else if let Some(cause) = escalation_cause(hub, roadmap, slug, &strikes, note.as_ref(), &tip) {
         escalation = Some(cause);
         Status::Escalated
@@ -233,7 +275,7 @@ fn derive_task(
         }
     };
 
-    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite, alive })
+    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite, alive, spike })
 }
 
 /// Escalation causes that aren't already covered by retired/accepted: a

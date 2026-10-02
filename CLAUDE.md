@@ -12,9 +12,8 @@ greenfield: there is no compatibility with the old `tasks.yaml` format, and
 none is planned.
 
 Installed as a `dashboard` binary on `PATH` (`cargo install --path .`) and
-invoked by other repos' directors and by `~/.claude/skills/dashboard`. See
-"Installing" below before running that — the skill still expects the old
-CLI and file format.
+invoked by other repos' directors and by `~/.claude/skills/dashboard` (the
+director playbook for this CLI). See "Installing" below.
 
 ## Repo layout
 
@@ -26,7 +25,9 @@ src/git.rs      thin sync wrapper over the `git` CLI (rev-parse, diff, notes, me
 src/paths.rs    XDG home layout and `--home` / `dashboard.home` resolution
 src/init.rs     `dashboard init`: creates the hub and wires up the director <-> hub links
 src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based result cache
-src/records.rs  provenance/enforcement records: import notes, rejections, pins, retirements, accepted-merge lookup
+src/records.rs  provenance/enforcement records: import notes, rejections, pins, retirements, accepted-merge lookup,
+                spike base commits and exploration notes
+src/spike.rs    spikes (spec §14): reading a round, running claims against the base-with-overlay, evaluating a finish
 src/state.rs    derives every task's status (spec §12) purely from the hub + session liveness
 src/player.rs   the player: fetch, validate, import, launch/relay, merge — spec §5/§7/§9/§11
 src/events.rs   the director-relevant event log, cursor, and heartbeat behind `dashboard wait`
@@ -81,10 +82,12 @@ refs/heads/main            director-owned; player-only writes except
 refs/heads/task/<slug>     one per task, never deleted even once accepted
                             (spec §8.1) — moved, not deleted, on retire
 refs/retired/<slug>        a retired task's branch, moved here by the player
+refs/explored/<slug>       a concluded spike's branch, moved here on `conclude:` (spec §14)
 refs/incoming/director/*   the director clone's main/task/* fetched in,
                             pre-validation (src/player.rs's `fetch`)
 refs/incoming/subagent/<slug>  a subagent clone's task/<slug>, pre-validation
 refs/dashboard/pins/<slug> the commit pins were computed from (spec §8.3)
+refs/dashboard/base/<slug> a spike's base commit (the tip at launch); never moved
 refs/dashboard/escalated/<slug>  set when a send-back would exceed
                             max_review_rounds (the other escalation causes —
                             a strike limit, a block: marker — are read
@@ -100,6 +103,8 @@ refs/notes/dashboard             check-result cache: {"checks": {name: CheckResu
 refs/notes/dashboard-imports     provenance per imported commit (actor, transition, slug, at)
 refs/notes/dashboard-rejections  reason/actor/message/at per refs/rejected/* commit
 refs/notes/dashboard-escalations cause/at per refs/dashboard/escalated/<slug>
+refs/notes/dashboard-explorations a spike round's verified answer + claim results, on each validated
+                                 finish commit; {concluded: true, ...} on the `conclude:` commit
 ```
 
 Git config: the director clone carries `dashboard.home`; the hub carries
@@ -131,6 +136,7 @@ post = 2
 review = 2
 accept = 2
 retire = 2
+claims = 2                       # a spike's finish whose claims/findings don't validate
 
 [player]
 agent_cmd = "claude --dangerously-skip-permissions"   # default
@@ -150,6 +156,7 @@ min_pass = 1                     # default; must be 1..=runs
 `tasks/<slug>/task.toml`:
 ```toml
 title = "…"
+kind = "task"                    # or "spike" (spec §14): no depends_on/[check]/milestone
 phase = "p1"
 milestone = false
 depends_on = ["other-slug"]
@@ -157,6 +164,23 @@ depends_on = ["other-slug"]
 [check]                          # the task's own failing-at-post check; added
 name = "…"                       # to tests.toml in the same post commit
 cmd = "…"
+```
+
+A spike's per-round files (spec §14), all under `tasks/<slug>/`:
+```toml
+# questions/<n>.toml (director, pinned)   baseline/<n>.toml (director, pinned)
+question = "…"                            [[claim]]
+why = "…"                                 name = "…"
+answers = ["yes", "no"]                   cmd = "…"   # + runs/min_pass/timeout
+refines = 1                               # on current code; must pass on main
+
+# claims/<n>.toml (subagent)              findings/<n>.md (subagent, free-form,
+answer = "yes"                            #   must exist and be non-empty)
+[[claim]]
+name = "…"
+kind = "spike"                   # or "baseline"
+supports = "yes"                 # spike claims: the answer this backs
+cmd = "…"                        # last stdout line may be `METRICS {json}`
 ```
 
 Every struct uses `#[serde(default)]` field-by-field, and unknown fields are
@@ -203,13 +227,10 @@ subcommand.
   `src/state.rs`, or the on-disk/ref layout — it's the only test that
   exercises real `tmux` sessions and a real subagent-style fetch/merge/
   commit cycle.
-- **Installing** (`cargo install --path .`) overwrites the `dashboard`
-  binary every consumer repo and `~/.claude/skills/dashboard` already rely
-  on for the *old* `tasks.yaml` renderer — a format this version no longer
-  understands. Rewrite that skill as a director playbook against this CLI
-  (spec §13) before installing; until then, run this repo's binary from
-  `target/release/dashboard` directly for any project adopting the new
-  model.
+- **Installing**: `cargo install --path .` replaces `~/.cargo/bin/dashboard`,
+  the binary every director and `~/.claude/skills/dashboard` invoke. When a
+  change alters the CLI surface (subcommands, flags, output a director
+  parses), update that skill to match in the same pass.
 
 ## Decisions on the spec's parking lot (§13)
 
@@ -239,6 +260,18 @@ back here):
   <prompt-file>)"'`; relays go through `tmux load-buffer`/`paste-buffer`/
   `send-keys` into that same session.
 
+- **Spikes** (spec §14): `kind = "spike"`, operator-initiated by process
+  rule (the player doesn't check it), nothing may depend on one, never
+  merges. The player runs the claims itself: baseline claims against the
+  base commit with `tasks/<slug>/` overlaid (`spike::overlay_commit`, a
+  deterministic commit so the check cache hits), spike claims on the branch
+  and again on the overlay where they must fail. Claim runs have a timeout
+  (`Runner::run_claim`). A concluded spike's branch moves to
+  `refs/explored/<slug>`; its answer is read from the
+  `dashboard-explorations` note, never from the free-form findings. No
+  CLI change: a spike is just different director commit shapes
+  (`kind = "spike"`, `questions/`, `conclude:`).
+
 Still undecided (spec §13): timeout/crash handling beyond manual relaunch,
-scope enforcement beyond pins, suite-runtime cost at scale, parallel tasks,
-and the `~/.claude/skills/dashboard` rewrite itself.
+scope enforcement beyond pins, suite-runtime cost at scale, and parallel
+tasks.

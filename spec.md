@@ -304,6 +304,7 @@ its own limit in `roadmap.toml` under `[limits.strikes]`:
 | `review` | director | send-back where the suite still passes — an objection without evidence | 2 |
 | `accept` | director | accept while the task isn't `tested` | 2 |
 | `retire` | director | retire of a task that is in flight and not escalated | 2 |
+| `claims` | subagent | a spike's finish claim whose findings or claims don't validate (§14) | 2 |
 
 Separately, `[limits] max_review_rounds` (default 2) caps legitimate
 send-backs.
@@ -357,6 +358,7 @@ commits.
 | `in_revision` | latest director commit is a send-back; round N = count of `reviews/r*.md` |
 | `escalated` | a strike limit reached, review rounds exceeded, or a `block:` marker; shown with its cause |
 | `accepted` | `Task: <slug>` merge commit on `main` |
+| `explored` | a concluded spike: branch lives under `refs/explored/<slug>` (§14) |
 | `retired` | branch lives under `refs/retired/<slug>`; shown with its post-mortem |
 
 The dashboard renders these from the hub: progress bar (over live tasks;
@@ -401,3 +403,100 @@ Still not decided:
 - Whether the `dashboard` skill is rewritten as the director's playbook or
   replaced entirely (CLAUDE.md's Installing section: it must happen before
   `cargo install --path .` propagates this version to consumers).
+
+## 14. Spikes
+
+A task of `kind = "spike"` (in `task.toml`) answers a question instead of
+shipping code. It exists for exploration, where nobody can yet write the
+failing check §3.1 asks of a post. The rule that every claim is checkable
+stays; what changes is who writes the evidence and what "done" means. A spike
+never merges into `main`, so the invariant that the suite passes at every
+`main` commit is untouched.
+
+**Initiation.** Operator only: the director may suggest a spike but not start
+one. The player can't tell whether the operator was asked, so this is a
+process rule; if a director is seen posting spikes unasked, add an enforced
+authorization. Nothing may depend on a spike (a plan isn't built over a
+yet-unknown answer): a spike has no `depends_on`, no task `[check]`, isn't a
+milestone, and a `depends_on` that names a spike is a `plan` rejection. It
+never counts toward progress. One task in flight still holds (§4).
+
+**Roles.**
+
+- *Operator*: decides a spike is worth running, approves every question and
+  every send-back, reads the findings with the director, decides when it is
+  done.
+- *Director*: writes the question with the operator and commits the post;
+  reviews the findings against the pinned question; sends back with a new
+  question or commits `conclude:`. Plans nothing that depends on the spike.
+- *Player*: validates the post, pins the question files and the base commit,
+  runs every claim against the right code version, requires `findings`, never
+  merges the branch, never requires the project suite.
+- *Subagent*: explores with no path restrictions (nothing merges), then
+  delivers the findings and the claims. It can't touch the pinned files, so
+  it can't reword the question.
+
+**Files.** A spike is a sequence of *rounds*; round 1 is the original
+question and each send-back opens the next. Nothing is overwritten.
+
+```
+tasks/<slug>/task.toml, prompt.md   director, pinned at launch
+tasks/<slug>/questions/<n>.toml     director, one per round, append-only
+tasks/<slug>/baseline/<n>.toml      director's baseline claims for round n
+tasks/<slug>/claims/<n>.toml        subagent: answer + claims for round n
+tasks/<slug>/findings/<n>.md        subagent: free-form findings, round n
+```
+
+`questions/<n>.toml` has `question`, `why` (prose), `answers` (the allowed
+answers; `inconclusive` is always allowed) and an optional `refines` (the
+earlier round it sharpens). `claims/<n>.toml` has a top-level `answer` and
+`[[claim]]` entries.
+
+**Claims** are commands the player runs itself from the repo root (`sh -c`,
+exit 0 passes, optional `runs`/`min_pass` as in §6.1, and a `timeout`
+defaulting to 600 s after which the run is killed and fails). A command may
+print a last line `METRICS {json}`; the player stores that object in the
+result. Two kinds:
+
+- *baseline*: describes the code as it is now. The director supplies them in
+  `baseline/<n>.toml` (pinned, verified to pass at post/send-back time); the
+  subagent may add its own. Run against the **base commit** with
+  `tasks/<slug>/` overlaid, they must pass.
+- *spike*: describes what the exploration achieved. Only the subagent writes
+  them, with `supports = "<answer>"`. They must pass on the branch tip and
+  **fail** on the base-with-overlay. A claim that passes without the spike
+  (`cmd = "true"`) is rejected.
+
+The **base commit** is the tip at launch (the code of `main` plus the
+director's post), recorded once in `refs/dashboard/base/<slug>`; the overlay
+copies `tasks/<slug>/` from the candidate onto it, so claim scripts under
+`tasks/<slug>/` exist there but the spike's code doesn't.
+
+**Transitions** (additions to §9):
+
+| Transition | Commit | Player checks | Reason |
+|---|---|---|---|
+| **post** | director adds `prompt.md`, `questions/1.toml`, optional `baseline/1.toml` (+scripts); only under `tasks/<slug>/`, nothing in `claims/` or `findings/` | spike is `ready`, nothing else in flight, question valid, baseline claims pass | `post` |
+| **launch** | — | baseline claims still pass; pins only `tasks/<slug>/` (the project's tests are the subagent's to change); sets the base | — |
+| **finish** | subagent: code, `findings/<n>.md`, `claims/<n>.toml` | pins; only `claims/`/`findings/` of this round under `tasks/<slug>/`; findings non-empty; `answer` allowed; every claim runs and passes as above; a non-`inconclusive` answer has a passing spike claim with `supports` equal to it. Any failing claim rejects the whole finish | `pins`, `claims` |
+| **send back** | director adds `questions/<n+1>.toml` (+ optional baseline); operator approves | adds nothing else; `refines` in range; baseline claims pass on the base; within `max_review_rounds`. No failing test needed. Re-pins | `ownership`, `review` |
+| **conclude** | `conclude:` marker, spike is `tested` | moves the branch to `refs/explored/<slug>` (like retire), ends the session | `accept`, `ownership` |
+
+`accept:` on a spike is rejected (`accept`); `retire:` is also allowed on a
+`tested` spike. A `block:` escalates it as usual. The player reads
+`findings/<n>.md` only to require that it exists and isn't empty; the director
+and operator judge whether the claims really support the answer and whether
+the question was answered rather than sidestepped.
+
+**Where the answer lives.** In notes, not a commit message: the player never
+writes commits on a spike branch. Every validated finish gets a
+`refs/notes/dashboard-explorations` note `{slug, round, question, answer,
+claims: {name: {kind, passed, metrics}}}`; the `conclude:` commit gets the
+final `{concluded: true, round, answer}`. `status` reads these, so the answer
+shows next to the spike (`explored: yes (round 2)`) without parsing markdown.
+
+**Not in v1.** A sandbox for the subagent's paths; anything depending on a
+spike or enforcing `derived_from`; operator authorization the player can check;
+verifying quotes in the findings; size caps and time budgets; running a spike
+beside a normal task.
+

@@ -52,11 +52,12 @@ pub struct StrikeLimits {
     pub review: u32,
     pub accept: u32,
     pub retire: u32,
+    pub claims: u32,
 }
 
 impl Default for StrikeLimits {
     fn default() -> Self {
-        Self { history: 2, ownership: 2, pins: 2, suite: 2, plan: 2, post: 2, review: 2, accept: 2, retire: 2 }
+        Self { history: 2, ownership: 2, pins: 2, suite: 2, plan: 2, post: 2, review: 2, accept: 2, retire: 2, claims: 2 }
     }
 }
 
@@ -72,6 +73,7 @@ impl StrikeLimits {
             Reason::Review => self.review,
             Reason::Accept => self.accept,
             Reason::Retire => self.retire,
+            Reason::Claims => self.claims,
         }
     }
 }
@@ -104,11 +106,23 @@ pub enum Reason {
     Review,
     Accept,
     Retire,
+    /// A spike's finish claim whose findings or claims don't validate (spec §14).
+    Claims,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 9] =
-        [Reason::History, Reason::Ownership, Reason::Pins, Reason::Suite, Reason::Plan, Reason::Post, Reason::Review, Reason::Accept, Reason::Retire];
+    pub const ALL: [Reason; 10] = [
+        Reason::History,
+        Reason::Ownership,
+        Reason::Pins,
+        Reason::Suite,
+        Reason::Plan,
+        Reason::Post,
+        Reason::Review,
+        Reason::Accept,
+        Reason::Retire,
+        Reason::Claims,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -121,6 +135,7 @@ impl Reason {
             Reason::Review => "review",
             Reason::Accept => "accept",
             Reason::Retire => "retire",
+            Reason::Claims => "claims",
         }
     }
 }
@@ -139,6 +154,7 @@ impl FromStr for Reason {
             "review" => Ok(Reason::Review),
             "accept" => Ok(Reason::Accept),
             "retire" => Ok(Reason::Retire),
+            "claims" => Ok(Reason::Claims),
             other => Err(format!("unknown rejection reason: {other:?}")),
         }
     }
@@ -205,10 +221,22 @@ impl TestsConfig {
 // tasks/<slug>/task.toml (spec §8.2)
 // --------------------------------------------------------------------------
 
+/// What a task produces: ordinary code that merges into `main`, or a spike —
+/// an answer to a pinned question, backed by claims, that never merges
+/// (spec §14).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    #[default]
+    Task,
+    Spike,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct TaskConfig {
     pub title: String,
+    pub kind: TaskKind,
     pub phase: String,
     pub milestone: bool,
     pub depends_on: Vec<String>,
@@ -220,8 +248,184 @@ impl TaskConfig {
         if let Some(c) = &self.check {
             c.validate()?;
         }
+        if self.kind == TaskKind::Spike {
+            if self.check.is_some() {
+                return Err("a spike has no task [check]: its evidence is its claims".to_string());
+            }
+            if !self.depends_on.is_empty() {
+                return Err("a spike can't depend on other tasks".to_string());
+            }
+            if self.milestone {
+                return Err("a spike can't be a milestone".to_string());
+            }
+        }
         Ok(())
     }
+}
+
+// --------------------------------------------------------------------------
+// Spikes (spec §14): questions/<n>.toml, baseline/<n>.toml, claims/<n>.toml
+// --------------------------------------------------------------------------
+
+/// The one answer every spike question allows besides its own `answers`.
+pub const INCONCLUSIVE: &str = "inconclusive";
+
+/// `tasks/<slug>/questions/<n>.toml`: the pinned question of round `n`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Question {
+    pub question: String,
+    pub why: String,
+    pub answers: Vec<String>,
+    /// The earlier round this question sharpens, if any.
+    pub refines: Option<u32>,
+}
+
+impl Question {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.question.trim().is_empty() {
+            return Err("question must not be empty".to_string());
+        }
+        if self.answers.is_empty() {
+            return Err("answers must list at least one answer".to_string());
+        }
+        for (i, a) in self.answers.iter().enumerate() {
+            if a.trim().is_empty() {
+                return Err("answers must not contain an empty answer".to_string());
+            }
+            if self.answers[..i].contains(a) {
+                return Err(format!("answers lists {a:?} twice"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `answer` is one this question allows.
+    pub fn allows(&self, answer: &str) -> bool {
+        answer == INCONCLUSIVE || self.answers.iter().any(|a| a == answer)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimKind {
+    /// Describes the code as it is now; must pass on the base commit.
+    #[default]
+    Baseline,
+    /// Describes what the exploration achieved; passes on the branch, fails
+    /// on the base commit.
+    Spike,
+}
+
+impl ClaimKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClaimKind::Baseline => "baseline",
+            ClaimKind::Spike => "spike",
+        }
+    }
+}
+
+/// How long a claim run may take before the player kills it, unless the
+/// claim sets its own `timeout` (seconds).
+pub const DEFAULT_CLAIM_TIMEOUT_SECS: u64 = 600;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Claim {
+    pub name: String,
+    pub cmd: String,
+    #[serde(default)]
+    pub kind: ClaimKind,
+    /// The answer a spike claim backs.
+    #[serde(default)]
+    pub supports: Option<String>,
+    #[serde(default = "default_runs")]
+    pub runs: u32,
+    #[serde(default = "default_min_pass")]
+    pub min_pass: u32,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+}
+
+impl Claim {
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout.unwrap_or(DEFAULT_CLAIM_TIMEOUT_SECS)
+    }
+
+    /// The runner's view of this claim. The name is prefixed so a claim can
+    /// never share a result-cache slot with a suite check of the same name.
+    pub fn as_check(&self) -> Check {
+        Check { name: format!("claim:{}", self.name), cmd: self.cmd.clone(), runs: self.runs, min_pass: self.min_pass }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("a claim needs a name".to_string());
+        }
+        if self.cmd.trim().is_empty() {
+            return Err(format!("claim {:?}: cmd must not be empty", self.name));
+        }
+        if self.runs < 1 || self.min_pass < 1 || self.min_pass > self.runs {
+            return Err(format!("claim {:?}: min_pass must be between 1 and runs ({}), got {}", self.name, self.runs, self.min_pass));
+        }
+        if self.timeout == Some(0) {
+            return Err(format!("claim {:?}: timeout must be at least 1 second", self.name));
+        }
+        Ok(())
+    }
+}
+
+/// `tasks/<slug>/claims/<n>.toml`, written by the subagent: its answer to the
+/// round's question plus the claims that back it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ClaimsFile {
+    pub answer: String,
+    pub claim: Vec<Claim>,
+}
+
+/// `tasks/<slug>/baseline/<n>.toml`, written by the director: baseline
+/// claims on the current code, pinned.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct BaselineFile {
+    pub claim: Vec<Claim>,
+}
+
+fn validate_claim_list(claims: &[Claim]) -> Result<(), String> {
+    for c in claims {
+        c.validate()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn question_from_str(s: &str) -> Result<Question, String> {
+    let q: Question = toml::from_str(s).map_err(|e| e.to_string())?;
+    q.validate()?;
+    Ok(q)
+}
+
+pub(crate) fn claims_file_from_str(s: &str) -> Result<ClaimsFile, String> {
+    let f: ClaimsFile = toml::from_str(s).map_err(|e| e.to_string())?;
+    validate_claim_list(&f.claim)?;
+    if f.answer.trim().is_empty() {
+        return Err("answer must be set (one of the question's answers, or \"inconclusive\")".to_string());
+    }
+    Ok(f)
+}
+
+pub(crate) fn baseline_file_from_str(s: &str) -> Result<BaselineFile, String> {
+    let mut f: BaselineFile = toml::from_str(s).map_err(|e| e.to_string())?;
+    validate_claim_list(&f.claim)?;
+    for c in &mut f.claim {
+        if c.kind != ClaimKind::Baseline {
+            return Err(format!("claim {:?}: baseline/<n>.toml only holds baseline claims", c.name));
+        }
+        if c.supports.is_some() {
+            return Err(format!("claim {:?}: a baseline claim backs no answer (drop `supports`)", c.name));
+        }
+    }
+    Ok(f)
 }
 
 // --------------------------------------------------------------------------
@@ -377,6 +581,53 @@ mod tests {
         assert!(!cfg.milestone);
         assert_eq!(cfg.depends_on, vec!["a".to_string(), "b".to_string()]);
         assert!(cfg.check.is_none());
+    }
+
+    #[test]
+    fn claims_strike_limit_defaults_to_two() {
+        let cfg = roadmap_config_from_str("[limits.strikes]\nclaims = 4\n").unwrap();
+        assert_eq!(cfg.limits.strikes.limit(Reason::Claims), 4);
+        assert_eq!(StrikeLimits::default().claims, 2);
+    }
+
+    #[test]
+    fn spike_task_config_is_validated() {
+        let ok = task_config_from_str("kind = \"spike\"\ntitle = \"s\"\n").unwrap();
+        assert_eq!(ok.kind, TaskKind::Spike);
+        assert_eq!(task_config_from_str("title = \"t\"\n").unwrap().kind, TaskKind::Task);
+        assert!(task_config_from_str("kind = \"spike\"\ndepends_on = [\"a\"]\n").is_err());
+        assert!(task_config_from_str("kind = \"spike\"\nmilestone = true\n").is_err());
+        assert!(task_config_from_str("kind = \"spike\"\n[check]\nname = \"c\"\ncmd = \"true\"\n").is_err());
+    }
+
+    #[test]
+    fn question_parses_and_validates() {
+        let q = question_from_str("question = \"Can we?\"\nanswers = [\"yes\", \"no\"]\nrefines = 1\n").unwrap();
+        assert_eq!(q.refines, Some(1));
+        assert!(q.allows("yes"));
+        assert!(q.allows("inconclusive"));
+        assert!(!q.allows("maybe"));
+        assert!(question_from_str("answers = [\"yes\"]\n").is_err(), "empty question");
+        assert!(question_from_str("question = \"q\"\n").is_err(), "no answers");
+        assert!(question_from_str("question = \"q\"\nanswers = [\"a\", \"a\"]\n").is_err(), "duplicate answers");
+    }
+
+    #[test]
+    fn claims_file_needs_an_answer_and_valid_claims() {
+        let f = claims_file_from_str("answer = \"yes\"\n\n[[claim]]\nname = \"c\"\nkind = \"spike\"\nsupports = \"yes\"\ncmd = \"true\"\n").unwrap();
+        assert_eq!(f.claim[0].kind, ClaimKind::Spike);
+        assert_eq!(f.claim[0].timeout_secs(), DEFAULT_CLAIM_TIMEOUT_SECS);
+        assert_eq!(f.claim[0].as_check().name, "claim:c");
+        assert!(claims_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\n").is_err(), "no answer");
+        assert!(claims_file_from_str("answer = \"yes\"\n[[claim]]\nname = \"c\"\ncmd = \"\"\n").is_err(), "empty cmd");
+        assert!(claims_file_from_str("answer = \"yes\"\n[[claim]]\nname = \"c\"\ncmd = \"x\"\nruns = 2\nmin_pass = 3\n").is_err());
+    }
+
+    #[test]
+    fn baseline_file_only_holds_baseline_claims() {
+        assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\n").is_ok());
+        assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nkind = \"spike\"\n").is_err());
+        assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nsupports = \"yes\"\n").is_err());
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub(crate) mod c {
     pub const RED: &str = "\x1b[31m";
     pub const GRAY: &str = "\x1b[90m";
     pub const MAGENTA: &str = "\x1b[35m";
+    pub const BLUE: &str = "\x1b[34m";
     pub const WHITE: &str = "\x1b[97m";
 }
 

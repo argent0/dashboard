@@ -6,7 +6,8 @@
 #
 #   plan alpha -> post alpha -> tmux launch -> tested -> send-back -> tested
 #   -> accept -> plan+post beta (depends on alpha) -> block -> escalated
-#   -> retire -> a director rejection on main
+#   -> retire -> a spike (answer, send back, conclude) -> a director
+#   rejection on main
 #
 # asserting each transition via `dashboard status --no-color` and raw git
 # ref checks against the hub. See spec.md for the model and CLAUDE.md for
@@ -449,6 +450,92 @@ git -C "$DIR_REPO" commit -q --allow-empty -m "retire: beta" -m "The check as sp
 wait_until "refs/retired/beta exists" hub_ref_exists refs/retired/beta
 assert_contains "$(dash_status)" "The check as specified can't be met" "status's retired post-mortem"
 wait_until "beta's tmux session is gone" session_gone beta
+
+# --------------------------------------------------------------------------
+# 7b. A spike (spec §14): plan + post a question, the fake agent answers it
+#     with findings and claims -> tested; send back with a refined question
+#     -> answered again; conclude -> explored. The branch moves to
+#     refs/explored/probe and main never moves.
+# --------------------------------------------------------------------------
+
+log "step 7b: spike probe (plan, post, answer, send back, conclude)"
+main_before=$(git --git-dir "$HOME_DIR/hub.git" rev-parse refs/heads/main)
+git -C "$DIR_REPO" checkout -q -b task/probe main
+mkdir -p "$DIR_REPO/tasks/probe"
+cat >"$DIR_REPO/tasks/probe/task.toml" <<'EOF'
+kind = "spike"
+title = "Can we build the spike feature?"
+phase = "p1"
+EOF
+git -C "$DIR_REPO" add -A
+git -C "$DIR_REPO" commit -q -m "plan: probe"
+wait_until "spike probe planned (ready)" task_status_is probe ready
+
+mkdir -p "$DIR_REPO/tasks/probe/questions" "$DIR_REPO/tasks/probe/baseline"
+cat >"$DIR_REPO/tasks/probe/prompt.md" <<'EOF'
+Find out whether spikefeature.txt can be produced.
+EOF
+cat >"$DIR_REPO/tasks/probe/questions/1.toml" <<'EOF'
+question = "Can we produce spikefeature.txt?"
+why = "decides the design"
+answers = ["yes", "no"]
+EOF
+cat >"$DIR_REPO/tasks/probe/baseline/1.toml" <<'EOF'
+[[claim]]
+name = "no-spike-feature-yet"
+cmd = "test ! -f spikefeature.txt"
+EOF
+cat >"$DIR_REPO/tasks/probe/agent.sh" <<'EOF'
+#!/bin/sh
+# Answers whichever round is current: the number of question files.
+n=$(ls tasks/probe/questions | wc -l)
+echo built > spikefeature.txt
+mkdir -p tasks/probe/findings tasks/probe/claims
+echo "It works. Recommend building it." > "tasks/probe/findings/$n.md"
+cat > "tasks/probe/claims/$n.toml" <<CLAIMS_EOF
+answer = "yes"
+
+[[claim]]
+name = "has-spike-feature"
+kind = "spike"
+supports = "yes"
+cmd = "test -f spikefeature.txt"
+CLAIMS_EOF
+EOF
+git -C "$DIR_REPO" add -A
+git -C "$DIR_REPO" commit -q -m "post: probe"
+
+wait_until "spike probe's tmux session exists" session_alive probe
+wait_until "spike probe tested" task_status_is probe tested
+assert_contains "$(dash_status)" "round 1, latest answer: yes" "status's spike line"
+
+log "step 7b: send the spike back with a sharper question"
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" checkout -q task/probe
+git -C "$DIR_REPO" merge -q --ff-only hub/task/probe
+cat >"$DIR_REPO/tasks/probe/questions/2.toml" <<'EOF'
+question = "Can we still produce it with the cache cold?"
+answers = ["yes", "no"]
+refines = 1
+EOF
+git -C "$DIR_REPO" add -A
+git -C "$DIR_REPO" commit -q -m "send-back: probe round 2"
+send_back_out=$(tick_capture)
+assert_contains "$send_back_out" "(send_back)" "the spike send-back tick's report"
+wait_until "spike probe answered round 2" task_status_is probe tested
+assert_contains "$(dash_status)" "round 2, latest answer: yes" "status's spike line after round 2"
+
+log "step 7b: conclude the spike"
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" checkout -q task/probe
+git -C "$DIR_REPO" merge -q --ff-only hub/task/probe
+git -C "$DIR_REPO" commit -q --allow-empty -m "conclude: yes" -m "The operator agreed with the answer."
+wait_until "spike probe explored" task_status_is probe explored
+assert_contains "$(dash_status)" "answer: yes (round 2)" "status's explored spike"
+hub_ref_exists refs/explored/probe || { echo "e2e: refs/explored/probe missing" >&2; exit 1; }
+if hub_ref_exists refs/heads/task/probe; then echo "e2e: refs/heads/task/probe should have moved to refs/explored/probe" >&2; exit 1; fi
+[ "$(git --git-dir "$HOME_DIR/hub.git" rev-parse refs/heads/main)" = "$main_before" ] || { echo "e2e: a spike must never move main" >&2; exit 1; }
+wait_until "probe's tmux session is gone" session_gone probe
 
 # --------------------------------------------------------------------------
 # 8. A director rejection path: commit a non-doc file on main ->

@@ -17,11 +17,12 @@
 // send-backs into its tmux session. Step 7 adds events and `dashboard wait`.
 
 use crate::checks;
-use crate::config::{self, RoadmapConfig, Reason, TaskConfig};
+use crate::config::{self, RoadmapConfig, Reason, TaskConfig, TaskKind};
 use crate::events::{self, EventKind};
 use crate::git::Git;
 use crate::paths::{self, Home};
 use crate::records::{self, Actor, RejectionRecord, Transition};
+use crate::spike;
 use crate::state::{self, Status};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -545,7 +546,7 @@ impl<S: Sessions> Player<S> {
         // A retired slug: the director's local branch is stale (they haven't
         // deleted it in their own clone yet). Ignore it entirely — not even
         // a rejection, since there's nothing to say.
-        if records::is_retired(&self.hub, slug) {
+        if records::is_retired(&self.hub, slug) || records::is_explored(&self.hub, slug) {
             return Ok(());
         }
 
@@ -659,6 +660,9 @@ impl<S: Sessions> Player<S> {
         if accepted.contains_key(slug) {
             return Err(format!("plan: task/{slug} is already accepted; slugs are never reused"));
         }
+        if records::is_explored(&self.hub, slug) {
+            return Err(format!("plan: task/{slug} is an explored spike; slugs are never reused"));
+        }
 
         let expected_path = format!("tasks/{slug}/task.toml");
         let diffs = self.hub.diff_names(main_tip, candidate);
@@ -708,6 +712,7 @@ impl<S: Sessions> Player<S> {
                 );
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
+            Some(Status::Tested) if records::is_spike_at(&self.hub, tip, slug) => self.try_spike_send_back(slug, tip, candidate, &diffs, &hub_state, report),
             Some(Status::Tested) => self.try_send_back(slug, tip, candidate, &diffs, &hub_state, report),
             Some(other) => {
                 let msg = format!("task/{slug} is {} — the director may not commit until the subagent finishes", other.as_str());
@@ -751,14 +756,22 @@ impl<S: Sessions> Player<S> {
         if subject.starts_with("retire:") {
             return self.try_retire(slug, tip, candidate, status, report);
         }
-        let msg = format!("task/{slug} commit {} is an empty marker with subject {subject:?} — only `accept:`/`retire:` are the director's to make here", short(candidate));
+        if subject.starts_with("conclude:") {
+            return self.try_conclude(slug, tip, candidate, status, report);
+        }
+        let msg = format!("task/{slug} commit {} is an empty marker with subject {subject:?} — only `accept:`/`retire:`/`conclude:` are the director's to make here", short(candidate));
         self.reject(slug, candidate, Reason::Ownership, msg, report)
     }
 
     // ---- post (spec §9, §6.3) ----
 
     fn try_post(&mut self, slug: &str, tip: &str, candidate: &str, status: Status, hub_state: &state::HubState, report: &mut TickReport) -> Result<(), String> {
-        match self.validate_post(slug, candidate, status, hub_state) {
+        let validated = if records::is_spike_at(&self.hub, candidate, slug) {
+            self.validate_spike_post(slug, tip, candidate, status, hub_state)
+        } else {
+            self.validate_post(slug, candidate, status, hub_state)
+        };
+        match validated {
             Ok(()) => {
                 let hub_ref = format!("refs/heads/task/{slug}");
                 self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
@@ -902,6 +915,11 @@ impl<S: Sessions> Player<S> {
             return self.reject(slug, candidate, Reason::Accept, msg, report);
         }
 
+        if records::is_spike_at(&self.hub, tip, slug) {
+            let msg = format!("accept: task/{slug} is a spike: it never merges into main (finish it with `conclude:`)");
+            return self.reject(slug, candidate, Reason::Accept, msg, report);
+        }
+
         let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
         let tree = match self.hub.merge_tree_write(&main_tip, candidate).map_err(|e| e.to_string())? {
             Some(t) => t,
@@ -941,13 +959,217 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
+    // ---- spikes (spec §14) ----
+
+    /// spec §14's post row for a spike: the spike is `ready` and nothing else
+    /// is in flight; the post commit only adds the director's own files
+    /// (`prompt.md`, `questions/1.toml`, optional `baseline/1.toml` and its
+    /// scripts, anything else under `tasks/<slug>/` but `claims/` and
+    /// `findings/`); the question is valid; and the director's baseline claims
+    /// pass on the current code. There is no task check and no `tests.toml`
+    /// entry: a spike never merges.
+    fn validate_spike_post(&self, slug: &str, tip: &str, candidate: &str, status: Status, hub_state: &state::HubState) -> Result<(), String> {
+        if status != Status::Ready {
+            return Err(format!("post: task/{slug} is {} — a spike can only be posted while ready", status.as_str()));
+        }
+        if let Some(other) = hub_state.tasks.iter().find(|t| t.slug != slug && matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision | Status::Escalated)) {
+            return Err(format!("post: task/{slug}: task/{} is already {} — only one task may be in flight at a time", other.slug, other.status.as_str()));
+        }
+
+        // Only the director's own files, under tasks/<slug>/: nothing outside
+        // it (the base must stay `main`'s code), and nothing in the
+        // subagent's `claims/` or `findings/`.
+        let prefix = format!("tasks/{slug}/");
+        for (_, path) in self.hub.diff_names(tip, candidate) {
+            let ok = path.strip_prefix(&prefix).is_some_and(|rest| !rest.starts_with("claims/") && !rest.starts_with("findings/"));
+            if !ok {
+                return Err(format!("post: task/{slug}: a spike's post may only add the director's files under {prefix} (prompt, questions/, baseline/), not {path:?}"));
+            }
+        }
+
+        let rounds = records::question_rounds(&self.hub, candidate, slug);
+        if rounds != vec![1] {
+            return Err(format!("post: task/{slug}: a spike's post must add exactly {} (found rounds {rounds:?})", spike::question_path(slug, 1)));
+        }
+        let question = spike::read_question(&self.hub, candidate, slug, 1).map_err(|e| format!("post: task/{slug}: {e}"))?;
+        if question.refines.is_some() {
+            return Err(format!("post: task/{slug}: the first question can't refine an earlier round"));
+        }
+
+        let baseline = spike::read_baseline(&self.hub, candidate, slug, 1).map_err(|e| format!("post: task/{slug}: {e}"))?;
+        for (i, c) in baseline.iter().enumerate() {
+            if baseline[..i].iter().any(|o| o.name == c.name) {
+                return Err(format!("post: task/{slug}: baseline claim name {:?} is used twice", c.name));
+            }
+        }
+        let failures = spike::failing_at(&self.runner, candidate, &baseline, "on the current code");
+        if !failures.is_empty() {
+            return Err(format!("post: task/{slug}: baseline claims must pass on the current code\n{}", failures.join("\n")));
+        }
+        Ok(())
+    }
+
+    /// A spike's finish claim (spec §14): a path check, then
+    /// `spike::evaluate_finish` runs and reads everything the player will
+    /// vouch for. Failures are `claims` strikes. A valid claim is imported,
+    /// and the player's verified record of the round goes into the
+    /// exploration note on that commit.
+    fn finish_spike(&mut self, slug: &str, hub_tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+        let round = records::spike_round(&self.hub, hub_tip, slug);
+        let bad = spike::subagent_path_violations(&self.hub.diff_names(hub_tip, candidate), slug, round);
+        if !bad.is_empty() {
+            let msg = format!("pins: task/{slug}'s finish claim touches files under tasks/{slug}/ that aren't the subagent's to write: {}", bad.join(", "));
+            return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
+        }
+
+        let Some(base) = records::base_commit(&self.hub, slug) else {
+            return Err(format!("task/{slug} is a spike with no recorded base commit"));
+        };
+        match spike::evaluate_finish(&self.hub, &self.runner, slug, &base, candidate) {
+            Err(msg) => {
+                let msg = format!("claims: task/{slug}: {msg}");
+                self.reject_and_relay(slug, candidate, Reason::Claims, msg, report)
+            }
+            Ok(ev) => {
+                let hub_ref = format!("refs/heads/task/{slug}");
+                self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
+                records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Finish, Some(slug))?;
+                records::record_exploration(
+                    &self.hub,
+                    candidate,
+                    records::ExplorationNote { slug: slug.to_string(), round: ev.round, question: ev.question.question.clone(), answer: ev.answer.clone(), claims: ev.claims, concluded: false, at: 0 },
+                )?;
+                report.imported.push((hub_ref, candidate.to_string(), Transition::Finish));
+                self.sessions.send(slug, &format!("finish accepted — claims verified (answer: {}), awaiting director review; don't commit further", ev.answer));
+                Ok(())
+            }
+        }
+    }
+
+    /// A send-back on a tested spike: it adds the next round's question (and
+    /// optionally its baseline claims) and nothing else, within
+    /// `max_review_rounds`; the new baseline claims must pass on the current
+    /// code. It needs no failing test — the new question is the target. The
+    /// operator's approval is a process rule the player can't see.
+    fn try_spike_send_back(&mut self, slug: &str, tip: &str, candidate: &str, diffs: &[(char, String)], hub_state: &state::HubState, report: &mut TickReport) -> Result<(), String> {
+        let n = records::spike_round(&self.hub, tip, slug);
+        let next = n + 1;
+        let question_file = spike::question_path(slug, next);
+        let q_prefix = format!("tasks/{slug}/questions/");
+
+        if !diffs.iter().any(|(st, p)| *st == 'A' && *p == question_file) {
+            if !diffs.iter().any(|(st, p)| *st == 'A' && p.starts_with(&q_prefix)) {
+                let msg = format!("task/{slug}'s commit doesn't add a question file (expected {question_file})");
+                return self.reject(slug, candidate, Reason::Ownership, msg, report);
+            }
+            let msg = format!("send-back: task/{slug}: expected round {next} to add {question_file}");
+            return self.reject(slug, candidate, Reason::Review, msg, report);
+        }
+        for (st, path) in diffs {
+            if *st != 'A' || !spike::send_back_path_ok(path, slug, next) {
+                let msg = format!("send-back: task/{slug}: a spike send-back may only add {question_file} and baseline claims for round {next}, not {path:?}");
+                return self.reject(slug, candidate, Reason::Review, msg, report);
+            }
+        }
+
+        let question = match spike::read_question(&self.hub, candidate, slug, next) {
+            Ok(q) => q,
+            Err(e) => return self.reject(slug, candidate, Reason::Review, format!("send-back: task/{slug}: {e}"), report),
+        };
+        if let Some(r) = question.refines {
+            if r < 1 || r > n {
+                let msg = format!("send-back: task/{slug}: {question_file}: refines = {r}, but only rounds 1..={n} exist");
+                return self.reject(slug, candidate, Reason::Review, msg, report);
+            }
+        }
+        let baseline = match spike::read_baseline(&self.hub, candidate, slug, next) {
+            Ok(b) => b,
+            Err(e) => return self.reject(slug, candidate, Reason::Review, format!("send-back: task/{slug}: {e}"), report),
+        };
+        if let Some(c) = baseline.iter().enumerate().find_map(|(i, c)| baseline[..i].iter().any(|o| o.name == c.name).then_some(c)) {
+            let msg = format!("send-back: task/{slug}: baseline claim name {:?} is used twice", c.name);
+            return self.reject(slug, candidate, Reason::Review, msg, report);
+        }
+
+        // The Nth question is the (N-1)th send-back's; spec §10's cap counts
+        // send-backs, so round `n` here is send-back number `n`.
+        if n > hub_state.roadmap.limits.max_review_rounds {
+            let cause = format!("review rounds exceeded: {n} > {}", hub_state.roadmap.limits.max_review_rounds);
+            records::record_escalation(&self.hub, slug, candidate, &cause)?;
+            report.escalated.push((slug.to_string(), cause));
+            return Ok(());
+        }
+
+        if !baseline.is_empty() {
+            let Some(base) = records::base_commit(&self.hub, slug) else {
+                return Err(format!("task/{slug} is a spike with no recorded base commit"));
+            };
+            let overlay = spike::overlay_commit(&self.hub, &base, candidate, slug)?;
+            let failures = spike::failing_at(&self.runner, &overlay, &baseline, "on the current code");
+            if !failures.is_empty() {
+                let msg = format!("send-back: task/{slug}: baseline claims must pass on the current code\n{}", failures.join("\n"));
+                return self.reject(slug, candidate, Reason::Review, msg, report);
+            }
+        }
+
+        let hub_ref = format!("refs/heads/task/{slug}");
+        self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, candidate, Actor::Director, Transition::SendBack, Some(slug))?;
+        report.imported.push((hub_ref, candidate.to_string(), Transition::SendBack));
+
+        records::set_pins(&self.hub, slug, candidate)?;
+        let raw = self.hub.show_file(candidate, &question_file).unwrap_or_default();
+        let header = format!(
+            "Round {next}: the director sent your spike back with a new question. Fetch it: git pull --ff-only origin task/{slug}. \
+Answer it in one new commit adding {} and {}.",
+            spike::findings_path(slug, next),
+            spike::claims_path(slug, next)
+        );
+        self.sessions.send(slug, &format!("{header}\n\n{}", spike::question_block(next, &raw)));
+        Ok(())
+    }
+
+    /// `conclude:` on a tested spike: the branch moves to
+    /// `refs/explored/<slug>` (it never merges), the player records the final
+    /// answer, and the session ends. The answer is the one the player
+    /// verified at the finish; the director and operator agreeing with it is
+    /// their conversation.
+    fn try_conclude(&mut self, slug: &str, tip: &str, candidate: &str, status: Option<Status>, report: &mut TickReport) -> Result<(), String> {
+        if !records::is_spike_at(&self.hub, tip, slug) {
+            let msg = format!("conclude: task/{slug} is not a spike — an ordinary task is finished with `accept:`");
+            return self.reject(slug, candidate, Reason::Ownership, msg, report);
+        }
+        if status != Some(Status::Tested) {
+            let msg = format!("conclude: task/{slug} is {} — a spike needs a validated finish before it can be concluded", status.map(|s| s.as_str()).unwrap_or("unknown"));
+            return self.reject(slug, candidate, Reason::Accept, msg, report);
+        }
+        let Some(note) = records::exploration(&self.hub, tip) else {
+            let msg = format!("conclude: task/{slug} has no verified answer recorded at its tip");
+            return self.reject(slug, candidate, Reason::Accept, msg, report);
+        };
+
+        self.hub.update_ref(&format!("refs/explored/{slug}"), candidate).map_err(|e| e.to_string())?;
+        let hub_ref = format!("refs/heads/task/{slug}");
+        self.hub.delete_ref_cas(&hub_ref, tip).map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, candidate, Actor::Director, Transition::Conclude, Some(slug))?;
+        records::record_exploration(&self.hub, candidate, records::ExplorationNote { concluded: true, ..note })?;
+        report.imported.push((format!("refs/explored/{slug}"), candidate.to_string(), Transition::Conclude));
+
+        self.sessions.kill(slug);
+        self.cleanup_subagent_clone(slug);
+        Ok(())
+    }
+
     // ---- retire (spec §9) ----
 
     /// spec §9's retire row: allowed only when the task isn't posted or in
     /// flight (pending/ready/orphaned), or is escalated. Moves the branch to
     /// `refs/retired/<slug>` and ends the subagent session.
     fn try_retire(&mut self, slug: &str, tip: &str, candidate: &str, status: Option<Status>, report: &mut TickReport) -> Result<(), String> {
-        let allowed = matches!(status, Some(Status::Pending | Status::Ready | Status::Orphaned | Status::Escalated));
+        // A spike the operator gives up on may also be retired once its
+        // finish is validated (spec §14); an ordinary tested task may not.
+        let tested_spike = status == Some(Status::Tested) && records::is_spike_at(&self.hub, tip, slug);
+        let allowed = tested_spike || matches!(status, Some(Status::Pending | Status::Ready | Status::Orphaned | Status::Escalated));
         if !allowed {
             let msg = format!(
                 "retire: task/{slug} is {} — retire is only allowed while pending/ready/orphaned (not posted or in flight) or escalated",
@@ -1013,6 +1235,9 @@ impl<S: Sessions> Player<S> {
             if retired.iter().any(|r| r == dep) {
                 return Err(format!("plan: task/{slug} depends on retired task {dep:?}"));
             }
+            if records::is_explored(&self.hub, dep) || self.task_config_at(&accepted, dep).is_some_and(|c| c.kind == TaskKind::Spike) {
+                return Err(format!("plan: task/{slug} depends on spike {dep:?}: nothing may depend on a spike"));
+            }
             let exists = self.hub.ref_exists(&format!("refs/heads/task/{dep}")) || accepted.contains_key(dep);
             if !exists {
                 return Err(format!("plan: task/{slug} depends on unknown task {dep:?}"));
@@ -1077,15 +1302,31 @@ impl<S: Sessions> Player<S> {
     }
 
     fn try_launch(&mut self, slug: &str, tip: &str, report: &mut TickReport) -> Result<(), String> {
-        let result = self.runner.run_task_check(tip, slug).map_err(|e| format!("launch: task/{slug}: {e}"))?;
-        if result.pass {
-            report.errors.push(format!("launch: task/{slug}: the task check now passes at the tip — not launching a subagent for work that's already done"));
-            return Ok(());
+        let is_spike = records::is_spike_at(&self.hub, tip, slug);
+        if is_spike {
+            // A spike has no task check; what must still hold at launch is
+            // the director's baseline claims on the current code.
+            let round = records::spike_round(&self.hub, tip, slug);
+            let baseline = spike::read_baseline(&self.hub, tip, slug, round).map_err(|e| format!("launch: task/{slug}: {e}"))?;
+            let failures = spike::failing_at(&self.runner, tip, &baseline, "on the current code");
+            if !failures.is_empty() {
+                report.errors.push(format!("launch: task/{slug}: the director's baseline claims no longer pass at the tip — not launching\n{}", failures.join("\n")));
+                return Ok(());
+            }
+        } else {
+            let result = self.runner.run_task_check(tip, slug).map_err(|e| format!("launch: task/{slug}: {e}"))?;
+            if result.pass {
+                report.errors.push(format!("launch: task/{slug}: the task check now passes at the tip — not launching a subagent for work that's already done"));
+                return Ok(());
+            }
         }
 
         // Pins are taken before anything else can fail, so a launch that
         // goes wrong from here on is never silently retried next tick.
         records::set_pins(&self.hub, slug, tip)?;
+        if is_spike {
+            records::set_base(&self.hub, slug, tip)?;
+        }
 
         let clone_dir = paths::subagent_clone(&self.director, slug);
         if clone_dir.exists() {
@@ -1219,7 +1460,13 @@ impl<S: Sessions> Player<S> {
         let prompt_body = self.hub.show_file(tip, &format!("tasks/{slug}/prompt.md")).ok_or_else(|| format!("tasks/{slug}/prompt.md missing at {tip}"))?;
         let pinned = records::pinned_files(&self.hub, slug).unwrap_or_default();
         let pinned_paths: Vec<&str> = pinned.keys().map(|s| s.as_str()).collect();
-        let content = format!("{}\n\n---\n\n{prompt_body}", launch_preamble(slug, &self.project, &pinned_paths));
+        let content = if records::is_spike_at(&self.hub, tip, slug) {
+            let round = records::spike_round(&self.hub, tip, slug);
+            let question = self.hub.show_file(tip, &spike::question_path(slug, round)).unwrap_or_default();
+            format!("{}\n\n---\n\n{prompt_body}\n\n{}", spike::spike_preamble(slug, &self.project, &pinned_paths), spike::question_block(round, &question))
+        } else {
+            format!("{}\n\n---\n\n{prompt_body}", launch_preamble(slug, &self.project, &pinned_paths))
+        };
         std::fs::write(prompt_file, content).map_err(|e| format!("{}: {e}", prompt_file.display()))
     }
 
@@ -1353,6 +1600,10 @@ impl<S: Sessions> Player<S> {
             return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
         }
 
+        if records::is_spike_at(&self.hub, hub_tip, slug) {
+            return self.finish_spike(slug, hub_tip, candidate, report);
+        }
+
         let suite = self.runner.run_suite(candidate);
         if !suite.pass {
             let msg = format!("suite: task/{slug}: {}", suite.summary());
@@ -1469,10 +1720,18 @@ fn save_player_state(home: &Home, last: &BTreeMap<String, (Status, bool)>) -> Re
 /// caused them (e.g. `in_revision` is the director's own send-back).
 fn status_event(task: &state::TaskState) -> Option<(EventKind, String)> {
     match task.status {
+        Status::Tested if task.spike.is_some() => {
+            Some((EventKind::Tested, "spike finish validated — claims passed; review the findings with the operator, then send back a new question or conclude".to_string()))
+        }
         Status::Tested => Some((EventKind::Tested, "finish accepted — tests passed, awaiting director review".to_string())),
         Status::Escalated => Some((EventKind::Escalated, task.escalation.clone().unwrap_or_default())),
+        Status::Ready if task.spike.is_some() => Some((EventKind::Ready, format!("spike task/{} is planned: post its question when the operator agrees", task.slug))),
         Status::Ready => Some((EventKind::Ready, format!("task/{}'s dependencies are all accepted and merged in", task.slug))),
         Status::Accepted => Some((EventKind::Accepted, format!("task/{} accepted and merged into main", task.slug))),
+        Status::Explored => {
+            let answer = task.spike.as_ref().and_then(|sp| sp.answer.as_deref()).unwrap_or("?");
+            Some((EventKind::Explored, format!("spike {} concluded: {answer}", task.slug)))
+        }
         Status::Retired => Some((EventKind::Retired, first_line(task.post_mortem.as_deref().unwrap_or("")))),
         Status::Pending | Status::Orphaned | Status::Posted | Status::InProgress | Status::InRevision => None,
     }

@@ -4,13 +4,16 @@
 // commit so rendering and repeated finish-claims never re-run tests for a
 // commit already seen.
 
-use crate::config::{self, Check};
+use crate::config::{self, Check, Claim};
 use crate::git::Git;
 use crate::paths::Home;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::Command;
+use std::io::Read;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Notes ref holding the check-result cache (spec §9, plan's "Check cache").
 const NOTES_REF: &str = "refs/notes/dashboard";
@@ -30,6 +33,11 @@ pub struct CheckResult {
     pub exits: Vec<i32>,
     pub pass: bool,
     pub output_tail: Option<String>,
+    /// The JSON object after a final `METRICS ` stdout line of the last run,
+    /// if the command printed one (spike claims report measurements this
+    /// way; see spec §14). Absent from older cached notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<serde_json::Value>,
 }
 
 impl CheckResult {
@@ -197,11 +205,21 @@ impl Runner {
     /// Runs `check` at `commit`, using the notes cache first. Returns
     /// without preparing the worktree at all on a cache hit.
     pub fn run_check(&self, commit: &str, check: &Check) -> CheckResult {
+        self.run_check_timed(commit, check, None)
+    }
+
+    /// Runs a spike claim at `commit` (cached like any check, under the
+    /// claim's prefixed name), killing any run that exceeds its timeout.
+    pub fn run_claim(&self, commit: &str, claim: &Claim) -> CheckResult {
+        self.run_check_timed(commit, &claim.as_check(), Some(Duration::from_secs(claim.timeout_secs())))
+    }
+
+    fn run_check_timed(&self, commit: &str, check: &Check, timeout: Option<Duration>) -> CheckResult {
         if let Some(cached) = self.read_note(commit).checks.get(&check.name).filter(|r| r.reusable_for(check)).cloned() {
             return cached;
         }
 
-        let result = self.execute(commit, check);
+        let result = self.execute(commit, check, timeout);
         // Only cache a result backed by at least one real run — a worktree
         // that couldn't even be prepared is an infra problem, not evidence,
         // and shouldn't be remembered as a verdict on `commit`.
@@ -213,7 +231,7 @@ impl Runner {
 
     /// Prepares the worktree and actually runs `check.cmd` up to `check.runs`
     /// times, stopping early once the verdict is decided.
-    fn execute(&self, commit: &str, check: &Check) -> CheckResult {
+    fn execute(&self, commit: &str, check: &Check, timeout: Option<Duration>) -> CheckResult {
         if let Err(e) = self.prepare(commit) {
             return CheckResult {
                 name: check.name.clone(),
@@ -223,26 +241,20 @@ impl Runner {
                 exits: Vec::new(),
                 pass: false,
                 output_tail: Some(format!("worktree setup failed: {e}")),
+                metrics: None,
             };
         }
 
         let mut exits = Vec::new();
         let mut passes: u32 = 0;
         let mut output_tail: Option<String> = None;
+        let mut metrics: Option<serde_json::Value> = None;
 
         for i in 0..check.runs {
             let remaining_after_this = check.runs - i - 1;
 
-            let (code, combined) = match Command::new("sh").arg("-c").arg(&check.cmd).current_dir(&self.work).output() {
-                Ok(out) => {
-                    let mut bytes = out.stdout;
-                    bytes.extend_from_slice(&out.stderr);
-                    // `ExitStatus::code()` is `None` when the process was
-                    // killed by a signal; record that case as -1.
-                    (out.status.code().unwrap_or(-1), bytes)
-                }
-                Err(e) => (-1, e.to_string().into_bytes()),
-            };
+            let (code, stdout, combined) = run_command(&check.cmd, &self.work, timeout);
+            metrics = parse_metrics(&stdout);
 
             exits.push(code);
             if code == 0 {
@@ -259,7 +271,7 @@ impl Runner {
         }
 
         let pass = passes >= check.min_pass;
-        CheckResult { name: check.name.clone(), cmd: check.cmd.clone(), runs: exits.len() as u32, min_pass: check.min_pass, exits, pass, output_tail }
+        CheckResult { name: check.name.clone(), cmd: check.cmd.clone(), runs: exits.len() as u32, min_pass: check.min_pass, exits, pass, output_tail, metrics }
     }
 
     /// Reads `tests.toml` at `commit` and runs every `[[check]]`. Missing or
@@ -295,6 +307,82 @@ impl Runner {
         let check = cfg.check.ok_or_else(|| format!("{path}: no [check] section"))?;
         Ok(self.run_check(commit, &check))
     }
+}
+
+/// Runs `sh -c <cmd>` in `cwd`, returning `(exit code, stdout, stdout +
+/// stderr)`. The exit code is -1 for a signal, a spawn failure, or a timeout.
+/// With a timeout the command runs in its own process group so the whole tree
+/// can be killed when the deadline passes.
+fn run_command(cmd: &str, cwd: &std::path::Path, timeout: Option<Duration>) -> (i32, Vec<u8>, Vec<u8>) {
+    let Some(timeout) = timeout else {
+        return match Command::new("sh").arg("-c").arg(cmd).current_dir(cwd).output() {
+            Ok(out) => {
+                let mut combined = out.stdout.clone();
+                combined.extend_from_slice(&out.stderr);
+                // `ExitStatus::code()` is `None` when the process was killed
+                // by a signal; record that case as -1.
+                (out.status.code().unwrap_or(-1), out.stdout, combined)
+            }
+            Err(e) => (-1, Vec::new(), e.to_string().into_bytes()),
+        };
+    };
+
+    let spawned = Command::new("sh").arg("-c").arg(cmd).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => return (-1, Vec::new(), e.to_string().into_bytes()),
+    };
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = out_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = err_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() >= deadline => {
+                timed_out = true;
+                // A negative pid addresses the whole process group.
+                let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).output();
+                let _ = child.kill();
+                break child.wait().ok();
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break None,
+        }
+    };
+
+    let stdout = out_reader.join().unwrap_or_default();
+    let mut combined = stdout.clone();
+    combined.extend_from_slice(&err_reader.join().unwrap_or_default());
+    if timed_out {
+        combined.extend_from_slice(format!("\n[killed: timed out after {}s]", timeout.as_secs()).as_bytes());
+        return (-1, stdout, combined);
+    }
+    (status.and_then(|s| s.code()).unwrap_or(-1), stdout, combined)
+}
+
+/// The JSON object on the last non-empty stdout line, if that line is
+/// `METRICS <json-object>`.
+fn parse_metrics(stdout: &[u8]) -> Option<serde_json::Value> {
+    let text = String::from_utf8_lossy(stdout);
+    let last = text.lines().rev().find(|l| !l.trim().is_empty())?;
+    let json = last.trim().strip_prefix("METRICS ")?;
+    serde_json::from_str::<serde_json::Value>(json).ok().filter(|v| v.is_object())
 }
 
 /// Last ~`OUTPUT_TAIL_MAX` bytes of `data`, lossily decoded as UTF-8.
@@ -344,7 +432,7 @@ mod tests {
     #[test]
     fn reusable_for_checks_name_cmd_and_threshold() {
         let check = Check { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2 };
-        let result = CheckResult { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2, exits: vec![0, 0, 0], pass: true, output_tail: None };
+        let result = CheckResult { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2, exits: vec![0, 0, 0], pass: true, output_tail: None, metrics: None };
         assert!(result.reusable_for(&check));
 
         let mut other_cmd = check.clone();
@@ -368,12 +456,34 @@ mod tests {
                 exits: vec![1],
                 pass: false,
                 output_tail: Some("boom".into()),
+                metrics: None,
             }],
             error: None,
         };
         let summary = suite.summary();
         assert!(summary.contains("suite failed: unit (0/1 runs passed)"), "unexpected summary: {summary}");
         assert!(summary.contains("boom"), "unexpected summary: {summary}");
+    }
+
+    #[test]
+    fn parse_metrics_reads_a_final_metrics_line() {
+        let out = b"warming up\nMETRICS {\"throughput\": 2.1}\n\n";
+        assert_eq!(parse_metrics(out), Some(serde_json::json!({"throughput": 2.1})));
+        assert_eq!(parse_metrics(b"METRICS {\"a\": 1}\nthen more output\n"), None, "must be the last line");
+        assert_eq!(parse_metrics(b"METRICS [1, 2]\n"), None, "must be an object");
+        assert_eq!(parse_metrics(b"METRICS nope\n"), None);
+        assert_eq!(parse_metrics(b""), None);
+    }
+
+    #[test]
+    fn run_command_kills_a_run_past_its_timeout() {
+        let dir = std::env::temp_dir();
+        let (code, _, combined) = run_command("sleep 30", &dir, Some(Duration::from_secs(1)));
+        assert_eq!(code, -1);
+        assert!(String::from_utf8_lossy(&combined).contains("timed out after 1s"));
+        let (code, stdout, _) = run_command("echo hi", &dir, Some(Duration::from_secs(5)));
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hi");
     }
 
     #[test]
