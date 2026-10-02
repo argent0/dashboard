@@ -251,7 +251,20 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     }
     add_pinned_path(hub, &commit, &format!("tasks/{slug}/"), &mut map);
 
+    // A flaky-test-fix unpins exactly its `fix_paths` (plain files): the
+    // subagent replaces the flaky test there. Everything else stays pinned.
+    if let Some(cfg) = task_config_at(hub, &commit, slug).filter(|c| c.kind == TaskKind::FlakyTestFix) {
+        for p in &cfg.fix_paths {
+            map.remove(p);
+        }
+    }
+
     Some(map)
+}
+
+/// `tasks/<slug>/task.toml` at `commit`, if it exists and parses.
+pub fn task_config_at(hub: &Git, commit: &str, slug: &str) -> Option<config::TaskConfig> {
+    hub.show_file(commit, &format!("tasks/{slug}/task.toml")).and_then(|text| config::task_config_from_str(&text).ok())
 }
 
 /// Whether `tasks/<slug>/task.toml` at `commit` declares `kind = "spike"`.

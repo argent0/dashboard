@@ -500,3 +500,31 @@ spike or enforcing `derived_from`; operator authorization the player can check;
 verifying quotes in the findings; size caps and time budgets; running a spike
 beside a normal task.
 
+## 15. Flaky-test fixes
+
+A task of `kind = "flaky-test-fix"` replaces a flaky test with a stable one,
+the one case with no honest failing check at post: the test is green most of
+the time, and the pinned tree stops the subagent editing it. Wrong or
+missing assertions are not this path; their fix is a new test in an ordinary
+task.
+
+`task.toml` adds `fix_paths` (plain files, no wildcards), `[[replace]]`
+(`old`, `new` test names) and `[[evidence]]` (a command run `runs` times on
+`main`, `min_pass <= passes <= max_pass < runs`). `[check]` is required and
+proves the replacement stable. `tests.toml` needs `list_cmd`, printing one
+test per line.
+
+- *Pins*: only `fix_paths` are unpinned; `tasks/<slug>/` stays pinned.
+- *Post*: the §6.3 rules, except the `[check]` must not be in `tests.toml`
+  (a stress check would slow every later suite). The evidence must reproduce
+  the flake, else the post is an `evidence` rejection.
+- *No repro*: `evidence` has a strike limit of 1. The player retires the task
+  itself (§9 allows no other retirer): it moves the branch to
+  `refs/retired/<slug>` under a marker commit whose body is `evidence did not
+  reproduce (k/N)`. Results are cached by commit, so a retry is a new slug
+  with a larger `runs`. The evidence is re-run at launch.
+- *Finish*: the suite passes, the `[check]` passes on the branch, no test
+  from the pinned base other than an `old` one is missing from the `list_cmd`
+  inventory, and every `new` exists. Any miss is a `suite` strike.
+- *Not enforced*: weakened assertions or a helper that neuters other tests;
+  the task agent's review reads the diff for that.

@@ -19,6 +19,7 @@
 use crate::checks;
 use crate::config::{self, RoadmapConfig, Reason, TaskConfig, TaskKind};
 use crate::events::{self, EventKind};
+use crate::flaky;
 use crate::git::Git;
 use crate::paths::{self, Home};
 use crate::records::{self, Actor, RejectionRecord, Transition};
@@ -766,10 +767,19 @@ impl<S: Sessions> Player<S> {
     // ---- post (spec §9, §6.3) ----
 
     fn try_post(&mut self, slug: &str, tip: &str, candidate: &str, status: Status, hub_state: &state::HubState, report: &mut TickReport) -> Result<(), String> {
+        // A flake that doesn't reproduce is `evidence`, not `post`: the
+        // director made no structural mistake (it has its own strike limit,
+        // 1 by default, and the player retires the task itself).
+        let mut reason = Reason::Post;
         let validated = if records::is_spike_at(&self.hub, candidate, slug) {
             self.validate_spike_post(slug, tip, candidate, status, hub_state)
         } else {
-            self.validate_post(slug, candidate, status, hub_state)
+            self.validate_post(slug, candidate, status, hub_state).and_then(|()| {
+                self.evidence_miss(slug, candidate).map_or(Ok(()), |miss| {
+                    reason = Reason::Evidence;
+                    Err(miss)
+                })
+            })
         };
         match validated {
             Ok(()) => {
@@ -782,8 +792,46 @@ impl<S: Sessions> Player<S> {
                 // scans every `Posted` task without pins yet, which this one
                 // now is.
             }
-            Err(msg) => self.reject(slug, candidate, Reason::Post, msg, report)?,
+            Err(msg) => {
+                self.reject(slug, candidate, reason, msg.clone(), report)?;
+                if reason == Reason::Evidence {
+                    let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+                    let strikes = hub_state.tasks.iter().find(|t| t.slug == slug).and_then(|t| t.strikes.get(&Reason::Evidence).copied()).unwrap_or(0);
+                    if strikes >= hub_state.roadmap.limits.strikes.limit(Reason::Evidence) {
+                        self.auto_retire(slug, tip, &msg, report)?;
+                    }
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// For a flaky-test-fix at `commit`: the text of the first `[[evidence]]`
+    /// that doesn't reproduce the flake there (run on `main`'s code plus the
+    /// task's own files, cached by commit). `None` for any other task or
+    /// when every evidence reproduces.
+    fn evidence_miss(&self, slug: &str, commit: &str) -> Option<String> {
+        let cfg = records::task_config_at(&self.hub, commit, slug).filter(|c| c.kind == TaskKind::FlakyTestFix)?;
+        cfg.evidence.iter().find_map(|e| flaky::miss(e, &self.runner.run_evidence(commit, e)))
+    }
+
+    /// The player's own retire, for a dead end that needs no director
+    /// judgement (a flake that doesn't reproduce): the branch moves to
+    /// `refs/retired/<slug>` under a player-made marker commit on top of
+    /// `tip` whose body is the post-mortem. There is no subagent work to
+    /// review, so no `retire:` commit is needed.
+    fn auto_retire(&mut self, slug: &str, tip: &str, post_mortem: &str, report: &mut TickReport) -> Result<(), String> {
+        let tree = self.hub.rev_parse(&format!("{tip}^{{tree}}")).ok_or_else(|| format!("no tree at {tip}"))?;
+        let subject = post_mortem.split(" (").next().unwrap_or(post_mortem);
+        let marker = self.hub.commit_tree(&tree, &[tip], &format!("retire: {subject}\n\n{post_mortem}")).map_err(|e| e.to_string())?;
+
+        self.hub.update_ref(&format!("refs/retired/{slug}"), &marker).map_err(|e| e.to_string())?;
+        self.hub.delete_ref_cas(&format!("refs/heads/task/{slug}"), tip).map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, &marker, Actor::Player, Transition::Retire, Some(slug))?;
+        report.imported.push((format!("refs/retired/{slug}"), marker, Transition::Retire));
+
+        self.sessions.kill(slug);
+        self.cleanup_subagent_clone(slug);
         Ok(())
     }
 
@@ -828,7 +876,16 @@ impl<S: Sessions> Player<S> {
         let tests_text = self.hub.show_file(candidate, "tests.toml").ok_or_else(|| format!("post: task/{slug}: tests.toml missing"))?;
         let tests_cfg = config::tests_config_from_str(&tests_text).map_err(|e| format!("post: task/{slug}: tests.toml: {e}"))?;
         let has_matching_entry = tests_cfg.check.iter().any(|c| c.name == check.name && c.cmd == check.cmd && c.runs == check.runs && c.min_pass == check.min_pass);
-        if !has_matching_entry {
+        if cfg.kind == TaskKind::FlakyTestFix {
+            // The stress check is a one-off proof for this task, an exception
+            // to spec §6.3: it must not slow every future suite.
+            if tests_cfg.check.iter().any(|c| c.name == check.name) {
+                return Err(format!("post: task/{slug}: a flaky-test-fix's check {:?} must not be added to tests.toml", check.name));
+            }
+            if tests_cfg.list_cmd.is_none() {
+                return Err(format!("post: task/{slug}: a flaky-test-fix needs `list_cmd` in tests.toml (the player compares test inventories with it)"));
+            }
+        } else if !has_matching_entry {
             return Err(format!("post: task/{slug}: tests.toml has no [[check]] entry matching the task check {:?} (same name, cmd, runs, min_pass)", check.name));
         }
 
@@ -1319,6 +1376,9 @@ Answer it in one new commit adding {} and {}.",
                 report.errors.push(format!("launch: task/{slug}: the task check now passes at the tip — not launching a subagent for work that's already done"));
                 return Ok(());
             }
+            if let Some(miss) = self.evidence_miss(slug, tip) {
+                return self.auto_retire(slug, tip, &miss, report);
+            }
         }
 
         // Pins are taken before anything else can fail, so a launch that
@@ -1465,7 +1525,11 @@ Answer it in one new commit adding {} and {}.",
             let question = self.hub.show_file(tip, &spike::question_path(slug, round)).unwrap_or_default();
             format!("{}\n\n---\n\n{prompt_body}\n\n{}", spike::spike_preamble(slug, &self.project, &pinned_paths), spike::question_block(round, &question))
         } else {
-            format!("{}\n\n---\n\n{prompt_body}", launch_preamble(slug, &self.project, &pinned_paths))
+            let mut preamble = launch_preamble(slug, &self.project, &pinned_paths);
+            if let Some(cfg) = records::task_config_at(&self.hub, tip, slug).filter(|c| c.kind == TaskKind::FlakyTestFix) {
+                preamble = format!("{preamble}\n\n{}", flaky::preamble(&cfg.fix_paths, &cfg.replace));
+            }
+            format!("{preamble}\n\n---\n\n{prompt_body}")
         };
         std::fs::write(prompt_file, content).map_err(|e| format!("{}: {e}", prompt_file.display()))
     }
@@ -1610,12 +1674,43 @@ Answer it in one new commit adding {} and {}.",
             return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
         }
 
+        if let Err(problem) = self.validate_flaky_finish(slug, hub_tip, candidate) {
+            let msg = format!("suite: task/{slug}: {problem}");
+            return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
+        }
+
         let hub_ref = format!("refs/heads/task/{slug}");
         self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
         records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Finish, Some(slug))?;
         report.imported.push((hub_ref, candidate.to_string(), Transition::Finish));
         self.sessions.send(slug, "finish accepted — tests passed, awaiting director review; don't commit further");
         Ok(())
+    }
+
+    /// A flaky-test-fix's finish, on top of the passing suite: the director's
+    /// task check passes (the player, not the subagent, decides the new test
+    /// is stable), no test but the replaced ones vanished since the pinned
+    /// base, and every replacement exists. Always `Ok` for other tasks.
+    fn validate_flaky_finish(&self, slug: &str, hub_tip: &str, candidate: &str) -> Result<(), String> {
+        let Some(cfg) = records::task_config_at(&self.hub, hub_tip, slug).filter(|c| c.kind == TaskKind::FlakyTestFix) else { return Ok(()) };
+
+        let check = self.runner.run_task_check(candidate, slug)?;
+        if !check.pass {
+            let passed = check.exits.iter().filter(|&&e| e == 0).count();
+            let tail = check.output_tail.as_deref().map(|t| format!("\n{t}")).unwrap_or_default();
+            return Err(format!("the stability check {:?} fails ({passed}/{} runs passed){tail}", check.name, check.runs));
+        }
+
+        let list_cmd = self.hub.show_file(candidate, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).and_then(|c| c.list_cmd).ok_or("tests.toml has no list_cmd")?;
+        let base = self.hub.rev_parse(&format!("refs/dashboard/pins/{slug}")).ok_or("no pins recorded")?;
+        let before = self.runner.run_list(&base, &list_cmd)?;
+        let after = self.runner.run_list(candidate, &list_cmd)?;
+        let problems = flaky::inventory_problems(&before, &after, &cfg.replace);
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems.join("\n"))
+        }
     }
 
     /// Shared by every subagent-side rejection: records it, then re-derives

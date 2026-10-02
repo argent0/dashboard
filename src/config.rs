@@ -53,11 +53,14 @@ pub struct StrikeLimits {
     pub accept: u32,
     pub retire: u32,
     pub claims: u32,
+    /// A `flaky-test-fix` post whose evidence doesn't reproduce the flake.
+    /// Defaults to 1: the player retires the task on the first miss.
+    pub evidence: u32,
 }
 
 impl Default for StrikeLimits {
     fn default() -> Self {
-        Self { history: 2, ownership: 2, pins: 2, suite: 2, plan: 2, post: 2, review: 2, accept: 2, retire: 2, claims: 2 }
+        Self { history: 2, ownership: 2, pins: 2, suite: 2, plan: 2, post: 2, review: 2, accept: 2, retire: 2, claims: 2, evidence: 1 }
     }
 }
 
@@ -74,6 +77,7 @@ impl StrikeLimits {
             Reason::Accept => self.accept,
             Reason::Retire => self.retire,
             Reason::Claims => self.claims,
+            Reason::Evidence => self.evidence,
         }
     }
 }
@@ -108,10 +112,13 @@ pub enum Reason {
     Retire,
     /// A spike's finish claim whose findings or claims don't validate (spec §14).
     Claims,
+    /// A `flaky-test-fix` post whose evidence shows no flake (not a
+    /// structural mistake by the director).
+    Evidence,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 10] = [
+    pub const ALL: [Reason; 11] = [
         Reason::History,
         Reason::Ownership,
         Reason::Pins,
@@ -122,6 +129,7 @@ impl Reason {
         Reason::Accept,
         Reason::Retire,
         Reason::Claims,
+        Reason::Evidence,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -136,6 +144,7 @@ impl Reason {
             Reason::Accept => "accept",
             Reason::Retire => "retire",
             Reason::Claims => "claims",
+            Reason::Evidence => "evidence",
         }
     }
 }
@@ -155,6 +164,7 @@ impl FromStr for Reason {
             "accept" => Ok(Reason::Accept),
             "retire" => Ok(Reason::Retire),
             "claims" => Ok(Reason::Claims),
+            "evidence" => Ok(Reason::Evidence),
             other => Err(format!("unknown rejection reason: {other:?}")),
         }
     }
@@ -206,6 +216,9 @@ impl Check {
 pub(crate) struct TestsConfig {
     pub(crate) check: Vec<Check>,
     pub(crate) test_paths: Vec<String>,
+    /// Prints the project's test inventory, one test per line (e.g. `cargo
+    /// test -- --list`). Only a `flaky-test-fix` task needs it.
+    pub(crate) list_cmd: Option<String>,
 }
 
 impl TestsConfig {
@@ -230,6 +243,54 @@ pub enum TaskKind {
     #[default]
     Task,
     Spike,
+    /// Replaces a flaky test with a stable one: `fix_paths` are unpinned for
+    /// this task, and the director's `evidence` proves the flake on `main`.
+    #[serde(rename = "flaky-test-fix")]
+    FlakyTestFix,
+}
+
+/// One `[[replace]]` of a flaky-test-fix: the flaky test and its replacement.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Replace {
+    pub old: String,
+    pub new: String,
+}
+
+/// One `[[evidence]]` of a flaky-test-fix: the command is run `runs` times
+/// on `main`, and between `min_pass` and `max_pass` of them must pass —
+/// it works sometimes and fails sometimes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Evidence {
+    pub name: String,
+    pub cmd: String,
+    #[serde(default = "default_runs")]
+    pub runs: u32,
+    #[serde(default = "default_min_pass")]
+    pub min_pass: u32,
+    pub max_pass: u32,
+}
+
+impl Evidence {
+    /// The runner's view of this evidence. Prefixed so it can't share a
+    /// result-cache slot with a suite check of the same name.
+    pub fn as_check(&self) -> Check {
+        Check { name: format!("evidence:{}", self.name), cmd: self.cmd.clone(), runs: self.runs, min_pass: self.min_pass }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        self.as_check().validate().map_err(|e| e.replacen("check", "evidence", 1))?;
+        if self.max_pass < self.min_pass || self.max_pass >= self.runs {
+            return Err(format!(
+                "evidence {:?}: max_pass must be between min_pass ({}) and runs - 1 ({}), got {}: a flake fails sometimes",
+                self.name,
+                self.min_pass,
+                self.runs.saturating_sub(1),
+                self.max_pass
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -241,12 +302,52 @@ pub struct TaskConfig {
     pub milestone: bool,
     pub depends_on: Vec<String>,
     pub check: Option<Check>,
+    /// flaky-test-fix only: the files unpinned for this task.
+    pub fix_paths: Vec<String>,
+    /// flaky-test-fix only.
+    pub replace: Vec<Replace>,
+    /// flaky-test-fix only.
+    pub evidence: Vec<Evidence>,
 }
 
 impl TaskConfig {
     pub(crate) fn validate(&self) -> Result<(), String> {
         if let Some(c) = &self.check {
             c.validate()?;
+        }
+        for e in &self.evidence {
+            e.validate()?;
+        }
+        if self.kind != TaskKind::FlakyTestFix {
+            if !self.fix_paths.is_empty() || !self.replace.is_empty() || !self.evidence.is_empty() {
+                return Err("fix_paths, [[replace]] and [[evidence]] are only for kind = \"flaky-test-fix\"".to_string());
+            }
+        } else {
+            if self.check.is_none() {
+                return Err("a flaky-test-fix needs a [check] proving the replacement is stable".to_string());
+            }
+            if self.replace.is_empty() {
+                return Err("a flaky-test-fix needs at least one [[replace]]".to_string());
+            }
+            for r in &self.replace {
+                if r.old.trim().is_empty() || r.new.trim().is_empty() || r.old == r.new {
+                    return Err(format!("replace {:?} -> {:?}: old and new must be different, non-empty test names", r.old, r.new));
+                }
+            }
+            if self.evidence.is_empty() {
+                return Err("a flaky-test-fix needs at least one [[evidence]] showing the flake on main".to_string());
+            }
+            if self.fix_paths.is_empty() {
+                return Err("a flaky-test-fix needs fix_paths: the files the subagent may change".to_string());
+            }
+            for p in &self.fix_paths {
+                if p.trim().is_empty() || p.contains(['*', '?', '[']) || p.ends_with('/') {
+                    return Err(format!("fix_paths entry {p:?} must be a plain file path, never a directory or a wildcard"));
+                }
+                if p == "tests.toml" || p.starts_with("tasks/") {
+                    return Err(format!("fix_paths entry {p:?} may not be tests.toml or under tasks/"));
+                }
+            }
         }
         if self.kind == TaskKind::Spike {
             if self.check.is_some() {
@@ -628,6 +729,60 @@ mod tests {
         assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\n").is_ok());
         assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nkind = \"spike\"\n").is_err());
         assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nsupports = \"yes\"\n").is_err());
+    }
+
+    #[test]
+    fn evidence_strike_limit_defaults_to_one() {
+        assert_eq!(StrikeLimits::default().limit(Reason::Evidence), 1);
+        let cfg = roadmap_config_from_str("[limits.strikes]\nevidence = 3\n").unwrap();
+        assert_eq!(cfg.limits.strikes.limit(Reason::Evidence), 3);
+    }
+
+    const FLAKY: &str = r#"
+        kind = "flaky-test-fix"
+        title = "t"
+        fix_paths = ["tests/a.rs", "tests/common/stub.rs"]
+
+        [[replace]]
+        old = "a"
+        new = "a_stable"
+
+        [[evidence]]
+        name = "flaky"
+        cmd = "stress a"
+        runs = 100
+        min_pass = 1
+        max_pass = 99
+
+        [check]
+        name = "stable"
+        cmd = "stress a_stable"
+        runs = 100
+        min_pass = 100
+    "#;
+
+    #[test]
+    fn flaky_test_fix_config_parses() {
+        let cfg = task_config_from_str(FLAKY).unwrap();
+        assert_eq!(cfg.kind, TaskKind::FlakyTestFix);
+        assert_eq!(cfg.fix_paths.len(), 2);
+        assert_eq!(cfg.replace[0].new, "a_stable");
+        assert_eq!(cfg.evidence[0].max_pass, 99);
+        assert_eq!(cfg.evidence[0].as_check().name, "evidence:flaky");
+    }
+
+    #[test]
+    fn flaky_test_fix_config_is_validated() {
+        let bad = |from: &str, to: &str| assert!(task_config_from_str(&FLAKY.replace(from, to)).is_err(), "{from} -> {to}");
+        bad("max_pass = 99", "max_pass = 100"); // never fails: not a flake
+        bad("min_pass = 1\n        max_pass", "min_pass = 5\n        max_pass = 4\n        #"); // empty window
+        bad("fix_paths = [\"tests/a.rs\", \"tests/common/stub.rs\"]", "fix_paths = [\"tests/\"]");
+        bad("fix_paths = [\"tests/a.rs\", \"tests/common/stub.rs\"]", "fix_paths = [\"tests/*.rs\"]");
+        bad("fix_paths = [\"tests/a.rs\", \"tests/common/stub.rs\"]", "fix_paths = []");
+        bad("new = \"a_stable\"", "new = \"a\"");
+        bad("[[evidence]]", "[[unused]]");
+        // The new fields are rejected on any other kind.
+        assert!(task_config_from_str(&FLAKY.replace("kind = \"flaky-test-fix\"", "kind = \"task\"")).is_err());
     }
 
     #[test]

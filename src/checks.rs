@@ -4,7 +4,7 @@
 // commit so rendering and repeated finish-claims never re-run tests for a
 // commit already seen.
 
-use crate::config::{self, Check, Claim};
+use crate::config::{self, Check, Claim, Evidence};
 use crate::git::Git;
 use crate::paths::Home;
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,10 @@ pub struct CheckResult {
     pub cmd: String,
     pub runs: u32,
     pub min_pass: u32,
+    /// Upper bound on passing runs, set only for flaky-test-fix evidence
+    /// (the check *must* fail sometimes). Absent from older cached notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pass: Option<u32>,
     pub exits: Vec<i32>,
     pub pass: bool,
     pub output_tail: Option<String>,
@@ -44,8 +48,8 @@ impl CheckResult {
     /// A cached result is reusable for `check` only if the name, cmd and
     /// threshold all still match — otherwise it's evidence for a different
     /// check that happens to share a name.
-    fn reusable_for(&self, check: &Check) -> bool {
-        self.name == check.name && self.cmd == check.cmd && self.runs == check.runs && self.min_pass == check.min_pass
+    fn reusable_for(&self, check: &Check, max_pass: Option<u32>) -> bool {
+        self.name == check.name && self.cmd == check.cmd && self.runs == check.runs && self.min_pass == check.min_pass && self.max_pass == max_pass
     }
 }
 
@@ -205,21 +209,40 @@ impl Runner {
     /// Runs `check` at `commit`, using the notes cache first. Returns
     /// without preparing the worktree at all on a cache hit.
     pub fn run_check(&self, commit: &str, check: &Check) -> CheckResult {
-        self.run_check_timed(commit, check, None)
+        self.run_check_timed(commit, check, None, None)
+    }
+
+    /// Runs a flaky-test-fix's evidence at `commit`: every run executes (no
+    /// early stop, so the cached result and its k/N are exact), and the
+    /// verdict is `pass` when between `min_pass` and `max_pass` runs passed,
+    /// i.e. the flake reproduced.
+    pub fn run_evidence(&self, commit: &str, evidence: &Evidence) -> CheckResult {
+        self.run_check_timed(commit, &evidence.as_check(), None, Some(evidence.max_pass))
+    }
+
+    /// Runs `cmd` at `commit` and returns its stdout as trimmed, non-empty
+    /// lines: the project's test inventory (`tests.toml`'s `list_cmd`).
+    pub fn run_list(&self, commit: &str, cmd: &str) -> Result<Vec<String>, String> {
+        self.prepare(commit)?;
+        let (code, stdout, combined) = run_command(cmd, &self.work, None);
+        if code != 0 {
+            return Err(format!("list_cmd exited {code}: {}", tail_str(&combined)));
+        }
+        Ok(String::from_utf8_lossy(&stdout).lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
     }
 
     /// Runs a spike claim at `commit` (cached like any check, under the
     /// claim's prefixed name), killing any run that exceeds its timeout.
     pub fn run_claim(&self, commit: &str, claim: &Claim) -> CheckResult {
-        self.run_check_timed(commit, &claim.as_check(), Some(Duration::from_secs(claim.timeout_secs())))
+        self.run_check_timed(commit, &claim.as_check(), Some(Duration::from_secs(claim.timeout_secs())), None)
     }
 
-    fn run_check_timed(&self, commit: &str, check: &Check, timeout: Option<Duration>) -> CheckResult {
-        if let Some(cached) = self.read_note(commit).checks.get(&check.name).filter(|r| r.reusable_for(check)).cloned() {
+    fn run_check_timed(&self, commit: &str, check: &Check, timeout: Option<Duration>, max_pass: Option<u32>) -> CheckResult {
+        if let Some(cached) = self.read_note(commit).checks.get(&check.name).filter(|r| r.reusable_for(check, max_pass)).cloned() {
             return cached;
         }
 
-        let result = self.execute(commit, check, timeout);
+        let result = self.execute(commit, check, timeout, max_pass);
         // Only cache a result backed by at least one real run — a worktree
         // that couldn't even be prepared is an infra problem, not evidence,
         // and shouldn't be remembered as a verdict on `commit`.
@@ -231,13 +254,14 @@ impl Runner {
 
     /// Prepares the worktree and actually runs `check.cmd` up to `check.runs`
     /// times, stopping early once the verdict is decided.
-    fn execute(&self, commit: &str, check: &Check, timeout: Option<Duration>) -> CheckResult {
+    fn execute(&self, commit: &str, check: &Check, timeout: Option<Duration>, max_pass: Option<u32>) -> CheckResult {
         if let Err(e) = self.prepare(commit) {
             return CheckResult {
                 name: check.name.clone(),
                 cmd: check.cmd.clone(),
                 runs: check.runs,
                 min_pass: check.min_pass,
+                max_pass,
                 exits: Vec::new(),
                 pass: false,
                 output_tail: Some(format!("worktree setup failed: {e}")),
@@ -265,13 +289,14 @@ impl Runner {
 
             // Stop early once the verdict can't change: enough passes
             // already, or not enough runs left to ever reach min_pass.
-            if passes >= check.min_pass || passes + remaining_after_this < check.min_pass {
+            // Bounded (evidence) checks always run in full.
+            if max_pass.is_none() && (passes >= check.min_pass || passes + remaining_after_this < check.min_pass) {
                 break;
             }
         }
 
-        let pass = passes >= check.min_pass;
-        CheckResult { name: check.name.clone(), cmd: check.cmd.clone(), runs: exits.len() as u32, min_pass: check.min_pass, exits, pass, output_tail, metrics }
+        let pass = passes >= check.min_pass && max_pass.is_none_or(|m| passes <= m);
+        CheckResult { name: check.name.clone(), cmd: check.cmd.clone(), runs: exits.len() as u32, min_pass: check.min_pass, max_pass, exits, pass, output_tail, metrics }
     }
 
     /// Reads `tests.toml` at `commit` and runs every `[[check]]`. Missing or
@@ -432,16 +457,17 @@ mod tests {
     #[test]
     fn reusable_for_checks_name_cmd_and_threshold() {
         let check = Check { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2 };
-        let result = CheckResult { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2, exits: vec![0, 0, 0], pass: true, output_tail: None, metrics: None };
-        assert!(result.reusable_for(&check));
+        let result = CheckResult { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2, max_pass: None, exits: vec![0, 0, 0], pass: true, output_tail: None, metrics: None };
+        assert!(result.reusable_for(&check, None));
+        assert!(!result.reusable_for(&check, Some(2)));
 
         let mut other_cmd = check.clone();
         other_cmd.cmd = "false".into();
-        assert!(!result.reusable_for(&other_cmd));
+        assert!(!result.reusable_for(&other_cmd, None));
 
         let mut other_threshold = check.clone();
         other_threshold.min_pass = 3;
-        assert!(!result.reusable_for(&other_threshold));
+        assert!(!result.reusable_for(&other_threshold, None));
     }
 
     #[test]
@@ -453,6 +479,7 @@ mod tests {
                 cmd: "false".into(),
                 runs: 1,
                 min_pass: 1,
+                max_pass: None,
                 exits: vec![1],
                 pass: false,
                 output_tail: Some("boom".into()),

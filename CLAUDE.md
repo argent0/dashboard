@@ -27,6 +27,7 @@ src/init.rs     `dashboard init`: creates the hub and wires up the director <-> 
 src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based result cache
 src/records.rs  provenance/enforcement records: import notes, rejections, pins, retirements, accepted-merge lookup,
                 spike base commits and exploration notes
+src/flaky.rs    flaky-test-fix (spec §15): inventory comparison, evidence verdict text, subagent prompt
 src/spike.rs    spikes (spec §14): reading a round, running claims against the base-with-overlay, evaluating a finish
 src/state.rs    derives every task's status (spec §12) purely from the hub + session liveness
 src/player.rs   the player: fetch, validate, import, launch/relay, merge — spec §5/§7/§9/§11
@@ -137,6 +138,7 @@ review = 2
 accept = 2
 retire = 2
 claims = 2                       # a spike's finish whose claims/findings don't validate
+evidence = 1                     # a flaky-test-fix post whose flake doesn't reproduce
 
 [player]
 agent_cmd = "claude --dangerously-skip-permissions"   # default
@@ -145,6 +147,7 @@ agent_cmd = "claude --dangerously-skip-permissions"   # default
 `tests.toml` (project suite, on `main` and every task branch):
 ```toml
 test_paths = ["tests/"]          # the pinned test tree (spec §6.2, §8.3)
+list_cmd = "cargo test -- --list" # test inventory, one per line; flaky-test-fix only
 
 [[check]]
 name = "unit"
@@ -156,7 +159,8 @@ min_pass = 1                     # default; must be 1..=runs
 `tasks/<slug>/task.toml`:
 ```toml
 title = "…"
-kind = "task"                    # or "spike" (spec §14): no depends_on/[check]/milestone
+kind = "task"                    # or "spike" (spec §14): no depends_on/[check]/milestone,
+                                 # or "flaky-test-fix" (spec §15): see below
 phase = "p1"
 milestone = false
 depends_on = ["other-slug"]
@@ -165,6 +169,24 @@ depends_on = ["other-slug"]
 name = "…"                       # to tests.toml in the same post commit
 cmd = "…"
 ```
+
+A flaky-test-fix's extra `task.toml` fields (spec §15; `[check]` is the
+stability proof and is *not* added to `tests.toml`, which needs `list_cmd`):
+```toml
+fix_paths = ["tests/a.rs"]       # plain files unpinned for this task
+[[replace]]
+old = "flaky"                    # test names (last `::` segment is enough)
+new = "flaky_stable"
+[[evidence]]                     # run on main at post and launch; must flake
+name = "…"
+cmd = "…"
+runs = 100
+min_pass = 1                     # 1 <= min_pass <= max_pass < runs
+max_pass = 99
+```
+A post whose evidence doesn't reproduce is an `evidence` rejection (limit 1),
+and the player retires the task itself: a marker commit with the post-mortem
+`evidence did not reproduce (k/N)` goes under `refs/retired/<slug>`.
 
 A spike's per-round files (spec §14), all under `tasks/<slug>/`:
 ```toml
@@ -260,6 +282,12 @@ back here):
   <prompt-file>)"'`; relays go through `tmux load-buffer`/`paste-buffer`/
   `send-keys` into that same session.
 
+- **flaky-test-fix** (spec §15): pins exclude `fix_paths`; at finish, on top
+  of the suite, the task check must pass and the `list_cmd` inventory at the
+  pins commit minus the `old` names must still be in the branch's, with every
+  `new` present (a `suite` strike otherwise). Evidence runs in full, never
+  early-stopping, so its cached result and k/N are exact. `retry_failed`
+  (feature request §1) is not implemented.
 - **Spikes** (spec §14): `kind = "spike"`, operator-initiated by process
   rule (the player doesn't check it), nothing may depend on one, never
   merges. The player runs the claims itself: baseline claims against the

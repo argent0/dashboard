@@ -384,7 +384,7 @@ mod tests {
     fn task(slug: &str, phase: &str, status: Status) -> TaskState {
         TaskState {
             slug: slug.to_string(),
-            config: TaskConfig { title: format!("Title for {slug}"), phase: phase.to_string(), milestone: false, depends_on: vec![], check: None, kind: TaskKind::Task },
+            config: TaskConfig { title: format!("Title for {slug}"), phase: phase.to_string(), milestone: false, depends_on: vec![], check: None, kind: TaskKind::Task, ..Default::default() },
             status,
             tip: "deadbeef".to_string(),
             strikes: BTreeMap::new(),
@@ -487,7 +487,7 @@ mod tests {
         t.strikes.insert(Reason::Pins, 0); // zero strikes never show
         t.suite = Some(SuiteResult {
             pass: true,
-            checks: vec![CheckResult { name: "unit".to_string(), cmd: "true".to_string(), runs: 1, min_pass: 1, exits: vec![0], pass: true, output_tail: None, metrics: None }],
+            checks: vec![CheckResult { name: "unit".to_string(), cmd: "true".to_string(), runs: 1, min_pass: 1, max_pass: None, exits: vec![0], pass: true, output_tail: None, metrics: None }],
             error: None,
         });
         t.alive = true;
