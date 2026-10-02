@@ -1671,6 +1671,14 @@ Answer it in one new commit adding {} and {}.",
             return self.finish_spike(slug, hub_tip, candidate, report);
         }
 
+        if let Some(stray) = self.flaky_scope_violations(slug, hub_tip, candidate) {
+            let msg = format!(
+                "pins: task/{slug} is a flaky-test-fix and may only change its fix_paths (or add new test files), not {}. If the flake is in the product code, make a `block:` commit instead: the director replans it as an ordinary task",
+                stray.join(", ")
+            );
+            return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
+        }
+
         let suite = self.runner.run_suite(candidate);
         self.note_flakes(slug, candidate, &suite);
         if !suite.pass {
@@ -1698,6 +1706,24 @@ Answer it in one new commit adding {} and {}.",
         for c in &suite.checks {
             let _ = records::record_flake(&self.hub, scope, commit, c);
         }
+    }
+
+    /// For a flaky-test-fix: the paths `candidate` changes outside the task's
+    /// `fix_paths`, other than brand-new files under `test_paths`. A flake
+    /// whose cause is in the product code isn't this kind of task (it takes
+    /// the regular path), so touching anything else is refused. `None` for
+    /// any other task, or when nothing strays.
+    fn flaky_scope_violations(&self, slug: &str, hub_tip: &str, candidate: &str) -> Option<Vec<String>> {
+        let cfg = records::task_config_at(&self.hub, hub_tip, slug).filter(|c| c.kind == TaskKind::FlakyTestFix)?;
+        let test_paths = self.hub.show_file(hub_tip, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).map(|c| c.test_paths).unwrap_or_default();
+        let stray: Vec<String> = self
+            .hub
+            .diff_names(hub_tip, candidate)
+            .into_iter()
+            .filter(|(status, path)| !cfg.fix_paths.contains(path) && !(*status == 'A' && path_under_test_paths(path, &test_paths)))
+            .map(|(_, path)| path)
+            .collect();
+        (!stray.is_empty()).then_some(stray)
     }
 
     /// A flaky-test-fix's finish, on top of the passing suite: the director's

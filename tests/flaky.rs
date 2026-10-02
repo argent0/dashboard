@@ -224,3 +224,35 @@ fn a_finish_that_needed_a_retry_is_in_the_ledger_and_the_status() {
     assert!(out.contains("Flaky checks (1)"), "{out}");
     assert!(out.contains("passed on retry 1/1"), "{out}");
 }
+
+#[test]
+fn finish_touching_anything_but_fix_paths_is_a_pins_strike() {
+    let repo = director_repo();
+    let (home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let (mut player, _) = plan_and_post(&repo, &home, &alternating(home_dir.path()), TESTS_TOML);
+    let clone = paths::subagent_clone(&repo.director_path(), "fix");
+    let git = Git::new(&clone);
+    git.run(&["config", "user.name", "Test Subagent"]).unwrap();
+    git.run(&["config", "user.email", "subagent@example.com"]).unwrap();
+    git.run(&["config", "commit.gpgsign", "false"]).unwrap();
+
+    // A production change alongside the replacement: not a test flake.
+    write_file(&clone, "tests/inventory.txt", "keep\nflaky_stable\n");
+    write_file(&clone, "src/lib.txt", "retry the spawn\n");
+    commit(&clone, "finish: also patched the product");
+    let report = player.tick().unwrap();
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Pins);
+    assert!(report.rejected[0].message.contains("src/lib.txt") && report.rejected[0].message.contains("block:"), "{report}");
+    assert_eq!(status_of(&hub, "fix"), Status::Posted);
+
+    // Without it, and with a brand-new test file, the finish is fine.
+    git.run(&["rm", "-q", "--cached", "src/lib.txt"]).unwrap();
+    std::fs::remove_file(clone.join("src/lib.txt")).unwrap();
+    write_file(&clone, "tests/extra.txt", "a new test file\n");
+    commit(&clone, "finish: test only");
+    let report = player.tick().unwrap();
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(status_of(&hub, "fix"), Status::Tested);
+}

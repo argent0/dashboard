@@ -523,6 +523,11 @@ test per line.
   `refs/retired/<slug>` under a marker commit whose body is `evidence did not
   reproduce (k/N)`. Results are cached by commit, so a retry is a new slug
   with a larger `runs`. The evidence is re-run at launch.
+- *Scope*: a finish may change only `fix_paths` (and add new test files).
+  A flake whose cause is in the product code isn't this kind of task: it
+  takes the regular path (an ordinary task with a deterministic failing
+  test, or a spike first). Touching anything else is a `pins` strike, and
+  the subagent is told to `block:` instead so the director replans it.
 - *Finish*: the suite passes, the `[check]` passes on the branch, no test
   from the pinned base other than an `old` one is missing from the `list_cmd`
   inventory, and every `new` exists. Any miss is a `suite` strike.

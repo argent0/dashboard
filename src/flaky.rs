@@ -63,7 +63,10 @@ pub fn preamble(fix_paths: &[String], replace: &[Replace]) -> String {
         "This is a flaky-test-fix task. The test is flaky, not wrong: replace it with a stable one that \
 checks the same thing, without weakening its assertions. These files, and only these, are yours to \
 edit (the rest of the test tree is pinned):\n{files}\n\nThe tests:\n{tests}\n\n\
-Don't remove or rename any other test. You may delete the old test or leave it."
+Don't remove or rename any other test. You may delete the old test or leave it.\n\n\
+Change nothing else: not production code, and no other test file (new test files are fine). \
+If the flake turns out to be in the product code, the test isn't what's wrong: don't work \
+around it, make a `block:` commit saying so, and the director will replan it as an ordinary task."
     )
 }
 

@@ -285,7 +285,9 @@ back here):
   <prompt-file>)"'`; relays go through `tmux load-buffer`/`paste-buffer`/
   `send-keys` into that same session.
 
-- **flaky-test-fix** (spec §15): pins exclude `fix_paths`; at finish, on top
+- **flaky-test-fix** (spec §15): pins exclude `fix_paths`, and a finish
+  changing any other path (new files under `test_paths` aside) is a `pins`
+  strike: a product-code flake takes the regular path; at finish, on top
   of the suite, the task check must pass and the `list_cmd` inventory at the
   pins commit minus the `old` names must still be in the branch's, with every
   `new` present (a `suite` strike otherwise). Evidence runs in full, never
