@@ -6,8 +6,9 @@
 #
 #   plan alpha -> post alpha -> tmux launch -> tested -> send-back -> tested
 #   -> accept -> plan+post beta (depends on alpha) -> block -> escalated
-#   -> retire -> a spike (answer, send back, conclude) -> a director
-#   rejection on main
+#   -> retire -> a spike (answer, send back, conclude) -> two tasks in
+#   parallel, a conflicting accept, its resolution -> a director rejection
+#   on main
 #
 # asserting each transition via `dashboard status --no-color` and raw git
 # ref checks against the hub. See spec.md for the model and CLAUDE.md for
@@ -536,6 +537,72 @@ hub_ref_exists refs/explored/probe || { echo "e2e: refs/explored/probe missing" 
 if hub_ref_exists refs/heads/task/probe; then echo "e2e: refs/heads/task/probe should have moved to refs/explored/probe" >&2; exit 1; fi
 [ "$(git --git-dir "$HOME_DIR/hub.git" rev-parse refs/heads/main)" = "$main_before" ] || { echo "e2e: a spike must never move main" >&2; exit 1; }
 wait_until "probe's tmux session is gone" session_gone probe
+
+# --------------------------------------------------------------------------
+# 7c. Parallel tasks (spec §4): gamma and delta posted side by side, both
+#     subagents live at once. Both posts append to tests.toml, so once gamma
+#     is accepted, the player can't merge main into delta to land its accept:
+#     delta goes `conflicted`, and the director resolves exactly that
+#     conflict (merging the recorded main commit), which lands the accept.
+# --------------------------------------------------------------------------
+
+log "step 7c: two tasks in parallel, a conflict, a targeted resolution"
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" checkout -q main
+git -C "$DIR_REPO" merge -q --ff-only hub/main
+tests_before=$(cat "$DIR_REPO/tests.toml")
+for t in gamma delta; do
+  git -C "$DIR_REPO" checkout -q -b "task/$t" main
+  mkdir -p "$DIR_REPO/tasks/$t"
+  printf 'title = "%s"\nphase = "p1"\n' "$t" >"$DIR_REPO/tasks/$t/task.toml"
+  git -C "$DIR_REPO" add -A
+  git -C "$DIR_REPO" commit -q -m "plan: $t"
+done
+both_ready() { task_status_is gamma ready && task_status_is delta ready; }
+both_alive() { session_alive gamma && session_alive delta; }
+wait_until "gamma and delta planned" both_ready
+
+for t in gamma delta; do
+  git -C "$DIR_REPO" checkout -q "task/$t"
+  echo "Create $t.txt." >"$DIR_REPO/tasks/$t/prompt.md"
+  printf 'title = "%s"\nphase = "p1"\n\n[check]\nname = "%s-check"\ncmd = "test -f %s.txt"\n' "$t" "$t" "$t" >"$DIR_REPO/tasks/$t/task.toml"
+  printf '#!/bin/sh\necho ok > %s.txt\n' "$t" >"$DIR_REPO/tasks/$t/agent.sh"
+  printf '%s\n\n[[check]]\nname = "%s-check"\ncmd = "test -f %s.txt"\n' "$tests_before" "$t" "$t" >"$DIR_REPO/tests.toml"
+  git -C "$DIR_REPO" add -A
+  git -C "$DIR_REPO" commit -q -m "post: $t"
+done
+wait_until "gamma's and delta's sessions both alive" both_alive
+wait_until "task/gamma tested" task_status_is gamma tested
+wait_until "task/delta tested" task_status_is delta tested
+
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" checkout -q task/gamma
+git -C "$DIR_REPO" merge -q --ff-only hub/task/gamma
+git -C "$DIR_REPO" commit -q --allow-empty -m "accept: gamma"
+wait_until "task/gamma accepted" task_status_is gamma accepted
+
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" checkout -q task/delta
+git -C "$DIR_REPO" merge -q --ff-only hub/task/delta
+main_at_conflict=$(git --git-dir "$HOME_DIR/hub.git" rev-parse refs/heads/main)
+git -C "$DIR_REPO" commit -q --allow-empty -m "accept: delta"
+wait_until "task/delta conflicted" task_status_is delta conflicted
+wait_out=$(dash wait --timeout 5)
+assert_contains "$wait_out" "conflict" "dashboard wait output"
+assert_contains "$wait_out" "$main_at_conflict" "the conflict event names the main commit"
+
+# The resolution merges exactly that main commit and touches only tests.toml.
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/task/delta
+if git -C "$DIR_REPO" merge -q --no-edit "$main_at_conflict" >/dev/null 2>&1; then
+  echo "e2e: expected tests.toml to conflict when resolving delta" >&2
+  exit 1
+fi
+printf '%s\n\n[[check]]\nname = "gamma-check"\ncmd = "test -f gamma.txt"\n\n[[check]]\nname = "delta-check"\ncmd = "test -f delta.txt"\n' "$tests_before" >"$DIR_REPO/tests.toml"
+git -C "$DIR_REPO" add -A
+git -C "$DIR_REPO" commit -q --no-edit
+wait_until "task/delta accepted" task_status_is delta accepted
+assert_contains "$(hub_main_body)" "Task: delta" "hub main's merge commit"
 
 # --------------------------------------------------------------------------
 # 8. A director rejection path: commit a non-doc file on main ->

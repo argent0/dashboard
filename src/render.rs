@@ -29,6 +29,7 @@ fn status_style(status: Status) -> StatusStyle {
         Status::InProgress => StatusStyle { icon: "◐", codes: &[c::YELLOW] },
         Status::Posted => StatusStyle { icon: "▶", codes: &[c::YELLOW] },
         Status::InRevision => StatusStyle { icon: "↻", codes: &[c::MAGENTA] },
+        Status::Conflicted => StatusStyle { icon: "⇄", codes: &[c::RED] },
         Status::Escalated => StatusStyle { icon: "✗", codes: &[c::RED] },
         Status::Ready => StatusStyle { icon: "●", codes: &[c::CYAN] },
         Status::Pending => StatusStyle { icon: "○", codes: &[c::GRAY] },
@@ -40,8 +41,8 @@ fn status_style(status: Status) -> StatusStyle {
 /// Live statuses, in the order the overall summary line and per-phase rows
 /// display them. `Retired` is deliberately excluded — it's counted (and
 /// shown) separately, never part of the live denominator.
-const LIVE_STATUS_ORDER: [Status; 9] =
-    [Status::Accepted, Status::Tested, Status::InProgress, Status::Posted, Status::InRevision, Status::Escalated, Status::Ready, Status::Pending, Status::Orphaned];
+const LIVE_STATUS_ORDER: [Status; 10] =
+    [Status::Accepted, Status::Tested, Status::InProgress, Status::Posted, Status::InRevision, Status::Conflicted, Status::Escalated, Status::Ready, Status::Pending, Status::Orphaned];
 
 fn actor_label(actor: Actor) -> &'static str {
     match actor {
@@ -171,11 +172,16 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     }
 
     // ---- in flight ----
-    let in_flight = live.iter().chain(spikes.iter()).find(|t| matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision)).copied();
-    out.push(style("In flight", &[c::BOLD], color));
-    match in_flight {
-        None => out.push(none_line(color)),
-        Some(t) => render_in_flight(&mut out, state, t, color, width),
+    let in_flight: Vec<&TaskState> = live.iter().chain(spikes.iter()).filter(|t| matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision | Status::Conflicted)).copied().collect();
+    out.push(style(&if in_flight.len() > 1 { format!("In flight ({})", in_flight.len()) } else { "In flight".to_string() }, &[c::BOLD], color));
+    if in_flight.is_empty() {
+        out.push(none_line(color));
+    }
+    for (i, t) in in_flight.iter().enumerate() {
+        if i > 0 {
+            out.push(String::new());
+        }
+        render_in_flight(&mut out, state, t, color, width);
     }
     out.push(String::new());
 
@@ -309,6 +315,11 @@ fn render_in_flight(out: &mut Vec<String>, state: &HubState, t: &TaskState, colo
     out.push(format!("  {} {}  {}", ss.icon, style(t.status.as_str(), ss.codes, color), style(&t.slug, &[c::BOLD], color)));
     out.push(format!("  {}", truncate(&t.config.title, width.saturating_sub(2))));
 
+    if let Some(conflict) = &t.conflict {
+        let line = format!("  conflicts with main {}: {}", &conflict.main[..conflict.main.len().min(12)], conflict.paths.join(", "));
+        out.push(style(&truncate(&line, width), &[c::RED], color));
+    }
+
     if let Some(sp) = &t.spike {
         out.push(format!("  spike round {}{}", sp.round, sp.answer.as_ref().map(|a| format!(", latest answer: {a}")).unwrap_or_default()));
     }
@@ -411,6 +422,7 @@ mod tests {
             alive: false,
             spike: None,
             flaky: 0,
+            conflict: None,
         }
     }
 
@@ -518,6 +530,15 @@ mod tests {
         assert!(out.contains("unit: pass (1/1)"), "{out}");
         assert!(out.contains("dash-widget-wip"), "{out}");
         assert!(out.contains("alive"), "{out}");
+    }
+
+    #[test]
+    fn in_flight_lists_every_parallel_task() {
+        let out = render_plain(&hub_state(vec![task("one", "p1", Status::InProgress), task("two", "p1", Status::Tested), task("done", "p1", Status::Accepted)]));
+        let section = out.split("In flight (2)").nth(1).expect("count in header");
+        let section = section.split("✗ Escalated").next().unwrap();
+        assert!(section.contains("one") && section.contains("two"), "{section}");
+        assert!(!section.contains("done"), "{section}");
     }
 
     #[test]

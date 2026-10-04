@@ -239,6 +239,23 @@ impl Git {
         }
     }
 
+    /// `git merge-tree --write-tree --name-only` that also succeeds on
+    /// conflicts: the merged tree (conflict markers written into conflicted
+    /// files) plus the conflicted paths, empty on a clean merge. A director's
+    /// conflict resolution (spec §11) may differ from this tree only on those paths.
+    pub fn merge_tree_conflicts(&self, ours: &str, theirs: &str) -> Result<(String, Vec<String>), GitError> {
+        let args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs];
+        let output = Command::new("git").args(args).current_dir(&self.dir).output().map_err(|e| Self::err(&args, None, e.to_string()))?;
+        if !matches!(output.status.code(), Some(0 | 1)) {
+            return Err(Self::err(&args, output.status.code(), String::from_utf8_lossy(&output.stderr)));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut lines = stdout.lines();
+        let tree = lines.next().unwrap_or("").to_string();
+        let conflicts = lines.take_while(|l| !l.is_empty()).map(|l| l.to_string()).collect();
+        Ok((tree, conflicts))
+    }
+
     /// `git commit-tree <tree> -p <parent> ... -m <message>`, with the
     /// player's own author/committer identity forced via env vars so it
     /// never depends on the user's global git config (spec.md §11).

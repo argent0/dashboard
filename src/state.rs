@@ -29,6 +29,9 @@ pub enum Status {
     InProgress,
     Tested,
     InRevision,
+    /// An accept the player couldn't land: merging `main` conflicts, and the
+    /// director must resolve that specific conflict (spec §11).
+    Conflicted,
     Escalated,
     Accepted,
     /// A concluded spike (spec §14): never merged, its branch kept under
@@ -47,6 +50,7 @@ impl Status {
             Status::InProgress => "in_progress",
             Status::Tested => "tested",
             Status::InRevision => "in_revision",
+            Status::Conflicted => "conflicted",
             Status::Escalated => "escalated",
             Status::Accepted => "accepted",
             Status::Explored => "explored",
@@ -85,6 +89,8 @@ pub struct TaskState {
     pub spike: Option<SpikeState>,
     /// How many flake-ledger entries this task has.
     pub flaky: u32,
+    /// The conflict to resolve, set only when `status == Conflicted`.
+    pub conflict: Option<records::ConflictRecord>,
 }
 
 /// A spike's progress, read from the hub (spec §14).
@@ -242,6 +248,7 @@ fn derive_task(
 
     let mut escalation: Option<String> = None;
     let mut post_mortem: Option<String> = None;
+    let mut conflict: Option<records::ConflictRecord> = None;
 
     let status = if is_retired {
         post_mortem = hub.commit_body(&tip);
@@ -253,10 +260,13 @@ fn derive_task(
     } else if let Some(cause) = escalation_cause(hub, roadmap, slug, &strikes, note.as_ref(), &tip) {
         escalation = Some(cause);
         Status::Escalated
+    } else if let Some(c) = records::conflict(hub, &tip) {
+        conflict = Some(c);
+        Status::Conflicted
     } else {
         match note.as_ref().map(|n| n.transition) {
             Some(Transition::Finish) => Status::Tested,
-            Some(Transition::SendBack) => Status::InRevision,
+            Some(Transition::SendBack | Transition::SyncRevision) => Status::InRevision,
             Some(Transition::Post) => {
                 if alive {
                     Status::InProgress
@@ -282,7 +292,7 @@ fn derive_task(
         }
     };
 
-    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite, alive, spike, flaky })
+    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite, alive, spike, flaky, conflict })
 }
 
 /// Escalation causes that aren't already covered by retired/accepted: a

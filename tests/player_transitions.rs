@@ -169,32 +169,6 @@ fn post_rejected_when_dependencies_are_not_accepted() {
 }
 
 #[test]
-fn post_rejected_when_another_task_is_in_flight() {
-    let repo = director_repo();
-    let (_home_dir, home) = init_hub(&repo);
-    let hub = Git::new(home.hub());
-    let mut player = open_player(&home);
-
-    plan(&repo, &mut player, "a", "title = \"A\"\nphase = \"p1\"\n");
-    post(&repo, &mut player, "a");
-    assert_eq!(task_status(&hub, "a"), Status::Posted);
-
-    plan(&repo, &mut player, "b", "title = \"B\"\nphase = \"p1\"\n");
-
-    checkout_branch(repo.path(), "task/b");
-    write_file(repo.path(), "tasks/b/prompt.md", "do it\n");
-    write_file(repo.path(), "tasks/b/task.toml", "title = \"B\"\nphase = \"p1\"\n\n[check]\nname = \"b-check\"\ncmd = \"test -f b-feature.txt\"\n");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"b-check\"\ncmd = \"test -f b-feature.txt\"\n");
-    commit(repo.path(), "post: b (while a is in flight)");
-
-    let report = player.tick().expect("tick should succeed");
-    assert_eq!(report.rejected.len(), 1, "{report}");
-    assert_eq!(report.rejected[0].reason, Reason::Post);
-    assert!(report.rejected[0].message.contains("already"), "{}", report.rejected[0].message);
-    assert_eq!(task_status(&hub, "b"), Status::Ready);
-}
-
-#[test]
 fn post_rejected_when_tests_toml_entry_is_missing() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
@@ -431,12 +405,11 @@ fn accept_rejected_when_not_tested() {
 }
 
 #[test]
-fn accept_rejected_when_the_merged_suite_fails() {
+fn accept_stops_at_a_conflict_with_a_main_that_moved() {
     let repo = director_repo();
-    // docs_paths includes tests.toml, so the director can tighten the
+    // docs_paths includes tests.toml, so the director can edit the
     // project-wide suite from main directly (an ordinary, allowed
-    // main-only commit) — the simplest way to construct a merge whose
-    // suite fails without a real content conflict.
+    // main-only commit), on the same lines the task's post edited.
     write_file(repo.path(), "roadmap.toml", "title = \"Test Project\"\ndocs_paths = [\"tests.toml\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n");
     commit(repo.path(), "declare docs_paths over tests.toml");
     let (_home_dir, home) = init_hub(&repo);
@@ -445,9 +418,7 @@ fn accept_rejected_when_the_merged_suite_fails() {
 
     post_and_finish(&repo, &hub, &home, &mut player, "conflicted");
 
-    // Main tightens the suite to require feature.txt's *absence* — true on
-    // main (which never had it), false once merged with the task branch
-    // (which added it at finish).
+    // Main adds its own check where the post added the task's.
     checkout_branch(repo.path(), "main");
     write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"no-feature\"\ncmd = \"test ! -f feature.txt\"\n");
     commit(repo.path(), "docs: tighten tests.toml");
@@ -459,10 +430,12 @@ fn accept_rejected_when_the_merged_suite_fails() {
     director_pull_task_branch(repo.path(), "conflicted");
     commit_empty(repo.path(), "accept: conflicted");
 
+    // Both sides edited tests.toml: the player can't merge main in, so the
+    // accept stops (no strike) for the director to resolve (spec §11).
     let report = player.tick().expect("tick should succeed");
-    assert_eq!(report.rejected.len(), 1, "{report}");
-    assert_eq!(report.rejected[0].reason, Reason::Accept);
-    assert_eq!(task_status(&hub, "conflicted"), Status::Tested, "rejected accept must leave the task tested, not accepted");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(report.conflicts.len(), 1, "{report}");
+    assert_eq!(task_status(&hub, "conflicted"), Status::Conflicted);
 }
 
 // --------------------------------------------------------------------------

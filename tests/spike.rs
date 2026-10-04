@@ -805,16 +805,17 @@ fn an_explored_slug_is_never_reused() {
 // --------------------------------------------------------------------------
 
 #[test]
-fn a_spike_in_flight_blocks_other_posts_and_other_tasks_block_it() {
+fn a_spike_runs_beside_another_spike() {
     let repo = director_repo();
     let (_h, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
     let mut player = open_player(&home);
     plan_and_post(&repo, &mut player, "probe");
 
     plan_spike(&repo, &mut player, "second");
     let report = post_spike_with(&repo, &mut player, "second", &[]);
-    let msg = one_rejection(&report, Reason::Post);
-    assert!(msg.contains("task/probe is already") && msg.contains("only one task may be in flight"), "{msg}");
+    assert!(report.rejected.is_empty(), "spikes run in parallel too (spec §4): {report}");
+    assert_eq!(status_of(&hub, "second"), Status::Posted);
 }
 
 #[test]

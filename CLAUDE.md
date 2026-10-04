@@ -107,6 +107,8 @@ refs/notes/dashboard-escalations cause/at per refs/dashboard/escalated/<slug>
 refs/notes/dashboard-flakes       the flake ledger: checks that passed only on a retry (refs/flakes/<scope>/<n>)
 refs/notes/dashboard-explorations a spike round's verified answer + claim results, on each validated
                                  finish commit; {concluded: true, ...} on the `conclude:` commit
+refs/notes/dashboard-conflicts   on a conflicted task's tip: the exact main commit an accept couldn't
+                                 merge in, and the conflicted paths ({main, paths, at})
 ```
 
 Git config: the director clone carries `dashboard.home`; the hub carries
@@ -313,6 +315,25 @@ back here):
   CLI change: a spike is just different director commit shapes
   (`kind = "spike"`, `questions/`, `conclude:`).
 
+- **Parallel tasks** (spec §4, §11): any number of tasks may be posted
+  at once; there is no in-flight limit. The player does every merge:
+  `Player::land` (called for an `accept:`) merges a moved `main` into the
+  branch itself (a player `sync` commit), then merges the branch into
+  `main` once the suite passes on the result. If the suite fails because of
+  that merge, the tip becomes a `sync_revision` (`in_revision`, re-pinned,
+  relayed to the subagent, no review round, a `merge_failed` event). If the
+  merge has a textual conflict, the marker is imported with a
+  `dashboard-conflicts` note: the task is `conflicted` (a `conflict`
+  event, no strike). Conflict events come from the tick report, not a
+  status change, so a repeat conflict is still reported. The director's
+  only merge is `Player::try_resolve`. It applies only on a conflicted
+  task, must merge exactly the recorded `main` commit, and may differ from
+  `git::merge_tree_conflicts`'s result only on the recorded paths
+  (`ownership` otherwise). It re-pins, then goes through `land` again,
+  which may merge a newer `main` or record a new conflict. Any other
+  director merge is `history`. The walk over a task branch's new commits
+  skips anything already on `main`. `status` lists every in-flight task,
+  conflicted ones with their conflict.
+
 Still undecided (spec §13): timeout/crash handling beyond manual relaunch,
-scope enforcement beyond pins, suite-runtime cost at scale, and parallel
-tasks.
+scope enforcement beyond pins, and suite-runtime cost at scale.

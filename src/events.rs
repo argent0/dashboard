@@ -27,6 +27,10 @@ pub enum EventKind {
     DirectorRejected,
     Tested,
     Escalated,
+    /// An accept the player couldn't land: merging `main` conflicts.
+    Conflict,
+    /// An accept whose merge with `main` failed the suite: back to the subagent.
+    MergeFailed,
     Ready,
     Accepted,
     Explored,
@@ -41,6 +45,8 @@ impl EventKind {
             EventKind::DirectorRejected => "director_rejected",
             EventKind::Tested => "tested",
             EventKind::Escalated => "escalated",
+            EventKind::Conflict => "conflict",
+            EventKind::MergeFailed => "merge_failed",
             EventKind::Ready => "ready",
             EventKind::Accepted => "accepted",
             EventKind::Explored => "explored",
@@ -81,6 +87,10 @@ impl Event {
         match self.kind {
             EventKind::Tested => Some(format!("review it: git fetch hub && git log hub/task/{slug}, then send back or accept")),
             EventKind::Escalated => Some("discuss with the operator, then retire and replan".to_string()),
+            EventKind::Conflict => Some(format!(
+                "git fetch hub && git checkout task/{slug} && git merge --ff-only hub/task/{slug}, then git merge <that main commit>, resolve only those paths, commit"
+            )),
+            EventKind::MergeFailed => Some("the subagent fixes it; wait for tested, then review and accept again".to_string()),
             EventKind::Ready => Some(format!("git fetch hub && git merge (or checkout) hub/task/{slug} before posting")),
             EventKind::DirectorRejected => Some("fetch hub and fix with a new commit / reset".to_string()),
             EventKind::Accepted => Some("on main: git fetch hub; git merge --ff-only hub/main".to_string()),

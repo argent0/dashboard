@@ -219,6 +219,10 @@ pub struct TickReport {
     pub rejected: Vec<RejectionRecord>,
     pub merges: Vec<String>,
     pub escalated: Vec<(String, String)>,
+    /// Accepts stopped at a merge conflict with `main`: (slug, message).
+    pub conflicts: Vec<(String, String)>,
+    /// Accepts whose merge with `main` failed the suite: (slug, message).
+    pub merge_failed: Vec<(String, String)>,
     pub launched: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -229,6 +233,8 @@ impl TickReport {
             && self.rejected.is_empty()
             && self.merges.is_empty()
             && self.escalated.is_empty()
+            && self.conflicts.is_empty()
+            && self.merge_failed.is_empty()
             && self.launched.is_empty()
             && self.errors.is_empty()
     }
@@ -248,6 +254,12 @@ impl fmt::Display for TickReport {
         }
         for (slug, cause) in &self.escalated {
             lines.push(format!("escalated {slug}: {cause}"));
+        }
+        for (slug, msg) in &self.conflicts {
+            lines.push(format!("conflict {slug}: {msg}"));
+        }
+        for (slug, msg) in &self.merge_failed {
+            lines.push(format!("merge failed {slug}: {}", first_line(msg)));
         }
         for slug in &self.launched {
             lines.push(format!("launched {slug}"));
@@ -350,6 +362,14 @@ impl<S: Sessions> Player<S> {
         }
         for err in &report.errors {
             events::append(&self.home, EventKind::PlayerError, None, err)?;
+        }
+        // From the report, not a status change: a resolution that runs into
+        // a newer conflict stays `conflicted` but still needs the director.
+        for (slug, msg) in &report.conflicts {
+            events::append(&self.home, EventKind::Conflict, Some(slug), msg)?;
+        }
+        for (slug, msg) in &report.merge_failed {
+            events::append(&self.home, EventKind::MergeFailed, Some(slug), msg)?;
         }
 
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
@@ -566,7 +586,9 @@ impl<S: Sessions> Player<S> {
                     }
                     return Ok(());
                 }
-                self.hub.rev_list(&[&format!("{hub_tip}..{incoming}"), "--reverse"])
+                // `--not main`: a conflict resolution brings in `main`'s own commits,
+                // which were validated when they landed there.
+                self.hub.rev_list(&[&format!("{hub_tip}..{incoming}"), "--reverse", "--not", "refs/heads/main"])
             }
             None => {
                 // Not planned yet: the range is main..incoming, and the
@@ -612,19 +634,28 @@ impl<S: Sessions> Player<S> {
             if records::is_rejected(&self.hub, &c) {
                 continue;
             }
-            if self.hub.parents(&c).len() > 1 || rejected_ancestors.iter().any(|r| self.hub.is_ancestor(r, &c)) {
+            let parents = self.hub.parents(&c);
+            let tip = self.hub.rev_parse(&hub_ref);
+            // A merge whose first parent is the hub tip may be a conflict
+            // resolution (spec §11): validated as one rather than refused
+            // outright.
+            if parents.len() == 2 && tip.as_deref() == Some(parents[0].as_str()) && !rejected_ancestors.iter().any(|r| self.hub.is_ancestor(r, &c)) {
+                self.try_resolve(slug, &parents[0], &parents[1], &c, report)?;
+                continue;
+            }
+            if parents.len() > 1 || rejected_ancestors.iter().any(|r| self.hub.is_ancestor(r, &c)) {
                 // Rejection scope is the slug even before the branch exists
                 // (a plan attempt that used a merge commit): these are
                 // strikes on the slug the moment it's later planned, since
                 // strikes are just rejection records keyed by scope string.
-                let msg = format!("history: task/{slug} commit {} is a merge commit; only the player creates merges", short(&c));
+                let msg = format!("history: task/{slug} commit {} is a merge commit; the only director merge is a conflict resolution, on the hub's task tip", short(&c));
                 let rec = records::record_rejection(&self.hub, slug, &c, Reason::History, Actor::Director, &msg)?;
                 report.rejected.push(rec);
                 rejected_ancestors.push(c);
                 continue;
             }
 
-            match self.hub.rev_parse(&hub_ref) {
+            match tip {
                 None => self.try_plan(slug, &c, report)?,
                 Some(tip) => self.try_existing(slug, &tip, &c, report)?,
             }
@@ -716,6 +747,11 @@ impl<S: Sessions> Player<S> {
             }
             Some(Status::Tested) if records::is_spike_at(&self.hub, tip, slug) => self.try_spike_send_back(slug, tip, candidate, &diffs, &hub_state, report),
             Some(Status::Tested) => self.try_send_back(slug, tip, candidate, &diffs, &hub_state, report),
+            Some(Status::Conflicted) => {
+                let main = hub_state.tasks.iter().find(|t| t.slug == slug).and_then(|t| t.conflict.as_ref()).map(|c| c.main.clone()).unwrap_or_default();
+                let msg = format!("task/{slug} is conflicted: resolve it with a merge of main {main} on the hub's task tip (or retire it)");
+                self.reject(slug, candidate, Reason::Ownership, msg, report)
+            }
             Some(other) => {
                 let msg = format!("task/{slug} is {} — the director may not commit until the subagent finishes", other.as_str());
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
@@ -773,7 +809,7 @@ impl<S: Sessions> Player<S> {
         // 1 by default, and the player retires the task itself).
         let mut reason = Reason::Post;
         let validated = if records::is_spike_at(&self.hub, candidate, slug) {
-            self.validate_spike_post(slug, tip, candidate, status, hub_state)
+            self.validate_spike_post(slug, tip, candidate, status)
         } else {
             self.validate_post(slug, candidate, status, hub_state).and_then(|()| {
                 self.evidence_miss(slug, candidate).map_or(Ok(()), |miss| {
@@ -836,8 +872,8 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
-    /// spec §9's post row: status must be `ready`; no other task may be in
-    /// flight; every accepted dependency's merge must already be an
+    /// spec §9's post row: status must be `ready` (other tasks may be in
+    /// flight: spec §4's parallel tasks); every accepted dependency's merge must already be an
     /// ancestor of `candidate` (else the branch hasn't been unblocked into
     /// yet); `task.toml` must parse and declare a check; `tests.toml` must
     /// carry a matching entry (spec §6.3); and that check must currently
@@ -854,10 +890,6 @@ impl<S: Sessions> Player<S> {
             let accepted = records::accepted_tasks(&self.hub, &hub_state.main_tip);
             let unmet: Vec<&str> = task.config.depends_on.iter().filter(|d| !accepted.contains_key(*d)).map(|s| s.as_str()).collect();
             return Err(format!("post: task/{slug}: dependencies not accepted: {}", unmet.join(", ")));
-        }
-
-        if let Some(other) = hub_state.tasks.iter().find(|t| t.slug != slug && matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision | Status::Escalated)) {
-            return Err(format!("post: task/{slug}: task/{} is already {} — only one task may be in flight at a time", other.slug, other.status.as_str()));
         }
 
         let accepted = records::accepted_tasks(&self.hub, &hub_state.main_tip);
@@ -964,10 +996,9 @@ impl<S: Sessions> Player<S> {
 
     // ---- accept (spec §9, §11) ----
 
-    /// spec §9/§11's accept row: the task must be `tested`; the player
-    /// merges `task/<slug>` into `main` (`--no-ff`-equivalent via
-    /// `merge-tree`/`commit-tree`, since the hub is bare) and runs the
-    /// project suite on the merge result before it counts as accepted.
+    /// spec §9/§11's accept row: the task must be `tested` and not a spike.
+    /// The player then lands it itself (`land`), merging `main` into the
+    /// branch first if other tasks moved it.
     fn try_accept(&mut self, slug: &str, tip: &str, candidate: &str, status: Option<Status>, report: &mut TickReport) -> Result<(), String> {
         if status != Some(Status::Tested) {
             let msg = format!("accept: task/{slug} is {} — it must be tested before it can be accepted", status.map(|s| s.as_str()).unwrap_or("unknown"));
@@ -979,36 +1010,88 @@ impl<S: Sessions> Player<S> {
             return self.reject(slug, candidate, Reason::Accept, msg, report);
         }
 
-        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
-        let tree = match self.hub.merge_tree_write(&main_tip, candidate).map_err(|e| e.to_string())? {
-            Some(t) => t,
-            None => {
-                let msg = format!("accept: task/{slug} conflicts with main");
-                return self.reject(slug, candidate, Reason::Accept, msg, report);
-            }
-        };
+        self.land(slug, tip, candidate, Transition::Accept, report)
+    }
 
-        let marker_body = self.hub.commit_body(candidate).unwrap_or_default();
-        let marker_body = marker_body.trim();
+    /// Lands `candidate` (an `accept:` marker, or a director's resolution of
+    /// a conflict) on top of the hub tip `tip` (spec §11). When `main` has
+    /// moved since the branch last saw it, the player merges `main` into the
+    /// branch itself (a `sync` commit); a conflict stops there, with the
+    /// task `conflicted` and the exact `main` commit and paths noted on
+    /// `candidate` for the director to resolve. Otherwise the branch merges
+    /// into `main` (`--no-ff`, `Task: <slug>` trailer) once the suite passes
+    /// on the result. A suite that fails only because of the merge sends the
+    /// task back to the subagent (`sync_revision`, no review round spent).
+    fn land(&mut self, slug: &str, tip: &str, candidate: &str, transition: Transition, report: &mut TickReport) -> Result<(), String> {
+        let hub_ref = format!("refs/heads/task/{slug}");
+        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
+
+        let mut sync: Option<String> = None;
+        if !self.hub.is_ancestor(&main_tip, candidate) {
+            let (tree, conflicts) = self.hub.merge_tree_conflicts(candidate, &main_tip).map_err(|e| e.to_string())?;
+            if !conflicts.is_empty() {
+                self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
+                records::record_import(&self.hub, candidate, Actor::Director, transition, Some(slug))?;
+                report.imported.push((hub_ref, candidate.to_string(), transition));
+                records::record_conflict(&self.hub, candidate, &main_tip, &conflicts)?;
+                report.conflicts.push((slug.to_string(), format!("merging main {main_tip} into task/{slug} conflicts in {}", conflicts.join(", "))));
+                return Ok(());
+            }
+            sync = Some(self.hub.commit_tree(&tree, &[candidate, &main_tip], &format!("Merge main into task/{slug}")).map_err(|e| e.to_string())?);
+        }
+        let head = sync.clone().unwrap_or_else(|| candidate.to_string());
+
         // The `Task: <slug>` trailer must be the merge commit's last
         // paragraph, so `records::accepted_tasks`'s line scan finds it.
-        let message =
-            if marker_body.is_empty() { format!("Merge task/{slug}\n\nTask: {slug}") } else { format!("Merge task/{slug}\n\n{marker_body}\n\nTask: {slug}") };
-        let merge_sha = self.hub.commit_tree(&tree, &[&main_tip, candidate], &message).map_err(|e| e.to_string())?;
+        let marker_body = self.accept_marker_body(candidate);
+        let message = if marker_body.is_empty() { format!("Merge task/{slug}\n\nTask: {slug}") } else { format!("Merge task/{slug}\n\n{marker_body}\n\nTask: {slug}") };
+        let tree = self.hub.rev_parse(&format!("{head}^{{tree}}")).ok_or_else(|| format!("no tree at {head}"))?;
+        let merge_sha = self.hub.commit_tree(&tree, &[&main_tip, &head], &message).map_err(|e| e.to_string())?;
 
         let suite = self.runner.run_suite(&merge_sha);
         self.note_flakes(slug, &merge_sha, &suite);
         if !suite.pass {
-            let msg = format!("accept: task/{slug}: {}", suite.summary());
-            return self.reject(slug, candidate, Reason::Accept, msg, report);
+            if sync.is_none() && transition == Transition::Accept {
+                // Nothing was merged in: this is the code that passed at
+                // finish, so the failure isn't the merge's.
+                let msg = format!("accept: task/{slug}: {}", suite.summary());
+                return self.reject(slug, candidate, Reason::Accept, msg, report);
+            }
+            self.hub.update_ref_cas(&hub_ref, &head, tip).map_err(|e| e.to_string())?;
+            match &sync {
+                Some(sync) => {
+                    records::record_import(&self.hub, candidate, Actor::Director, transition, Some(slug))?;
+                    records::record_import(&self.hub, sync, Actor::Player, Transition::SyncRevision, Some(slug))?;
+                    report.imported.push((hub_ref.clone(), candidate.to_string(), transition));
+                    report.imported.push((hub_ref, sync.clone(), Transition::SyncRevision));
+                }
+                None => {
+                    records::record_import(&self.hub, candidate, Actor::Director, Transition::SyncRevision, Some(slug))?;
+                    report.imported.push((hub_ref, candidate.to_string(), Transition::SyncRevision));
+                }
+            }
+            records::set_pins(&self.hub, slug, &head)?;
+            report.merge_failed.push((slug.to_string(), format!("the suite fails with main merged into task/{slug}; back to the subagent\n{}", suite.summary())));
+            self.sessions.send(
+                slug,
+                &format!(
+                    "main was merged into task/{slug} to accept it, and the project suite now fails on the merge. Fetch it: git pull --ff-only origin task/{slug}. \
+Make the whole suite pass and commit. The pinned files are re-pinned at the merge.\n\n{}",
+                    suite.summary()
+                ),
+            );
+            return Ok(());
         }
 
-        let hub_ref = format!("refs/heads/task/{slug}");
-        self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
+        self.hub.update_ref_cas(&hub_ref, &head, tip).map_err(|e| e.to_string())?;
         self.hub.update_ref_cas("refs/heads/main", &merge_sha, &main_tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, Actor::Director, Transition::Accept, Some(slug))?;
+        records::record_import(&self.hub, candidate, Actor::Director, transition, Some(slug))?;
+        report.imported.push((hub_ref.clone(), candidate.to_string(), transition));
+        if let Some(sync) = &sync {
+            records::record_import(&self.hub, sync, Actor::Player, Transition::Sync, Some(slug))?;
+            report.imported.push((hub_ref, sync.clone(), Transition::Sync));
+        }
         records::record_import(&self.hub, &merge_sha, Actor::Player, Transition::MergeAccept, Some(slug))?;
-        report.imported.push((hub_ref, candidate.to_string(), Transition::Accept));
         report.imported.push(("refs/heads/main".to_string(), merge_sha, Transition::MergeAccept));
 
         // The task branch itself stays in the hub as a permanent record
@@ -1019,23 +1102,67 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
+    /// The body of the `accept:` marker that `head` lands: `head` itself, or
+    /// the nearest one before a resolution on its first-parent line.
+    fn accept_marker_body(&self, head: &str) -> String {
+        self.hub
+            .rev_list(&["--first-parent", head])
+            .into_iter()
+            .find(|c| self.hub.commit_subject(c).is_some_and(|s| s.starts_with("accept:")))
+            .and_then(|c| self.hub.commit_body(&c))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    // ---- conflict resolution (spec §11) ----
+
+    /// A director merge commit `candidate` with parents (`tip`, `theirs`) on
+    /// `task/<slug>`: the resolution of the conflict the player recorded
+    /// when it couldn't land an accept, and the only merge a director may
+    /// make (any other stays a `history` rejection, spec §5). It must merge
+    /// exactly the recorded `main` commit, and may differ from git's own
+    /// merge of the two only on the recorded conflicted paths: it resolves
+    /// that conflict and writes no other code. Then the player re-pins and
+    /// lands it like the accept it completes.
+    fn try_resolve(&mut self, slug: &str, tip: &str, theirs: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let task = hub_state.tasks.iter().find(|t| t.slug == slug);
+        let Some(conflict) = task.and_then(|t| t.conflict.clone()) else {
+            let msg = format!(
+                "history: task/{slug} is {} — the only director merge is the resolution of a conflict the player recorded (the player merges main itself)",
+                task.map(|t| t.status.as_str()).unwrap_or("unknown")
+            );
+            return self.reject(slug, candidate, Reason::History, msg, report);
+        };
+        if theirs != conflict.main {
+            let msg = format!("resolve: task/{slug}'s conflict is with main {}: merge exactly that commit, not {}", conflict.main, short(theirs));
+            return self.reject(slug, candidate, Reason::Ownership, msg, report);
+        }
+
+        let (merged, _) = self.hub.merge_tree_conflicts(tip, theirs).map_err(|e| e.to_string())?;
+        let stray: Vec<String> = self.hub.diff_names(&merged, candidate).into_iter().map(|(_, p)| p).filter(|p| !conflict.paths.contains(p)).collect();
+        if !stray.is_empty() {
+            let msg = format!("resolve: task/{slug}: a resolution may only change the conflicted paths ({}), not {}", conflict.paths.join(", "), stray.join(", "));
+            return self.reject(slug, candidate, Reason::Ownership, msg, report);
+        }
+
+        records::set_pins(&self.hub, slug, candidate)?;
+        self.land(slug, tip, candidate, Transition::Resolve, report)
+    }
+
     // ---- spikes (spec §14) ----
 
-    /// spec §14's post row for a spike: the spike is `ready` and nothing else
-    /// is in flight; the post commit only adds the director's own files
+    /// spec §14's post row for a spike: the spike is `ready`; the post commit only adds the director's own files
     /// (`prompt.md`, `questions/1.toml`, optional `baseline/1.toml` and its
     /// scripts, anything else under `tasks/<slug>/` but `claims/` and
     /// `findings/`); the question is valid; and the director's baseline claims
     /// pass on the current code. There is no task check and no `tests.toml`
     /// entry: a spike never merges.
-    fn validate_spike_post(&self, slug: &str, tip: &str, candidate: &str, status: Status, hub_state: &state::HubState) -> Result<(), String> {
+    fn validate_spike_post(&self, slug: &str, tip: &str, candidate: &str, status: Status) -> Result<(), String> {
         if status != Status::Ready {
             return Err(format!("post: task/{slug} is {} — a spike can only be posted while ready", status.as_str()));
         }
-        if let Some(other) = hub_state.tasks.iter().find(|t| t.slug != slug && matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision | Status::Escalated)) {
-            return Err(format!("post: task/{slug}: task/{} is already {} — only one task may be in flight at a time", other.slug, other.status.as_str()));
-        }
-
         // Only the director's own files, under tasks/<slug>/: nothing outside
         // it (the base must stay `main`'s code), and nothing in the
         // subagent's `claims/` or `findings/`.
@@ -1229,10 +1356,10 @@ Answer it in one new commit adding {} and {}.",
         // A spike the operator gives up on may also be retired once its
         // finish is validated (spec §14); an ordinary tested task may not.
         let tested_spike = status == Some(Status::Tested) && records::is_spike_at(&self.hub, tip, slug);
-        let allowed = tested_spike || matches!(status, Some(Status::Pending | Status::Ready | Status::Orphaned | Status::Escalated));
+        let allowed = tested_spike || matches!(status, Some(Status::Pending | Status::Ready | Status::Orphaned | Status::Conflicted | Status::Escalated));
         if !allowed {
             let msg = format!(
-                "retire: task/{slug} is {} — retire is only allowed while pending/ready/orphaned (not posted or in flight) or escalated",
+                "retire: task/{slug} is {} — retire is only allowed while pending/ready/orphaned (not posted or in flight), conflicted or escalated",
                 status.map(|s| s.as_str()).unwrap_or("unknown")
             );
             return self.reject(slug, candidate, Reason::Retire, msg, report);
@@ -1436,9 +1563,10 @@ Answer it in one new commit adding {} and {}.",
     /// identity — and so its trust — instead of being a fresh repository of
     /// its own. Never touched again by the player except by fetching from
     /// it. Safe to share one repository across every task's worktree only
-    /// because slugs are never reused (spec §8.1) and at most one task is
-    /// ever in flight (spec §4): no two worktrees ever contend for the same
-    /// branch name or need concurrent access to the shared ref namespace.
+    /// because slugs are never reused (spec §8.1): no two worktrees ever
+    /// contend for the same branch name. Parallel tasks (spec §4) each get their own worktree and
+    /// branch; the player is the only process touching the workspace, one
+    /// git command at a time.
     fn create_subagent_clone(&self, slug: &str, clone_dir: &Path) -> Result<(), String> {
         let workspace_dir = paths::subagent_workspace(&self.director);
         if !workspace_dir.join(".git").exists() {
@@ -1867,7 +1995,8 @@ fn status_event(task: &state::TaskState) -> Option<(EventKind, String)> {
             Some((EventKind::Explored, format!("spike {} concluded: {answer}", task.slug)))
         }
         Status::Retired => Some((EventKind::Retired, first_line(task.post_mortem.as_deref().unwrap_or("")))),
-        Status::Pending | Status::Orphaned | Status::Posted | Status::InProgress | Status::InRevision => None,
+        // `conflicted`: emitted from the tick report instead (`emit_events`).
+        Status::Pending | Status::Orphaned | Status::Posted | Status::InProgress | Status::InRevision | Status::Conflicted => None,
     }
 }
 

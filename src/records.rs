@@ -47,6 +47,15 @@ pub enum Transition {
     MergeAccept,
     /// A spike's `conclude:` marker (spec §14).
     Conclude,
+    /// The player's merge of `main` into a task branch while landing an
+    /// accept (spec §11).
+    Sync,
+    /// The tip of a branch whose accept merge failed the suite (the
+    /// player's sync, or a director's resolution): back to the subagent
+    /// (`in_revision`), without spending a review round.
+    SyncRevision,
+    /// A director's resolution of a recorded merge conflict (spec §11).
+    Resolve,
 }
 
 impl Transition {
@@ -64,6 +73,9 @@ impl Transition {
             Transition::MergeUnblock => "merge_unblock",
             Transition::MergeAccept => "merge_accept",
             Transition::Conclude => "conclude",
+            Transition::Sync => "sync",
+            Transition::SyncRevision => "sync_revision",
+            Transition::Resolve => "resolve",
         }
     }
 }
@@ -268,6 +280,36 @@ pub fn escalation(hub: &Git, slug: &str) -> Option<EscalationRecord> {
     let sha = hub.rev_parse(&format!("refs/dashboard/escalated/{slug}"))?;
     let text = hub.notes_show(ESCALATIONS_NOTES_REF, &sha)?;
     serde_json::from_str(&text).ok()
+}
+
+// --------------------------------------------------------------------------
+// Merge conflicts: refs/notes/dashboard-conflicts (spec §11)
+// --------------------------------------------------------------------------
+
+const CONFLICTS_NOTES_REF: &str = "refs/notes/dashboard-conflicts";
+
+/// An accept the player couldn't land because merging `main` into the task
+/// conflicts. Noted on the task tip it was found at (the `accept:` marker,
+/// or a resolution that hit a newer conflict): `main` is the exact commit a
+/// resolution must merge, `paths` the only paths it may resolve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictRecord {
+    pub main: String,
+    pub paths: Vec<String>,
+    pub at: u64,
+}
+
+pub fn record_conflict(hub: &Git, tip: &str, main: &str, paths: &[String]) -> Result<ConflictRecord, String> {
+    let record = ConflictRecord { main: main.to_string(), paths: paths.to_vec(), at: now_unix() };
+    let json = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+    hub.notes_add(CONFLICTS_NOTES_REF, tip, &json).map_err(|e| e.to_string())?;
+    Ok(record)
+}
+
+/// The conflict noted on `tip`, if any: the task is `conflicted` while its
+/// branch tip carries one.
+pub fn conflict(hub: &Git, tip: &str) -> Option<ConflictRecord> {
+    serde_json::from_str(&hub.notes_show(CONFLICTS_NOTES_REF, tip)?).ok()
 }
 
 // --------------------------------------------------------------------------

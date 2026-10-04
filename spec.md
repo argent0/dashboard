@@ -97,9 +97,12 @@ tmux session  ◄──┘ (player launches the subagent, relays rejections/revi
   commits fetched from the subagent's clone are the subagent's. No tokens or
   author fields are needed to establish identity, and there is nothing to
   leak or forge in commit content.
-- **One task at a time.** At most one task is posted, in flight, or
-  escalated-but-not-yet-retired. `main` never moves while a subagent is
-  working (except director-only paths, §5).
+- **Parallel tasks.** Any number of tasks may be posted and in flight at
+  once, so `main` moves under in-flight tasks as others are accepted. The
+  player merges the moved `main` into a task itself when it lands the
+  task's accept (§11). Only a textual conflict needs the director, who
+  takes on that risk by planning tasks side by side: the task goes
+  `conflicted`, and the director resolves that specific conflict.
 
 ## 5. History rules
 
@@ -109,7 +112,7 @@ Enforced by the player on import; a violating commit is never imported.
   the hub's current ref. No rebase, amend, reset of published commits, or
   force push.
 - **No merge commits from agents.** The only merge commits are the
-  player's own (§11).
+  player's own and the director's resolution of a recorded conflict (§11).
 - **Path ownership.** A subagent commit must leave every pin (§8.3)
   unchanged. The director commits to a task branch only through the
   transitions in §9.
@@ -268,13 +271,14 @@ failed validation is a rejection with the listed reason (§10).
 |---|---|---|---|
 | **plan** | new branch `task/<slug>` from `main`, adding `tasks/<slug>/task.toml` (director) | slug unused (incl. retired); `depends_on` slugs exist and aren't retired; no cycles | `plan` |
 | **replan** | edits `tasks/<slug>/task.toml` on a not-yet-posted branch (director) | same as plan | `plan` |
-| **post** | adds `prompt.md`, the task check and its test files, `tests.toml` entry, stale-test updates (director) | no other task in flight or escalated; all `depends_on` accepted and merged into the branch (§11); task check **fails** | `post` |
+| **post** | adds `prompt.md`, the task check and its test files, `tests.toml` entry, stale-test updates (director) | all `depends_on` accepted and merged into the branch (§11); task check **fails** | `post` |
 | **launch** | — (player) | task check still **fails** at the tip; records pins; starts `tmux` session running `claude` in a fresh subagent clone with `prompt.md` | — |
 | **finish** | code, optionally new tests (subagent) | pins unchanged; project suite **passes** | `pins`, `suite` |
 | **block** | `block:` marker (subagent) | — | — (escalates) |
 | **send back** | adds `reviews/r<N>.md` + new/updated tests (director) | task is `tested`; project suite now **fails**; re-pins; relays the note | `review` |
-| **accept** | `accept:` marker (director) | task is `tested`; player merges (§11) | `accept` |
-| **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is escalated; player moves the branch to `refs/retired/<slug>` and ends the subagent session | `retire` |
+| **accept** | `accept:` marker (director) | task is `tested`; the player lands it (§11), merging `main` in first if it moved: a conflict leaves it `conflicted`, a suite failure caused by the merge sends it back to the subagent | `accept` |
+| **resolve** | merge of the recorded `main` commit into the task tip (director) | task is `conflicted`; merges exactly the `main` commit the conflict was recorded against; differs from git's own merge only on the recorded paths; re-pins; the player then lands the accept (§11) | `history`, `ownership` |
+| **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is conflicted or escalated; player moves the branch to `refs/retired/<slug>` and ends the subagent session | `retire` |
 
 Any agent commit that breaks the history rules (§5) is rejected with reason
 `history`, whatever transition it was meant to be; a director commit that
@@ -339,11 +343,36 @@ commits.
   posted, so the post can update any pinned test that landed on `main`
   after the task first became ready. A pending branch only contains
   `tasks/<slug>/`, so this never conflicts.
-- **Acceptance.** The player merges `task/<slug>` into `main` with `--no-ff`
-  and a `Task: <slug>` trailer, after running the project suite on the
-  merge result. `main` only moves this way (and via director-only paths),
-  so "accepted" is readable from `main` alone, and the suite passes at every
-  commit on `main`.
+- **Acceptance.** The director's `accept:` asks the player to land the
+  task; the player does every merge itself:
+  1. If `main` moved since the branch last saw it (other tasks were
+     accepted, §4), the player merges `main` into `task/<slug>` (a *sync*
+     commit). On a textual conflict it stops: the task is `conflicted`, and
+     the player records, on the branch tip, the exact `main` commit it
+     tried and the conflicted paths. This is no strike, and the director is
+     notified (a `conflict` event).
+  2. It merges the branch into `main` with `--no-ff` and a `Task: <slug>`
+     trailer, after running the project suite on the merge result. If the
+     suite fails because of what the merge brought in (a semantic
+     conflict), `main` doesn't move: the task goes back to the subagent,
+     `in_revision`, re-pinned at the sync, with the failure relayed as the
+     evidence and no review round spent. Once it is `tested` again, the
+     director reviews and accepts again. A failure with nothing merged in is
+     an `accept` rejection, as before.
+
+  `main` only moves this way (and via director-only paths), so "accepted"
+  is readable from `main` alone, and the suite passes at every commit on
+  `main`.
+- **Conflict resolution (director).** The one merge commit an agent may
+  make, and only on a `conflicted` task. It is targeted at the recorded
+  conflict: the director merges exactly the recorded `main` commit (not a
+  newer one) onto the hub's task tip, and resolves the recorded paths and
+  nothing else. The player recomputes git's own merge of the two parents
+  and refuses (`ownership`) a resolution that merges another commit or
+  differs from that merge outside the recorded paths, so the director
+  resolves conflicts but writes no code. The player then re-pins and
+  carries on landing the accept from step 1: if `main` has moved again it
+  merges that in too, which may record a new conflict.
 
 ## 12. Derived status
 
@@ -355,7 +384,8 @@ commits.
 | `posted` | validated post, no live subagent session yet |
 | `in_progress` | subagent session alive and working (runtime, not git) |
 | `tested` | latest subagent commit validated as passing, awaiting director |
-| `in_revision` | latest director commit is a send-back; round N = count of `reviews/r*.md` |
+| `in_revision` | latest director commit is a send-back, or landing an accept merged `main` in and the suite failed (§11); round N = count of `reviews/r*.md` |
+| `conflicted` | landing an accept couldn't merge `main` in; the tip carries the conflict (the `main` commit and paths) for the director to resolve (§11) |
 | `escalated` | a strike limit reached, review rounds exceeded, or a `block:` marker; shown with its cause |
 | `accepted` | `Task: <slug>` merge commit on `main` |
 | `explored` | a concluded spike: branch lives under `refs/explored/<slug>` (§14) |
@@ -364,7 +394,8 @@ commits.
 The dashboard renders these from the hub: progress bar (over live tasks;
 retired ones counted separately), per-phase breakdown (from
 `roadmap.toml`), milestones, `ready` tasks (the new "actionable now"), the
-in-flight task with its per-reason strike counts and review round,
+in-flight tasks with their per-reason strike counts and review round (and,
+for a conflicted one, the conflict),
 escalated (with cause), orphaned, recent rejections, and retired tasks with
 their post-mortems.
 
@@ -384,6 +415,9 @@ spec's parking lot" for the detail behind each pointer):
 - **Auto-relaunch**: deferred. A dead subagent session is shown and emitted
   as an event, never restarted automatically; `dashboard relaunch <slug>`
   is the manual trigger — CLAUDE.md's Decisions section.
+- **Parallel tasks**: allowed; the player merges `main` into a task when
+  landing its accept, and the director resolves only recorded conflicts
+  (§4, §11).
 - **How a subagent is launched**: `[player] agent_cmd` in `roadmap.toml`
   (default `claude --dangerously-skip-permissions`), run in a `tmux`
   session per task, prompt.md passed as its first message — CLAUDE.md's
@@ -398,8 +432,6 @@ Still not decided:
   non-test paths a subagent commit may touch.
 - Suite runtime: the full suite (including multi-run checks) runs at every
   finish and merge; may need caching or subsetting for large projects.
-- Parallel tasks, and with them acceptance conflicts (`main` moving under an
-  in-flight task, given agents can't merge or rebase).
 - Whether the `dashboard` skill is rewritten as the director's playbook or
   replaced entirely (CLAUDE.md's Installing section: it must happen before
   `cargo install --path .` propagates this version to consumers).
@@ -419,7 +451,8 @@ process rule; if a director is seen posting spikes unasked, add an enforced
 authorization. Nothing may depend on a spike (a plan isn't built over a
 yet-unknown answer): a spike has no `depends_on`, no task `[check]`, isn't a
 milestone, and a `depends_on` that names a spike is a `plan` rejection. It
-never counts toward progress. One task in flight still holds (§4).
+never counts toward progress. It can run beside other tasks (§4); having
+nothing to merge, it never conflicts.
 
 **Roles.**
 
@@ -476,7 +509,7 @@ copies `tasks/<slug>/` from the candidate onto it, so claim scripts under
 
 | Transition | Commit | Player checks | Reason |
 |---|---|---|---|
-| **post** | director adds `prompt.md`, `questions/1.toml`, optional `baseline/1.toml` (+scripts); only under `tasks/<slug>/`, nothing in `claims/` or `findings/` | spike is `ready`, nothing else in flight, question valid, baseline claims pass | `post` |
+| **post** | director adds `prompt.md`, `questions/1.toml`, optional `baseline/1.toml` (+scripts); only under `tasks/<slug>/`, nothing in `claims/` or `findings/` | spike is `ready`, question valid, baseline claims pass | `post` |
 | **launch** | — | baseline claims still pass; pins only `tasks/<slug>/` (the project's tests are the subagent's to change); sets the base | — |
 | **finish** | subagent: code, `findings/<n>.md`, `claims/<n>.toml` | pins; only `claims/`/`findings/` of this round under `tasks/<slug>/`; findings non-empty; `answer` allowed; every claim runs and passes as above; a non-`inconclusive` answer has a passing spike claim with `supports` equal to it. Any failing claim rejects the whole finish | `pins`, `claims` |
 | **send back** | director adds `questions/<n+1>.toml` (+ optional baseline); operator approves | adds nothing else; `refines` in range; baseline claims pass on the base; within `max_review_rounds`. No failing test needed. Re-pins | `ownership`, `review` |
@@ -497,8 +530,7 @@ shows next to the spike (`explored: yes (round 2)`) without parsing markdown.
 
 **Not in v1.** A sandbox for the subagent's paths; anything depending on a
 spike or enforcing `derived_from`; operator authorization the player can check;
-verifying quotes in the findings; size caps and time budgets; running a spike
-beside a normal task.
+verifying quotes in the findings; size caps and time budgets.
 
 ## 15. Flaky-test fixes
 

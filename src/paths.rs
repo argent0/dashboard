@@ -67,9 +67,10 @@ impl Home {
 /// trust dialog. A worktree shares its repository's identity with
 /// `subagent_workspace`, so it inherits the one trust decision the operator
 /// already made for that single, permanent repo instead of needing a fresh
-/// one per task — safe because slugs are never reused (spec §8.1) and at
-/// most one task is ever in flight (spec §4), so worktrees never collide on
-/// a branch name or need concurrent access to the shared ref namespace.
+/// one per task — safe because slugs are never reused (spec §8.1), so
+/// worktrees never collide on a branch name. Parallel tasks (spec §4) do
+/// share `refs/remotes/origin/*`, so two subagents fetching at the same
+/// instant can see a transient ref-lock error; a retry clears it.
 pub fn subagents_root(director: &Path) -> PathBuf {
     director.join(".dashboard").join("subagents")
 }
