@@ -36,6 +36,12 @@ pub enum EventKind {
     Explored,
     Retired,
     SessionDied,
+    /// A task agent was launched to post (or review) a task (spec §17).
+    AgentLaunched,
+    /// A task agent's report: its verdict on a post, review or question.
+    AgentReport,
+    /// A task agent's session died before its task finished.
+    AgentDied,
     PlayerError,
 }
 
@@ -52,6 +58,9 @@ impl EventKind {
             EventKind::Explored => "explored",
             EventKind::Retired => "retired",
             EventKind::SessionDied => "session_died",
+            EventKind::AgentLaunched => "agent_launched",
+            EventKind::AgentReport => "agent_report",
+            EventKind::AgentDied => "agent_died",
             EventKind::PlayerError => "player_error",
         }
     }
@@ -97,6 +106,11 @@ impl Event {
             EventKind::Explored => None, // informational: the spike is concluded
             EventKind::Retired => None, // informational
             EventKind::SessionDied => Some(format!("dashboard relaunch {slug} or retire")),
+            EventKind::AgentLaunched => None, // informational: the task agent posts or reviews it
+            EventKind::AgentReport => Some(format!(
+                "accept: commit `accept: {slug}` with its why as the body; unsure: `dashboard ask {slug} \"...\"` or take it to the operator; posted, sent-back, answer: nothing to do"
+            )),
+            EventKind::AgentDied => Some(format!("dashboard relaunch {slug} --agent")),
             EventKind::PlayerError => None, // the message is the whole story
         }
     }

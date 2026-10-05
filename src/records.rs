@@ -26,6 +26,9 @@ pub enum Actor {
     Director,
     Subagent,
     Player,
+    /// A task's task agent (spec §17): posts and sends back on the
+    /// director's behalf, from its own clone.
+    TaskAgent,
 }
 
 /// The kind of commit an import note attaches to. Director-on-main paths
@@ -310,6 +313,61 @@ pub fn record_conflict(hub: &Git, tip: &str, main: &str, paths: &[String]) -> Re
 /// branch tip carries one.
 pub fn conflict(hub: &Git, tip: &str) -> Option<ConflictRecord> {
     serde_json::from_str(&hub.notes_show(CONFLICTS_NOTES_REF, tip)?).ok()
+}
+
+// --------------------------------------------------------------------------
+// Task agents (spec §17): refs/dashboard/agent/<slug>,
+// refs/dashboard/agent-asked/<slug>, refs/notes/dashboard-agent-reports
+// --------------------------------------------------------------------------
+
+const AGENT_REPORTS_NOTES_REF: &str = "refs/notes/dashboard-agent-reports";
+
+/// Records that `slug`'s task agent was launched, at the task tip `commit`.
+pub fn set_agent_launched(hub: &Git, slug: &str, commit: &str) -> Result<(), String> {
+    hub.update_ref(&format!("refs/dashboard/agent/{slug}"), commit).map_err(|e| e.to_string())
+}
+
+/// Whether `slug`'s task agent was ever launched (it is launched at most once;
+/// `dashboard relaunch --agent` restarts it by hand).
+pub fn agent_launched(hub: &Git, slug: &str) -> bool {
+    hub.ref_exists(&format!("refs/dashboard/agent/{slug}"))
+}
+
+/// Records that the task agent was asked to review the tested tip `commit`.
+pub fn set_agent_asked(hub: &Git, slug: &str, commit: &str) -> Result<(), String> {
+    hub.update_ref(&format!("refs/dashboard/agent-asked/{slug}"), commit).map_err(|e| e.to_string())
+}
+
+/// The tested tip the task agent was last asked to review.
+pub fn agent_asked(hub: &Git, slug: &str) -> Option<String> {
+    hub.rev_parse(&format!("refs/dashboard/agent-asked/{slug}"))
+}
+
+/// One report a task agent handed the player (its fixed return block),
+/// noted on the task tip it was read at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReport {
+    /// `posted`, `accept`, `sent-back`, `unsure`, or `answer` for a reply to
+    /// `dashboard ask`; `unknown` when the block has no recognized verdict.
+    pub verdict: String,
+    pub text: String,
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// Appends `report` to the reports noted on `tip`.
+pub fn record_agent_report(hub: &Git, tip: &str, mut report: AgentReport) -> Result<AgentReport, String> {
+    report.at = now_unix();
+    let mut all = agent_reports(hub, tip);
+    all.push(report.clone());
+    let json = serde_json::to_string(&all).map_err(|e| e.to_string())?;
+    hub.notes_add(AGENT_REPORTS_NOTES_REF, tip, &json).map_err(|e| e.to_string())?;
+    Ok(report)
+}
+
+/// Every report noted on `commit`, oldest first.
+pub fn agent_reports(hub: &Git, commit: &str) -> Vec<AgentReport> {
+    hub.notes_show(AGENT_REPORTS_NOTES_REF, commit).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
 // --------------------------------------------------------------------------

@@ -49,6 +49,7 @@ fn actor_label(actor: Actor) -> &'static str {
         Actor::Director => "director",
         Actor::Subagent => "subagent",
         Actor::Player => "player",
+        Actor::TaskAgent => "task agent",
     }
 }
 
@@ -157,7 +158,12 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
         out.push(none_line(color));
     } else {
         for t in &ready {
-            out.push(format!("  {}  {}", style(&t.slug, &[c::CYAN], color), truncate(&t.config.title, width.saturating_sub(t.slug.chars().count()).saturating_sub(6))));
+            let agent = match &t.agent {
+                Some(a) if a.alive => style("  (task agent posting)", &[c::DIM], color),
+                Some(_) => style("  (task agent dead)", &[c::RED], color),
+                None => String::new(),
+            };
+            out.push(format!("  {}  {}{agent}", style(&t.slug, &[c::CYAN], color), truncate(&t.config.title, width.saturating_sub(t.slug.chars().count()).saturating_sub(6))));
         }
     }
     out.push(String::new());
@@ -369,6 +375,13 @@ fn render_in_flight(out: &mut Vec<String>, state: &HubState, t: &TaskState, colo
     let session = crate::state::tmux_session_name(&state.project, &t.slug);
     let alive = if t.alive { style("alive", &[c::GREEN], color) } else { style("dead", &[c::RED], color) };
     out.push(format!("  session: {session} ({alive})"));
+
+    if let Some(agent) = &t.agent {
+        let session = crate::state::tmux_session_name(&state.project, &crate::state::agent_key(&t.slug));
+        let alive = if agent.alive { style("alive", &[c::GREEN], color) } else { style("dead", &[c::RED], color) };
+        let verdict = agent.report.as_ref().map(|r| format!(", reported: {}", r.verdict)).unwrap_or_default();
+        out.push(format!("  task agent: {session} ({alive}){verdict}"));
+    }
 }
 
 fn format_suite(suite: &SuiteResult) -> String {
@@ -431,6 +444,7 @@ mod tests {
             spike: None,
             flaky: 0,
             conflict: None,
+            agent: None,
         }
     }
 
@@ -554,6 +568,17 @@ mod tests {
         assert!(out.contains("unit: pass (1/1)"), "{out}");
         assert!(out.contains("dash-widget-wip"), "{out}");
         assert!(out.contains("alive"), "{out}");
+    }
+
+    #[test]
+    fn in_flight_and_ready_show_the_task_agent() {
+        let mut t = task("a", "p1", Status::Tested);
+        t.agent = Some(crate::state::AgentState { alive: true, report: Some(crate::records::AgentReport { verdict: "accept".to_string(), text: String::new(), at: 0 }) });
+        let mut r = task("b", "p1", Status::Ready);
+        r.agent = Some(crate::state::AgentState { alive: true, report: None });
+        let out = render_plain(&hub_state(vec![t, r]));
+        assert!(out.contains("task agent: dash-widget-a_agent (alive), reported: accept"), "{out}");
+        assert!(out.contains("(task agent posting)"), "{out}");
     }
 
     #[test]

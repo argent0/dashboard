@@ -35,11 +35,16 @@ impl DirectorRepo {
     }
 }
 
+/// Appended to every fixture `roadmap.toml`: these tests drive the
+/// director's own posts and send-backs, so task agents (spec §17) are off
+/// unless a test turns them on.
+pub const NO_TASK_AGENTS: &str = "\n[player]\ntask_agent_cmd = \"\"\n";
+
 pub fn director_repo() -> DirectorRepo {
     let dir = TempDir::new().expect("tempdir");
     init_git_identity(dir.path());
 
-    write_file(dir.path(), "roadmap.toml", "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n");
+    write_file(dir.path(), "roadmap.toml", &format!("title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"));
     write_file(dir.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n");
     commit(dir.path(), "initial roadmap and test suite");
 

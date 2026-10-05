@@ -77,6 +77,18 @@ enum Command {
     Relaunch {
         /// The task's slug.
         slug: String,
+        /// Restart the task's task agent (spec.md §17) instead of its subagent.
+        #[arg(long)]
+        agent: bool,
+    },
+    /// Paste a question from the director into a task agent's session
+    /// (spec.md §17); its answer arrives as an `agent_report` event.
+    Ask {
+        /// The task's slug.
+        slug: String,
+        /// The question.
+        #[arg(required = true, num_args = 1..)]
+        question: Vec<String>,
     },
     /// The director's listener: blocks until the player appends a new event,
     /// prints every event past the cursor, advances it, and exits (step 7 —
@@ -100,7 +112,8 @@ fn main() {
         Some(Command::Status) | None => run_status(args.home, args.no_color, args.width),
         Some(Command::Watch { interval }) => run_watch(args.home, args.no_color, args.width, interval),
         Some(Command::Player { once, interval }) => run_player(args.home, once, interval),
-        Some(Command::Relaunch { slug }) => run_relaunch(args.home, &slug),
+        Some(Command::Relaunch { slug, agent }) => run_relaunch(args.home, &slug, agent),
+        Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
     }
 }
@@ -321,7 +334,36 @@ fn run_player(home: Option<PathBuf>, once: bool, interval: u64) {
 // dashboard relaunch
 // --------------------------------------------------------------------------
 
-fn run_relaunch(home: Option<PathBuf>, slug: &str) {
+fn run_relaunch(home: Option<PathBuf>, slug: &str, agent: bool) {
+    let mut player = open_player(home);
+    let result = if agent { player.relaunch_agent(slug) } else { player.relaunch(slug) };
+    match result {
+        Ok(()) if agent => println!("relaunched task/{slug}'s task agent"),
+        Ok(()) => println!("relaunched task/{slug}"),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// dashboard ask
+// --------------------------------------------------------------------------
+
+fn run_ask(home: Option<PathBuf>, slug: &str, question: &str) {
+    let mut player = open_player(home);
+    match player.ask(slug, question) {
+        Ok(()) => println!("asked task/{slug}'s task agent; its answer arrives as an agent_report event (dashboard wait)"),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Resolves the home and opens a tmux-backed player, exiting on error.
+fn open_player(home: Option<PathBuf>) -> player::Player<player::TmuxSessions> {
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -337,15 +379,8 @@ fn run_relaunch(home: Option<PathBuf>, slug: &str) {
         }
     };
     let sessions = build_sessions(&home);
-    let mut player = match player::Player::open(home, sessions) {
+    match player::Player::open(home, sessions) {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-    };
-    match player.relaunch(slug) {
-        Ok(()) => println!("relaunched task/{slug}"),
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);

@@ -89,12 +89,23 @@ impl StrikeLimits {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PlayerConfig {
+    /// Launches a task's implementing subagent (spec §9's launch row).
     pub agent_cmd: String,
+    /// Launches a task's task agent, the director's delegate that posts and
+    /// reviews it (spec §17). Empty turns task agents off: the director
+    /// posts and sends back itself.
+    pub task_agent_cmd: String,
 }
 
 impl Default for PlayerConfig {
     fn default() -> Self {
-        Self { agent_cmd: "claude --dangerously-skip-permissions".to_string() }
+        Self { agent_cmd: "claude --dangerously-skip-permissions".to_string(), task_agent_cmd: "claude --dangerously-skip-permissions".to_string() }
+    }
+}
+
+impl PlayerConfig {
+    pub fn task_agents_enabled(&self) -> bool {
+        !self.task_agent_cmd.trim().is_empty()
     }
 }
 
@@ -387,6 +398,9 @@ pub struct TaskConfig {
     pub milestone: bool,
     pub depends_on: Vec<String>,
     pub check: Option<Check>,
+    /// The director's context for the task agent (spec §17): pasted into
+    /// its prompt verbatim.
+    pub brief: String,
     /// flaky-test-fix only: the files unpinned for this task.
     pub fix_paths: Vec<String>,
     /// flaky-test-fix only.

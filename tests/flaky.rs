@@ -105,7 +105,7 @@ fn a_higher_evidence_limit_only_strikes() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
-    write_file(repo.path(), "roadmap.toml", "title = \"t\"\n\n[[phases]]\nid = \"p1\"\n\n[limits.strikes]\nevidence = 2\n");
+    write_file(repo.path(), "roadmap.toml", &format!("title = \"t\"\n\n[[phases]]\nid = \"p1\"\n\n[limits.strikes]\nevidence = 2\n{NO_TASK_AGENTS}"));
     commit(repo.path(), "docs: raise the evidence limit");
     let mut player = Player::open(Home { root: home.root.clone() }, NullSessions::default()).unwrap();
     player.tick().unwrap();

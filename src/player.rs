@@ -224,6 +224,10 @@ pub struct TickReport {
     /// Accepts whose merge with `main` failed the suite: (slug, message).
     pub merge_failed: Vec<(String, String)>,
     pub launched: Vec<String>,
+    /// Task agents started this tick (spec §17).
+    pub agents_launched: Vec<String>,
+    /// Reports task agents handed the player this tick: (slug, report).
+    pub agent_reports: Vec<(String, records::AgentReport)>,
     pub errors: Vec<String>,
 }
 
@@ -236,6 +240,8 @@ impl TickReport {
             && self.conflicts.is_empty()
             && self.merge_failed.is_empty()
             && self.launched.is_empty()
+            && self.agents_launched.is_empty()
+            && self.agent_reports.is_empty()
             && self.errors.is_empty()
     }
 }
@@ -263,6 +269,12 @@ impl fmt::Display for TickReport {
         }
         for slug in &self.launched {
             lines.push(format!("launched {slug}"));
+        }
+        for slug in &self.agents_launched {
+            lines.push(format!("launched task agent {slug}"));
+        }
+        for (slug, r) in &self.agent_reports {
+            lines.push(format!("task agent {slug} reported: {}", r.verdict));
         }
         lines.extend(self.merges.iter().cloned());
         for err in &self.errors {
@@ -297,6 +309,9 @@ pub struct Player<S: Sessions> {
     /// "The very first run with no state file initializes silently, without
     /// emitting").
     first_run: bool,
+    /// The last stale-base commit of each task agent the player told to
+    /// rebase (`import_task_agent`), so it says so once, not every tick.
+    agent_rebase_told: BTreeMap<String, String>,
 }
 
 impl<S: Sessions> Player<S> {
@@ -308,7 +323,7 @@ impl<S: Sessions> Player<S> {
         let project = hub.config_get("dashboard.project").ok_or_else(|| "hub is missing dashboard.project — run `dashboard init`".to_string())?;
         let runner = checks::Runner::new(&home);
         let (last, first_run) = load_player_state(&home);
-        Ok(Self { home, hub, director: PathBuf::from(director), project, runner, sessions, last, first_run })
+        Ok(Self { home, hub, director: PathBuf::from(director), project, runner, sessions, last, first_run, agent_rebase_told: BTreeMap::new() })
     }
 
     /// Read access to the sessions backend, so tests using `NullSessions`
@@ -337,9 +352,11 @@ impl<S: Sessions> Player<S> {
         self.fetch()?;
         self.import_main(&mut report)?;
         self.import_task_branches(&mut report)?;
+        self.import_task_agents(&mut report)?;
         self.launch_subagents(&mut report)?;
         self.import_subagents(&mut report)?;
         self.unblock_merges(&mut report)?;
+        self.run_task_agents(&mut report)?;
         self.emit_events(&report)?;
         Ok(report)
     }
@@ -371,6 +388,13 @@ impl<S: Sessions> Player<S> {
         for (slug, msg) in &report.merge_failed {
             events::append(&self.home, EventKind::MergeFailed, Some(slug), msg)?;
         }
+        for slug in &report.agents_launched {
+            let session = state::tmux_session_name(&self.project, &state::agent_key(slug));
+            events::append(&self.home, EventKind::AgentLaunched, Some(slug), &format!("task agent launched; watch it: tmux attach -t {session}"))?;
+        }
+        for (slug, r) in &report.agent_reports {
+            events::append(&self.home, EventKind::AgentReport, Some(slug), &r.text)?;
+        }
 
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
         let mut next: BTreeMap<String, (Status, bool)> = BTreeMap::new();
@@ -379,12 +403,24 @@ impl<S: Sessions> Player<S> {
             let prev = self.last.get(&task.slug).copied();
             next.insert(task.slug.clone(), (task.status, alive));
 
+            // A task agent's liveness is tracked under its own key.
+            let finished = matches!(task.status, Status::Accepted | Status::Retired | Status::Explored);
+            if let Some(agent) = &task.agent {
+                let key = state::agent_key(&task.slug);
+                let agent_was_alive = matches!(self.last.get(&key), Some((_, true)));
+                next.insert(key, (task.status, agent.alive));
+                if !self.first_run && agent_was_alive && !agent.alive && !finished {
+                    events::append(&self.home, EventKind::AgentDied, Some(&task.slug), &format!("task/{}'s task agent session died", task.slug))?;
+                }
+            }
+
             if self.first_run {
                 continue;
             }
 
+            let managed = state::task_agent_managed(&hub_state.roadmap, &task.config);
             if prev.map(|(s, _)| s) != Some(task.status) {
-                if let Some((kind, message)) = status_event(task) {
+                if let Some((kind, message)) = status_event(task, managed) {
                     events::append(&self.home, kind, Some(&task.slug), &message)?;
                 }
             }
@@ -728,12 +764,17 @@ impl<S: Sessions> Player<S> {
             return self.try_marker(slug, tip, candidate, cumulative_empty, status, report);
         }
 
+        let managed = hub_state.tasks.iter().find(|t| t.slug == slug).is_some_and(|t| state::task_agent_managed(&hub_state.roadmap, &t.config));
         match status {
             Some(Status::Pending | Status::Ready | Status::Orphaned) => {
                 let prompt_path = format!("tasks/{slug}/prompt.md");
                 let has_prompt = self.hub.blob_hash(candidate, &prompt_path).is_some();
+                if has_prompt && managed {
+                    let msg = format!("task/{slug}'s post is its task agent's (spec §17), not the director's; with `[player] task_agent_cmd = \"\"` the director posts itself");
+                    return self.reject(slug, candidate, Reason::Ownership, msg, report);
+                }
                 if has_prompt {
-                    return self.try_post(slug, tip, candidate, status.unwrap(), &hub_state, report);
+                    return self.try_post(slug, tip, candidate, status.unwrap(), &hub_state, Actor::Director, report);
                 }
                 let task_toml_path = format!("tasks/{slug}/task.toml");
                 if diffs.len() == 1 && diffs[0].1 == task_toml_path {
@@ -746,7 +787,11 @@ impl<S: Sessions> Player<S> {
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
             Some(Status::Tested) if records::is_spike_at(&self.hub, tip, slug) => self.try_spike_send_back(slug, tip, candidate, &diffs, &hub_state, report),
-            Some(Status::Tested) => self.try_send_back(slug, tip, candidate, &diffs, &hub_state, report),
+            Some(Status::Tested) if managed => {
+                let msg = format!("task/{slug}'s send-backs are its task agent's (spec §17), not the director's: accept, or ask it (`dashboard ask {slug}`)");
+                self.reject(slug, candidate, Reason::Ownership, msg, report)
+            }
+            Some(Status::Tested) => self.try_send_back(slug, tip, candidate, &diffs, &hub_state, Actor::Director, report),
             Some(Status::Conflicted) => {
                 let main = hub_state.tasks.iter().find(|t| t.slug == slug).and_then(|t| t.conflict.as_ref()).map(|c| c.main.clone()).unwrap_or_default();
                 let msg = format!("task/{slug} is conflicted: resolve it with a merge of main {main} on the hub's task tip (or retire it)");
@@ -766,8 +811,22 @@ impl<S: Sessions> Player<S> {
     /// Records a rejection under `reason` for `candidate` and pushes it onto
     /// the report. Shared by every `try_existing` sub-handler's error path.
     fn reject(&mut self, slug: &str, candidate: &str, reason: Reason, msg: String, report: &mut TickReport) -> Result<(), String> {
-        let rec = records::record_rejection(&self.hub, slug, candidate, reason, Actor::Director, &msg)?;
+        self.reject_by(Actor::Director, slug, candidate, reason, msg, report)
+    }
+
+    /// `reject` for a commit by `actor`: a task agent's rejection is also
+    /// relayed to its session (spec §17), like a subagent's; a director's
+    /// never is.
+    fn reject_by(&mut self, actor: Actor, slug: &str, candidate: &str, reason: Reason, msg: String, report: &mut TickReport) -> Result<(), String> {
+        let rec = records::record_rejection(&self.hub, slug, candidate, reason, actor, &msg)?;
         report.rejected.push(rec);
+        if actor == Actor::TaskAgent {
+            let recovery = match reason {
+                Reason::History => format!("git fetch origin && git reset --hard origin/task/{slug}, then redo your commit"),
+                _ => format!("fix it with a new commit on top, or git reset --hard origin/task/{slug} and redo it"),
+            };
+            self.sessions.send(&state::agent_key(slug), &format!("The player rejected your commit.\n\n{msg}\n\nRecovery: {recovery}"));
+        }
         Ok(())
     }
 
@@ -803,7 +862,7 @@ impl<S: Sessions> Player<S> {
 
     // ---- post (spec §9, §6.3) ----
 
-    fn try_post(&mut self, slug: &str, tip: &str, candidate: &str, status: Status, hub_state: &state::HubState, report: &mut TickReport) -> Result<(), String> {
+    fn try_post(&mut self, slug: &str, tip: &str, candidate: &str, status: Status, hub_state: &state::HubState, actor: Actor, report: &mut TickReport) -> Result<(), String> {
         // A flake that doesn't reproduce is `evidence`, not `post`: the
         // director made no structural mistake (it has its own strike limit,
         // 1 by default, and the player retires the task itself).
@@ -822,7 +881,7 @@ impl<S: Sessions> Player<S> {
             Ok(()) => {
                 let hub_ref = format!("refs/heads/task/{slug}");
                 self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
-                records::record_import(&self.hub, candidate, Actor::Director, Transition::Post, Some(slug))?;
+                records::record_import(&self.hub, candidate, actor, Transition::Post, Some(slug))?;
                 report.imported.push((hub_ref, candidate.to_string(), Transition::Post));
                 // Launching the subagent clone + tmux session happens in
                 // `launch_subagents`, later in the same tick (spec §8.3): it
@@ -830,7 +889,7 @@ impl<S: Sessions> Player<S> {
                 // now is.
             }
             Err(msg) => {
-                self.reject(slug, candidate, reason, msg.clone(), report)?;
+                self.reject_by(actor, slug, candidate, reason, msg.clone(), report)?;
                 if reason == Reason::Evidence {
                     let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
                     let strikes = hub_state.tasks.iter().find(|t| t.slug == slug).and_then(|t| t.strikes.get(&Reason::Evidence).copied()).unwrap_or(0);
@@ -867,8 +926,7 @@ impl<S: Sessions> Player<S> {
         records::record_import(&self.hub, &marker, Actor::Player, Transition::Retire, Some(slug))?;
         report.imported.push((format!("refs/retired/{slug}"), marker, Transition::Retire));
 
-        self.sessions.kill(slug);
-        self.cleanup_subagent_clone(slug);
+        self.end_task_sessions(slug);
         Ok(())
     }
 
@@ -945,7 +1003,7 @@ impl<S: Sessions> Player<S> {
     /// instead of importing; and the project suite must now *fail* (spec
     /// §3.1's evidence requirement for a send-back). On success, re-pins and
     /// relays the review note to the subagent's session (spec §8.3).
-    fn try_send_back(&mut self, slug: &str, tip: &str, candidate: &str, diffs: &[(char, String)], hub_state: &state::HubState, report: &mut TickReport) -> Result<(), String> {
+    fn try_send_back(&mut self, slug: &str, tip: &str, candidate: &str, diffs: &[(char, String)], hub_state: &state::HubState, actor: Actor, report: &mut TickReport) -> Result<(), String> {
         let task = hub_state.tasks.iter().find(|t| t.slug == slug).ok_or_else(|| format!("send-back: task/{slug}: no task state"))?;
         let n = task.review_round;
         let expected_path = format!("tasks/{slug}/reviews/r{}.md", n + 1);
@@ -957,10 +1015,10 @@ impl<S: Sessions> Player<S> {
         if !added_expected_file {
             if !added_a_review_file {
                 let msg = format!("task/{slug}'s commit doesn't add a review file (expected {expected_path})");
-                return self.reject(slug, candidate, Reason::Ownership, msg, report);
+                return self.reject_by(actor, slug, candidate, Reason::Ownership, msg, report);
             }
             let msg = format!("send-back: task/{slug}: expected review round {} to add {expected_path}", n + 1);
-            return self.reject(slug, candidate, Reason::Review, msg, report);
+            return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
 
         let test_paths = self.hub.show_file(candidate, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).map(|c| c.test_paths).unwrap_or_default();
@@ -970,7 +1028,7 @@ impl<S: Sessions> Player<S> {
                 continue;
             }
             let msg = format!("send-back: task/{slug}: a send-back may only add the review note and tests, not {path:?}");
-            return self.reject(slug, candidate, Reason::Review, msg, report);
+            return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
 
         let round = n + 1;
@@ -985,12 +1043,12 @@ impl<S: Sessions> Player<S> {
         self.note_flakes(slug, candidate, &suite);
         if suite.pass {
             let msg = format!("send-back: task/{slug}: send-back without evidence: the project suite still passes");
-            return self.reject(slug, candidate, Reason::Review, msg, report);
+            return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
 
         let hub_ref = format!("refs/heads/task/{slug}");
         self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, Actor::Director, Transition::SendBack, Some(slug))?;
+        records::record_import(&self.hub, candidate, actor, Transition::SendBack, Some(slug))?;
         report.imported.push((hub_ref, candidate.to_string(), Transition::SendBack));
 
         records::set_pins(&self.hub, slug, candidate)?;
@@ -1103,8 +1161,7 @@ Make the whole suite pass and commit. The pinned files are re-pinned at the merg
         // The task branch itself stays in the hub as a permanent record
         // (spec §9); only the subagent's live session and its now-unneeded
         // worktree end.
-        self.sessions.kill(slug);
-        self.cleanup_subagent_clone(slug);
+        self.end_task_sessions(slug);
         Ok(())
     }
 
@@ -1348,8 +1405,7 @@ Answer it in one new commit adding {} and {}.",
         records::record_exploration(&self.hub, candidate, records::ExplorationNote { concluded: true, ..note })?;
         report.imported.push((format!("refs/explored/{slug}"), candidate.to_string(), Transition::Conclude));
 
-        self.sessions.kill(slug);
-        self.cleanup_subagent_clone(slug);
+        self.end_task_sessions(slug);
         Ok(())
     }
 
@@ -1377,8 +1433,7 @@ Answer it in one new commit adding {} and {}.",
         records::record_import(&self.hub, candidate, Actor::Director, Transition::Retire, Some(slug))?;
         report.imported.push((format!("refs/retired/{slug}"), candidate.to_string(), Transition::Retire));
 
-        self.sessions.kill(slug);
-        self.cleanup_subagent_clone(slug);
+        self.end_task_sessions(slug);
         Ok(())
     }
 
@@ -1574,6 +1629,13 @@ Answer it in one new commit adding {} and {}.",
     /// branch; the player is the only process touching the workspace, one
     /// git command at a time.
     fn create_subagent_clone(&self, slug: &str, clone_dir: &Path) -> Result<(), String> {
+        self.add_worktree(&format!("task/{slug}"), slug, clone_dir)
+    }
+
+    /// `create_subagent_clone`'s mechanics for any agent: a worktree of the
+    /// shared workspace at `clone_dir`, on the local branch `branch`, started
+    /// at the hub's `task/<slug>`.
+    fn add_worktree(&self, branch: &str, slug: &str, clone_dir: &Path) -> Result<(), String> {
         let workspace_dir = paths::subagent_workspace(&self.director);
         if !workspace_dir.join(".git").exists() {
             if let Some(parent) = workspace_dir.parent() {
@@ -1593,7 +1655,7 @@ Answer it in one new commit adding {} and {}.",
         }
         let clone_str = path_str(clone_dir)?;
         workspace
-            .run(&["worktree", "add", "--quiet", "-B", &format!("task/{slug}"), clone_str, &format!("origin/task/{slug}")])
+            .run(&["worktree", "add", "--quiet", "-B", branch, clone_str, &format!("origin/task/{slug}")])
             .map_err(|e| format!("git worktree add: {e}"))?;
         Ok(())
     }
@@ -1627,7 +1689,24 @@ Answer it in one new commit adding {} and {}.",
     /// succeeded by the time this runs, so it's too late for this to be a
     /// rejection.
     fn cleanup_subagent_clone(&self, slug: &str) {
-        let clone_dir = paths::subagent_clone(&self.director, slug);
+        self.remove_worktree(&paths::subagent_clone(&self.director, slug), &format!("task/{slug}"));
+    }
+
+    /// Ends every session a finished task (accepted, retired, concluded) still
+    /// has, its subagent's and its task agent's (spec §17), and removes both
+    /// worktrees.
+    fn end_task_sessions(&mut self, slug: &str) {
+        self.sessions.kill(slug);
+        self.cleanup_subagent_clone(slug);
+        if records::agent_launched(&self.hub, slug) {
+            self.sessions.kill(&state::agent_key(slug));
+            self.remove_worktree(&paths::agent_clone(&self.director, slug), &format!("agent/{slug}"));
+        }
+    }
+
+    /// `cleanup_subagent_clone`'s mechanics for any agent's worktree and its
+    /// local branch.
+    fn remove_worktree(&self, clone_dir: &Path, branch: &str) {
         if !clone_dir.exists() {
             return;
         }
@@ -1636,17 +1715,17 @@ Answer it in one new commit adding {} and {}.",
             return;
         }
         let workspace = Git::new(&workspace_dir);
-        let Ok(clone_str) = path_str(&clone_dir) else {
-            eprintln!("dashboard: task/{slug}'s clone {} is not valid UTF-8, leaving it in place", clone_dir.display());
+        let Ok(clone_str) = path_str(clone_dir) else {
+            eprintln!("dashboard: worktree {} is not valid UTF-8, leaving it in place", clone_dir.display());
             return;
         };
         if let Err(e) = workspace.run(&["worktree", "remove", "--force", clone_str]) {
-            eprintln!("dashboard: removing task/{slug}'s worktree: {e}");
+            eprintln!("dashboard: removing worktree {}: {e}", clone_dir.display());
             return;
         }
         // Now safe to drop: the worktree that checked it out is gone, and
         // the hub's own ref is the permanent record, not this one.
-        let _ = workspace.run(&["branch", "-D", &format!("task/{slug}")]);
+        let _ = workspace.run(&["branch", "-D", branch]);
     }
 
     /// Writes the player's preamble plus `tasks/<slug>/prompt.md` at `tip`
@@ -1909,6 +1988,356 @@ Answer it in one new commit adding {} and {}.",
         Ok(())
     }
 
+    // ---- task agents (spec §17) ----
+
+    /// Every live task with a task agent: fetch its `agent/<slug>` and
+    /// validate what's new there as the task agent's post or send-back.
+    fn import_task_agents(&mut self, report: &mut TickReport) -> Result<(), String> {
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let candidates: Vec<(String, String)> = hub_state
+            .tasks
+            .iter()
+            .filter(|t| t.agent.is_some() && !matches!(t.status, Status::Accepted | Status::Retired | Status::Explored))
+            .map(|t| (t.slug.clone(), t.tip.clone()))
+            .collect();
+        for (slug, hub_tip) in candidates {
+            let clone_dir = paths::agent_clone(&self.director, &slug);
+            if clone_dir.exists() {
+                self.import_task_agent(&slug, &hub_tip, &clone_dir, report)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `import_subagent`'s shape for a task agent's clone. One difference: the
+    /// hub's task branch can move under a commit the player hasn't imported
+    /// yet (`main` merged into a ready task, a replan). That isn't the
+    /// agent's doing, so it's asked to rebase, once per commit, with no
+    /// strike. Rewriting a commit the player already imported from it is
+    /// `history`, as for anyone.
+    fn import_task_agent(&mut self, slug: &str, hub_tip: &str, clone_dir: &Path, report: &mut TickReport) -> Result<(), String> {
+        let clone_str = path_str(clone_dir)?;
+        let incoming_ref = format!("refs/incoming/agent/{slug}");
+        if self.hub.run(&["fetch", "--no-tags", clone_str, &format!("+refs/heads/agent/{slug}:{incoming_ref}")]).is_err() {
+            return Ok(());
+        }
+        let Some(incoming) = self.hub.rev_parse(&incoming_ref) else { return Ok(()) };
+        if self.hub.is_ancestor(&incoming, hub_tip) || records::is_rejected(&self.hub, &incoming) {
+            return Ok(());
+        }
+        if !self.hub.is_ancestor(hub_tip, &incoming) {
+            let base = self.hub.run(&["merge-base", hub_tip, &incoming]).unwrap_or_default();
+            let rewrote_imported = base.is_empty()
+                || self.hub.rev_list(&[&format!("{base}..{hub_tip}")]).iter().any(|c| records::import_note(&self.hub, c).is_some_and(|n| n.actor == Actor::TaskAgent));
+            if rewrote_imported {
+                let msg = format!("history: agent/{slug} diverged from the hub: a commit the player imported from you was rewritten");
+                return self.reject_by(Actor::TaskAgent, slug, &incoming, Reason::History, msg, report);
+            }
+            if self.agent_rebase_told.get(slug) != Some(&incoming) {
+                self.sessions.send(
+                    &state::agent_key(slug),
+                    &format!(
+                        "task/{slug} moved on the hub under your commit (main merged in, or a replan). Nothing was rejected: \
+run git fetch origin && git rebase origin/task/{slug}, re-run the task's check if your post is affected, and leave the result committed."
+                    ),
+                );
+                self.agent_rebase_told.insert(slug.to_string(), incoming);
+            }
+            return Ok(());
+        }
+        if self.hub.rev_list(&[&format!("{hub_tip}..{incoming}")]).iter().any(|c| self.hub.parents(c).len() > 1) {
+            let msg = format!("history: agent/{slug} contains a merge commit; only the player creates merges");
+            return self.reject_by(Actor::TaskAgent, slug, &incoming, Reason::History, msg, report);
+        }
+        self.try_agent_commit(slug, hub_tip, &incoming, report)
+    }
+
+    /// The newest commit a task agent made, validated as one cumulative
+    /// change from the hub tip: its post while the task is ready, a
+    /// send-back while it's tested. Either may touch only tests, the suite
+    /// files and `tasks/<slug>/` (with `[check]` the only part of `task.toml`
+    /// it may change), and it never commits a marker (spec §17).
+    fn try_agent_commit(&mut self, slug: &str, tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let Some(task) = hub_state.tasks.iter().find(|t| t.slug == slug) else { return Ok(()) };
+        let status = task.status;
+
+        if self.hub.is_empty_commit(candidate) {
+            let msg = format!("ownership: task/{slug}: a task agent never commits a marker; accept:/retire: are the director's, so recommend in your report instead");
+            return self.reject_by(Actor::TaskAgent, slug, candidate, Reason::Ownership, msg, report);
+        }
+        let diffs = self.hub.diff_names(tip, candidate);
+        if let Err(msg) = self.agent_paths_ok(slug, tip, candidate, &diffs) {
+            return self.reject_by(Actor::TaskAgent, slug, candidate, Reason::Ownership, msg, report);
+        }
+
+        let step = match status {
+            Status::Pending | Status::Ready | Status::Orphaned => {
+                if self.hub.blob_hash(candidate, &format!("tasks/{slug}/prompt.md")).is_none() {
+                    let msg = format!("ownership: task/{slug} isn't posted yet and this commit adds no tasks/{slug}/prompt.md: your only commit now is the post");
+                    return self.reject_by(Actor::TaskAgent, slug, candidate, Reason::Ownership, msg, report);
+                }
+                self.try_post(slug, tip, candidate, status, &hub_state, Actor::TaskAgent, report)?;
+                "post"
+            }
+            Status::Tested if task.spike.is_none() => {
+                self.try_send_back(slug, tip, candidate, &diffs, &hub_state, Actor::TaskAgent, report)?;
+                "send-back"
+            }
+            other => {
+                let msg = format!("ownership: task/{slug} is {}: there is nothing for its task agent to commit now", other.as_str());
+                return self.reject_by(Actor::TaskAgent, slug, candidate, Reason::Ownership, msg, report);
+            }
+        };
+
+        let key = state::agent_key(slug);
+        if report.imported.iter().any(|(_, sha, _)| sha == candidate) {
+            let next = if step == "post" { "the subagent is launched" } else { "the review is relayed to the subagent" };
+            self.sessions.send(
+                &key,
+                &format!("The player imported your {step} at {}; {next}. Write your report if you haven't yet, then wait: the player pastes the next review request here.", short(candidate)),
+            );
+        } else if let Some((_, cause)) = report.escalated.iter().find(|(s, _)| s == slug) {
+            self.sessions.send(&key, &format!("task/{slug} is escalated ({cause}). Stop here: the director decides with the operator and may ask you about it."));
+        }
+        Ok(())
+    }
+
+    /// Where a task agent may write: `tests.toml`, `tests.d/`, the hub's
+    /// `test_paths` (read at `tip`, so a commit can't widen them for itself)
+    /// and `tasks/<slug>/`; and in `task.toml` only `[check]`, the rest
+    /// being the director's plan.
+    fn agent_paths_ok(&self, slug: &str, tip: &str, candidate: &str, diffs: &[(char, String)]) -> Result<(), String> {
+        let test_paths = self.hub.show_file(tip, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).map(|c| c.test_paths).unwrap_or_default();
+        let task_prefix = format!("tasks/{slug}/");
+        for (_, path) in diffs {
+            if !(path == "tests.toml" || config::is_suite_fragment(path) || path.starts_with(&task_prefix) || path_under_test_paths(path, &test_paths)) {
+                return Err(format!("ownership: task/{slug}: a task agent writes tests, the prompt and reviews, never {path:?}: the code is the subagent's"));
+            }
+        }
+        let toml_path = format!("tasks/{slug}/task.toml");
+        if diffs.iter().any(|(_, p)| *p == toml_path) {
+            let plan = |c: &str| {
+                self.hub.show_file(c, &toml_path).and_then(|t| toml::from_str::<toml::Table>(&t).ok()).map(|mut t| {
+                    t.remove("check");
+                    t
+                })
+            };
+            if plan(tip) != plan(candidate) {
+                return Err(format!("ownership: task/{slug}: in task.toml a task agent may only set [check]; the rest is the director's plan"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Launches a task agent for every agent-managed task that is ready (to
+    /// post it) or tested (to review it) and has none yet; asks a running one
+    /// to review each newly tested tip; and collects every report a task
+    /// agent left (spec §17).
+    fn run_task_agents(&mut self, report: &mut TickReport) -> Result<(), String> {
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        for task in &hub_state.tasks {
+            let step = match task.status {
+                Status::Ready => Some(AgentStep::Post),
+                Status::Tested => Some(AgentStep::Review),
+                _ => None,
+            };
+            if let Some(step) = step.filter(|_| state::task_agent_managed(&hub_state.roadmap, &task.config)) {
+                if task.agent.is_none() {
+                    self.launch_task_agent(task, step, &hub_state.roadmap, report)?;
+                } else if step == AgentStep::Review && records::agent_asked(&self.hub, &task.slug).as_deref() != Some(task.tip.as_str()) {
+                    records::set_agent_asked(&self.hub, &task.slug, &task.tip)?;
+                    let text = self.agent_step_text(task, step, &hub_state.roadmap);
+                    self.sessions.send(&state::agent_key(&task.slug), &text);
+                }
+            }
+            if !matches!(task.status, Status::Accepted | Status::Retired | Status::Explored) {
+                self.collect_agent_report(&task.slug, &task.tip, report)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn launch_task_agent(&mut self, task: &state::TaskState, step: AgentStep, roadmap: &RoadmapConfig, report: &mut TickReport) -> Result<(), String> {
+        let slug = &task.slug;
+        // Recorded first, so a launch that fails below is never retried
+        // every tick (as for subagents; `dashboard relaunch --agent`).
+        records::set_agent_launched(&self.hub, slug, &task.tip)?;
+        if step == AgentStep::Review {
+            records::set_agent_asked(&self.hub, slug, &task.tip)?;
+        }
+
+        let dir = paths::agent_clone(&self.director, slug);
+        if dir.exists() {
+            report.errors.push(format!("task agent: task/{slug}: {} already exists — refusing to touch a leftover agent clone", dir.display()));
+            return Ok(());
+        }
+        if let Err(e) = self.add_worktree(&format!("agent/{slug}"), slug, &dir) {
+            report.errors.push(format!("task agent: task/{slug}: {e}"));
+            return Ok(());
+        }
+        let prompt_file = match Self::git_dir(&dir) {
+            Ok(d) => d.join("dashboard-prompt.md"),
+            Err(e) => {
+                report.errors.push(format!("task agent: task/{slug}: {e}"));
+                return Ok(());
+            }
+        };
+        if let Err(e) = self.write_agent_prompt(task, step, roadmap, &dir, &prompt_file, false) {
+            report.errors.push(format!("task agent: task/{slug}: {e}"));
+            return Ok(());
+        }
+        match self.sessions.launch(&state::agent_key(slug), &dir, &roadmap.player.task_agent_cmd, &prompt_file) {
+            Ok(()) => report.agents_launched.push(slug.clone()),
+            Err(e) => report.errors.push(format!("task agent: task/{slug}: {e}")),
+        }
+        Ok(())
+    }
+
+    /// The task agent's prompt: the player's preamble (its role and rules,
+    /// the task, the report format), then the step it starts on.
+    fn write_agent_prompt(&self, task: &state::TaskState, step: AgentStep, roadmap: &RoadmapConfig, dir: &Path, prompt_file: &Path, relaunched: bool) -> Result<(), String> {
+        let report_file = Self::git_dir(dir)?.join("dashboard-report.md");
+        let toml = self.hub.show_file(&task.tip, &format!("tasks/{}/task.toml", task.slug)).unwrap_or_default();
+        let goal = roadmap.phases.iter().find(|p| p.id == task.config.phase).and_then(|p| p.goal.clone()).unwrap_or_default();
+        let mut text = agent_preamble(&task.slug, &self.project, &task.config, &toml, &goal, &report_file);
+        if relaunched {
+            text.push_str(&format!(
+                "\n\nYou were relaunched: an earlier session's context is gone. Rebuild what you need from the repo: tasks/{}/ (task.toml, prompt.md, reviews/) on origin/task/{} and its history.",
+                task.slug, task.slug
+            ));
+        }
+        text.push_str(&format!("\n\n---\n\n{}", self.agent_step_text(task, step, roadmap)));
+        std::fs::write(prompt_file, text).map_err(|e| format!("{}: {e}", prompt_file.display()))
+    }
+
+    /// What the task agent is asked to do now: the post, a review round, or
+    /// nothing until the player pastes a step.
+    fn agent_step_text(&self, task: &state::TaskState, step: AgentStep, roadmap: &RoadmapConfig) -> String {
+        let slug = &task.slug;
+        match step {
+            AgentStep::Post => {
+                let check = if task.config.kind == TaskKind::FlakyTestFix {
+                    "- nothing in tests.d/: this is a flaky-test-fix (spec §15), whose [check] and [[evidence]] are already in its plan and stay out of the suite. \
+Your post is prompt.md, plus any test files its check needs that don't exist yet;"
+                        .to_string()
+                } else {
+                    format!(
+                        "- its [check] in tasks/{slug}/task.toml (unless the plan already has one) and the same check in tests.d/{slug}.toml \
+(same name, cmd, runs and min_pass; check names are unique across the whole suite);"
+                    )
+                };
+                format!(
+                    "Step: post. task/{slug} is ready: its dependencies are accepted and merged in. Update your branch first: \
+git fetch origin && git merge --ff-only origin/task/{slug}. Then make ONE commit on agent/{slug} with:\n\
+- tasks/{slug}/prompt.md: task-specific instructions for the subagent only (the player prepends its own preamble on commit \
+discipline and the pinned files), including one line telling it every test it adds must be pure;\n\
+- the task's test files, under the suite's test_paths;\n\
+{check}\n\
+- updates to any existing test this task makes stale.\n\
+Before committing, run the task's check and confirm it fails, for the reason the task exists: the player rejects a post whose \
+check already passes. Then write your report (step: post)."
+                )
+            }
+            AgentStep::Review => {
+                let round = task.review_round + 1;
+                let max = roadmap.limits.max_review_rounds;
+                let base = self.hub.rev_parse(&format!("refs/dashboard/pins/{slug}")).unwrap_or_else(|| format!("origin/task/{slug}~1"));
+                let cap = if round > max {
+                    format!("\nNo review rounds are left ({max} used): a send-back now escalates the task. Recommend accept, or report unsure.")
+                } else if round == max {
+                    "\nThis is the last round you may send back.".to_string()
+                } else {
+                    String::new()
+                };
+                format!(
+                    "Step: review round {round}. The subagent's work on task/{slug} passed the whole project suite at {tip}; the player ran \
+it, so don't re-run it. Update your branch: git fetch origin && git merge --ff-only origin/task/{slug}. Read what the subagent \
+changed this round: git diff {base} {tip}. Check that it does what the task asked, stays in scope, doesn't game its own test \
+(special-cased inputs, monkeypatching, a helper that neuters other tests), adds no impure test, and won't break the tasks after \
+it. Then either:\n\
+- recommend accept: commit nothing, report verdict: accept;\n\
+- send back: ONE commit adding tasks/{slug}/reviews/r{round}.md (what is wrong) and a new or updated test that makes the suite \
+fail again, report verdict: sent-back. A concern you can't turn into a failing test isn't a send-back: report verdict: unsure.{cap}",
+                    tip = task.tip
+                )
+            }
+            AgentStep::Wait => format!(
+                "Step: none right now. task/{slug} is {}: wait here for the player to paste your next step or a question from the director.",
+                task.status.as_str()
+            ),
+        }
+    }
+
+    /// Reads and removes the report a task agent left in its clone's git
+    /// directory, noting it on the task tip (spec §17) and reporting it.
+    fn collect_agent_report(&mut self, slug: &str, tip: &str, report: &mut TickReport) -> Result<(), String> {
+        let dir = paths::agent_clone(&self.director, slug);
+        if !dir.exists() {
+            return Ok(());
+        }
+        let Ok(file) = Self::git_dir(&dir).map(|d| d.join("dashboard-report.md")) else { return Ok(()) };
+        let Ok(text) = std::fs::read_to_string(&file) else { return Ok(()) };
+        let _ = std::fs::remove_file(&file);
+        let rec = records::record_agent_report(&self.hub, tip, records::AgentReport { verdict: report_verdict(&text), text: text.trim().to_string(), at: 0 })?;
+        report.agent_reports.push((slug.to_string(), rec));
+        Ok(())
+    }
+
+    /// Restarts `slug`'s dead task agent (`dashboard relaunch --agent`) in its
+    /// existing clone, with a fresh prompt for where the task is now.
+    pub fn relaunch_agent(&mut self, slug: &str) -> Result<(), String> {
+        if !records::agent_launched(&self.hub, slug) {
+            return Err(format!("relaunch: task/{slug} has no task agent — one is launched automatically once the task is ready"));
+        }
+        let key = state::agent_key(slug);
+        if self.sessions.alive(&key) {
+            return Err(format!("relaunch: task/{slug}'s task agent is already alive"));
+        }
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let task = hub_state.tasks.iter().find(|t| t.slug == slug).ok_or_else(|| format!("relaunch: no task {slug}"))?;
+        if matches!(task.status, Status::Accepted | Status::Retired | Status::Explored) {
+            return Err(format!("relaunch: task/{slug} is {} — its task agent is done", task.status.as_str()));
+        }
+        if !hub_state.roadmap.player.task_agents_enabled() {
+            return Err("relaunch: task agents are off (`[player] task_agent_cmd` is empty)".to_string());
+        }
+        let dir = paths::agent_clone(&self.director, slug);
+        if !dir.exists() {
+            return Err(format!("relaunch: task/{slug}'s task agent clone {} is missing", dir.display()));
+        }
+        let step = match task.status {
+            Status::Pending | Status::Ready | Status::Orphaned => AgentStep::Post,
+            Status::Tested => AgentStep::Review,
+            _ => AgentStep::Wait,
+        };
+        let prompt_file = Self::git_dir(&dir)?.join("dashboard-prompt.md");
+        self.write_agent_prompt(task, step, &hub_state.roadmap, &dir, &prompt_file, true)?;
+        if step == AgentStep::Review {
+            records::set_agent_asked(&self.hub, slug, &task.tip)?;
+        }
+        self.sessions.launch(&key, &dir, &hub_state.roadmap.player.task_agent_cmd, &prompt_file)
+    }
+
+    /// Pastes the director's `question` into `slug`'s task agent session
+    /// (`dashboard ask`); the answer comes back as its next report.
+    pub fn ask(&mut self, slug: &str, question: &str) -> Result<(), String> {
+        if !records::agent_launched(&self.hub, slug) {
+            return Err(format!("ask: task/{slug} has no task agent"));
+        }
+        let key = state::agent_key(slug);
+        if !self.sessions.alive(&key) {
+            return Err(format!("ask: task/{slug}'s task agent is dead — `dashboard relaunch {slug} --agent` first"));
+        }
+        let report_file = Self::git_dir(&paths::agent_clone(&self.director, slug))?.join("dashboard-report.md");
+        let file = report_file.display();
+        self.sessions.send(
+            &key,
+            &format!("Question from the director: {question}\n\nAnswer with your report (step: question, verdict: answer or unsure), written to {file}.tmp and moved to {file}."),
+        );
+        Ok(())
+    }
+
     // ---- unblock merges (spec §11) ----
 
     /// For every not-yet-posted task branch whose deps are all accepted (or
@@ -1986,8 +2415,12 @@ fn save_player_state(home: &Home, last: &BTreeMap<String, (Status, bool)>) -> Re
 /// posted, in_progress, in_revision) never get their own event — they're
 /// either not director-actionable or already covered by the transition that
 /// caused them (e.g. `in_revision` is the director's own send-back).
-fn status_event(task: &state::TaskState) -> Option<(EventKind, String)> {
+///
+/// With `managed` (spec §17), `ready` and `tested` belong to the task agent,
+/// so the director hears `agent_launched` and `agent_report` instead.
+fn status_event(task: &state::TaskState, managed: bool) -> Option<(EventKind, String)> {
     match task.status {
+        Status::Ready | Status::Tested if managed => None,
         Status::Tested if task.spike.is_some() => {
             Some((EventKind::Tested, "spike finish validated — claims passed; review the findings with the operator, then send back a new question or conclude".to_string()))
         }
@@ -2081,6 +2514,65 @@ follow their recovery instructions."
     )
 }
 
+/// What a task agent is asked to do (spec §17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentStep {
+    Post,
+    Review,
+    /// Nothing pending (a relaunch while the subagent works).
+    Wait,
+}
+
+/// The player-written preamble of a task agent's prompt (spec §17): its
+/// role, its rules, the task as planned, and the report it hands back.
+fn agent_preamble(slug: &str, project: &str, cfg: &TaskConfig, task_toml: &str, goal: &str, report_file: &Path) -> String {
+    let report = report_file.display();
+    let brief = if cfg.brief.trim().is_empty() { "(none)".to_string() } else { cfg.brief.trim().to_string() };
+    let phase = if goal.is_empty() { cfg.phase.clone() } else { format!("{}: {goal}", cfg.phase) };
+    format!(
+        "You are the task agent for task `{slug}` in project `{project}`: the director's delegate for this one task. You write its \
+post (the subagent's prompt and a currently failing test) and review the subagent's finished work. The subagent that implements \
+the task is a different agent you never talk to, and the director reads only your reports.\n\n\
+This directory is your worktree, on the local branch agent/{slug}; its origin remote is the hub. Commit on agent/{slug} and never \
+push: the player fetches your branch, validates each commit, and pastes its verdict into this session. Never rebase, amend or \
+reset a commit the player imported, and never create merge commits.\n\n\
+Rules:\n\
+- Never write a throwaway implementation: not to prove a test can pass, not to try out a fix, not even in a scratch directory you \
+delete afterwards. Implementing is the subagent's job; reason about the tests from the task and the existing code. The only thing \
+you run before a post is the task's check, on the code as it is, to see it fail.\n\
+- Every test you write or send back must be pure: no effects outside its own sandbox, no shared state, no network, real clock or \
+unseeded randomness, no dependence on test order. The prompt.md you write passes this rule on to the subagent in one line.\n\
+- Write only tests, tests.toml, tests.d/ and files under tasks/{slug}/, never product code. In task.toml only [check] is yours; \
+the rest is the director's plan.\n\
+- Never commit accept:, retire: or any other marker: you recommend, the director decides.\n\n\
+The task, as the director planned it (phase {phase}):\n\n```toml\n{}\n```\n\n\
+Director's brief: {brief}\n\n\
+After each step, and after answering a question from the director, write your report: exactly the block below, to {report}.tmp, \
+then mv it to {report} (the player reads and removes it). No diffs and no code in it.\n\n\
+slug: {slug}\n\
+step: post | review r<N> | question\n\
+commit: <sha, or \"none\">\n\
+check: <one line: what the task's check asserts and why it fails / now passes>\n\
+verdict: posted | accept | sent-back | unsure | answer\n\
+why: <two or three sentences>\n\
+concerns: <anything cross-task the director should know, or \"none\">\n\n\
+The player pastes later steps into this session (review requests, the director's questions, rejections of your commits); wait for \
+them between steps.",
+        task_toml.trim()
+    )
+}
+
+/// The `verdict:` of a task agent's report, or `unknown`.
+fn report_verdict(text: &str) -> String {
+    const KNOWN: [&str; 5] = ["posted", "accept", "sent-back", "unsure", "answer"];
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("verdict:"))
+        .and_then(|v| v.split_whitespace().next())
+        .map(|v| v.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-').to_ascii_lowercase())
+        .filter(|v| KNOWN.contains(&v.as_str()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 // --------------------------------------------------------------------------
 // Tests
 // --------------------------------------------------------------------------
@@ -2121,6 +2613,15 @@ mod tests {
         s.kill("foo");
         assert_eq!(s.sent, vec![("foo".to_string(), "hello".to_string())]);
         assert_eq!(s.killed, vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn report_verdict_reads_the_verdict_line() {
+        assert_eq!(report_verdict("slug: s\nverdict: accept\nwhy: ok"), "accept");
+        assert_eq!(report_verdict("verdict: Sent-Back (r1)"), "sent-back");
+        assert_eq!(report_verdict("  verdict: `unsure`"), "unsure");
+        assert_eq!(report_verdict("verdict: maybe"), "unknown");
+        assert_eq!(report_verdict("no verdict here"), "unknown");
     }
 
     #[test]

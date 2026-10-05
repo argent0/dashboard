@@ -24,6 +24,9 @@ This spec replaces that with state computed from git.
   project's test suite (including retiring stale tests), reviews finished
   work by accepting it or sending it back with a new failing test, and
   carries out the replanning agreed with the operator after an escalation.
+- **Task agent** — an LLM (Claude Code session), one per task, launched by
+  the player: the director's delegate for that task, writing its post and
+  send-backs and reviewing the finished work (§17).
 - **Subagent** — an LLM (Claude Code session), one per task, launched by the
   player. Writes code (and may add new tests) until the project suite
   passes, then commits — or blocks.
@@ -89,7 +92,8 @@ tmux session  ◄──┘ (player launches the subagent, relays rejections/revi
 - **Hub** — a bare repository owned by the player. The only source of truth.
   Only the player updates its refs.
 - **Clones** — the director has one clone; the subagent gets its own clone
-  of the hub checked out on its task branch. Separate clones, not
+  of the hub checked out on its task branch, and so does the task agent
+  (§17). Separate clones, not
   worktrees: worktrees share refs. Agents fetch from the hub freely but
   never push.
 - **Provenance by fetch source.** The player pulls new commits from each
@@ -282,11 +286,11 @@ failed validation is a rejection with the listed reason (§10).
 |---|---|---|---|
 | **plan** | new branch `task/<slug>` from `main`, adding `tasks/<slug>/task.toml` (director) | slug unused (incl. retired); `depends_on` slugs exist and aren't retired; no cycles | `plan` |
 | **replan** | edits `tasks/<slug>/task.toml` on a not-yet-posted branch (director) | same as plan | `plan` |
-| **post** | adds `prompt.md`, the task check and its test files, `tests.d/<slug>.toml` entry, stale-test updates (director) | all `depends_on` accepted and merged into the branch (§11); task check **fails** | `post` |
+| **post** | adds `prompt.md`, the task check and its test files, `tests.d/<slug>.toml` entry, stale-test updates (director, or its task agent §17) | all `depends_on` accepted and merged into the branch (§11); task check **fails** | `post` |
 | **launch** | — (player) | task check still **fails** at the tip; records pins; starts `tmux` session running `claude` in a fresh subagent clone with `prompt.md` | — |
 | **finish** | code, optionally new tests (subagent) | pins unchanged; project suite **passes** | `pins`, `suite` |
 | **block** | `block:` marker (subagent) | — | — (escalates) |
-| **send back** | adds `reviews/r<N>.md` + new/updated tests (director) | task is `tested`; project suite now **fails**; re-pins; relays the note | `review` |
+| **send back** | adds `reviews/r<N>.md` + new/updated tests (director, or its task agent §17) | task is `tested`; project suite now **fails**; re-pins; relays the note | `review` |
 | **accept** | `accept:` marker (director) | task is `tested`; the player lands it (§11), merging `main` in first if it moved: a conflict leaves it `conflicted`, a suite failure caused by the merge sends it back to the subagent | `accept` |
 | **resolve** | merge of the recorded `main` commit into the task tip (director) | task is `conflicted`; merges exactly the `main` commit the conflict was recorded against; differs from git's own merge only on the recorded paths; re-pins; the player then lands the accept (§11) | `history`, `ownership` |
 | **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is conflicted or escalated; player moves the branch to `refs/retired/<slug>` and ends the subagent session | `retire` |
@@ -311,12 +315,12 @@ its own limit in `roadmap.toml` under `[limits.strikes]`:
 | Reason | Actor | Meaning | Default limit |
 |---|---|---|---|
 | `history` | either | rebase, amend, force push, merge commit | 2 |
-| `ownership` | director | commit that fits no transition, or touches paths it may not | 2 |
+| `ownership` | director, task agent | commit that fits no transition, or touches paths it may not | 2 |
 | `pins` | subagent | finish claim modified or deleted a pinned file | 2 |
 | `suite` | subagent | finish claim where the project suite fails | 2 |
 | `plan` | director | invalid plan/replan (bad slug, bad dependency, cycle) | 2 |
-| `post` | director | post whose task check passes, or whose dependencies aren't met | 2 |
-| `review` | director | send-back where the suite still passes — an objection without evidence | 2 |
+| `post` | director, task agent | post whose task check passes, or whose dependencies aren't met | 2 |
+| `review` | director, task agent | send-back where the suite still passes — an objection without evidence | 2 |
 | `accept` | director | accept while the task isn't `tested` | 2 |
 | `retire` | director | retire of a task that is in flight and not escalated | 2 |
 | `claims` | subagent | a spike's finish claim whose findings or claims don't validate (§14) | 2 |
@@ -433,6 +437,8 @@ spec's parking lot" for the detail behind each pointer):
   (default `claude --dangerously-skip-permissions`), run in a `tmux`
   session per task, prompt.md passed as its first message — CLAUDE.md's
   Decisions section.
+- **Task agents**: launched and mediated by the player too, with their own
+  `[player] task_agent_cmd` (§17).
 
 Still not decided:
 
@@ -595,3 +601,89 @@ goes in the *flake ledger* (`refs/flakes/<scope>/<n>`, notes under
 outputs. `status` shows `passed on retry k/N`, `flaky: N` per task and a
 list of recent entries, so the director can plan a hygiene task, e.g. a
 `flaky-test-fix`, from evidence instead of anecdote.
+
+## 17. Task agents
+
+The director holds the cross-task view; everything about one task (its
+prompt and failing test, reading its diff, its send-backs) belongs to that
+task's **task agent**, an LLM session acting as the director's delegate for
+that task alone. Task agents are launched and mediated by the player, like
+subagents, so the operator can watch one at work (`tmux attach`), every
+commit it makes is validated and attributed to it, and its verdicts are
+recorded in the hub instead of living only in the director's context.
+
+**Configuration.** `[player] task_agent_cmd` in `roadmap.toml` (default
+`claude --dangerously-skip-permissions`, like `agent_cmd`; a separate key so
+the two roles can run different commands or models). An empty value turns
+task agents off: the director posts and sends back itself (§9 as written).
+A spike (§14) never has a task agent: its question is the director's, written
+with the operator.
+
+**Lifecycle.**
+
+- *Launch*: automatic. When an agent-managed task becomes `ready` the player
+  creates the task agent's clone and starts its session with the post step;
+  a task found `tested` with no task agent gets one with the review step.
+  Launched once, recorded in `refs/dashboard/agent/<slug>`; like a subagent,
+  a dead task agent is reported (`agent_died`), never restarted
+  automatically: `dashboard relaunch <slug> --agent` restarts it in the same
+  clone, with a fresh prompt for where the task is now.
+- *Review*: each time the task becomes `tested` at a new tip, the player
+  pastes a review request for the next round into the task agent's session
+  (once per tip, recorded in `refs/dashboard/agent-asked/<slug>`).
+- *Questions*: `dashboard ask <slug> "<question>"` pastes the director's
+  question into the session; the answer comes back as a report.
+- *End*: the session is killed and the clone removed when the task is
+  accepted, retired or auto-retired. An escalated task keeps its task agent,
+  so the director can ask it what went wrong.
+
+**Clone.** Another worktree of the subagents' shared workspace (CLAUDE.md),
+at `<director>/.dashboard/agents/<slug>/`, on the local branch
+`agent/<slug>` (the subagent's worktree has `task/<slug>`). The player
+fetches `agent/<slug>` into `refs/incoming/agent/<slug>`; provenance by fetch
+source (§4) makes its commits the task agent's (`actor: task_agent`).
+
+**Prompt.** The player writes it: the task agent's role and rules, the task
+as planned (`task.toml`, the phase goal, and the director's `brief`, a free
+text field of `task.toml` that is the director's channel to it), the report
+format, and the current step. The rules: never write a throwaway
+implementation (implementing is the subagent's; the only thing it runs
+before a post is the task check, to see it fail); every test it writes is
+pure, and its `prompt.md` passes that on; it writes no product code; it
+never commits a marker.
+
+**What the player accepts from a task agent.** Only the newest commit of a
+fetch is validated, as one cumulative change from the hub tip:
+
+| Task status | Commit | Validated as | Rejection reason |
+|---|---|---|---|
+| `ready` | adds `prompt.md`, the test files, `tests.d/<slug>.toml`, `[check]` in `task.toml` | the post row of §9 | `post`, `evidence` |
+| `tested` | adds `reviews/r<N>.md` + new/updated tests | the send-back row of §9 | `review` |
+| any | touches a path outside `tests.toml`, `tests.d/`, the hub's `test_paths` and `tasks/<slug>/`; changes `task.toml` beyond `[check]`; any other status | — | `ownership` |
+| any | an empty (marker) commit | — | `ownership` |
+| any | merge commit, or rewrites a commit imported from it | — | `history` |
+
+`test_paths` is read at the hub tip, so a commit can't widen its own scope.
+Rejections count against the task's strike counters like anyone's (§10) and
+are relayed into the task agent's session with a recovery hint. A hub tip
+that moved under an unimported commit (an unblock merge, a director replan)
+is not the agent's fault: it is asked, once per commit, to rebase, with no
+strike.
+
+While task agents are on, a director post or send-back on an agent-managed
+task is an `ownership` rejection: those are the task agent's. Plan, replan,
+accept, retire and conflict resolution stay the director's.
+
+**Reports.** After each step and each question, the task agent writes a
+fixed block (`slug`, `step`, `commit`, `check`, `verdict`, `why`,
+`concerns`; verdict `posted | accept | sent-back | unsure | answer`) to
+`dashboard-report.md` in its clone's git directory. The player reads and
+removes it, notes it on the task tip (`refs/notes/dashboard-agent-reports`,
+a list), and emits an `agent_report` event carrying the block. `status`
+shows each task agent's session, liveness and latest verdict. The director
+accepts on an `accept` verdict, asks (`dashboard ask`) or takes an `unsure`
+to the operator; the decision stays the director's.
+
+**Events.** `agent_launched`, `agent_report`, `agent_died`. For an
+agent-managed task, `ready` and `tested` are not emitted: they're the task
+agent's to act on, and the director hears its report instead.

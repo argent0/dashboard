@@ -79,6 +79,13 @@ pub fn subagent_clone(director: &Path, slug: &str) -> PathBuf {
     subagents_root(director).join(slug)
 }
 
+/// Where a task's task agent works (spec §17): another worktree of
+/// `subagent_workspace`, for the same trust reason, on the local branch
+/// `agent/<slug>` (the subagent's worktree has `task/<slug>`).
+pub fn agent_clone(director: &Path, slug: &str) -> PathBuf {
+    director.join(".dashboard").join("agents").join(slug)
+}
+
 /// The one persistent clone of the hub every subagent's worktree hangs off
 /// (see `subagents_root`). Created lazily on first launch, trusted once by
 /// the operator, and never deleted.

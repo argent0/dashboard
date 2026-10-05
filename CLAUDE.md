@@ -3,8 +3,9 @@
 The enforcement point for a subagent-per-task roadmap loop (see `spec.md`,
 the design source of truth). `dashboard` is no longer a stateless renderer
 of a hand-edited `tasks.yaml`: it's the **player** — a bare git hub plus a
-process that imports and validates every commit a director or subagent
-clone produces, runs every check itself, launches subagents in `tmux`,
+process that imports and validates every commit a director, task agent or
+subagent clone produces, runs every check itself, launches task agents and
+subagents in `tmux`,
 counts strikes, merges accepted work, retires dead ends, and renders a
 status that's a pure function of the hub. Nobody writes a status; git (plus
 whether a subagent's session is alive) is the only source of truth. This is
@@ -18,7 +19,7 @@ director playbook for this CLI). See "Installing" below.
 ## Repo layout
 
 ```
-src/main.rs     CLI (clap): init / status (default) / watch / player / relaunch / wait
+src/main.rs     CLI (clap): init / status (default) / watch / player / relaunch / ask / wait
 src/lib.rs      the library crate every module below hangs off of
 src/config.rs   roadmap.toml / tests.toml / task.toml schemas (serde) + defaults
 src/git.rs      thin sync wrapper over the `git` CLI (rev-parse, diff, notes, merge-tree, …)
@@ -30,7 +31,7 @@ src/records.rs  provenance/enforcement records: import notes, rejections, pins, 
 src/flaky.rs    flaky-test-fix (spec §15): inventory comparison, evidence verdict text, subagent prompt
 src/spike.rs    spikes (spec §14): reading a round, running claims against the base-with-overlay, evaluating a finish
 src/state.rs    derives every task's status (spec §12) purely from the hub + session liveness
-src/player.rs   the player: fetch, validate, import, launch/relay, merge — spec §5/§7/§9/§11
+src/player.rs   the player: fetch, validate, import, launch/relay, merge, task agents — spec §5/§7/§9/§11/§17
 src/events.rs   the director-relevant event log, cursor, and heartbeat behind `dashboard wait`
 src/render.rs   renders `state::HubState` + recent events to the status text
 src/ui.rs       styling/width helpers (color codes, bars, truncation, terminal width)
@@ -63,8 +64,14 @@ Subagent clones live *outside* this home, nested inside the **director's own
 working tree** instead (`paths::subagents_root`/`subagent_clone`):
 
 ```
-<director-clone>/.dashboard/subagents/<slug>/   one clone per launched task
+<director-clone>/.dashboard/workspace/          the one clone of the hub they're all worktrees of
+<director-clone>/.dashboard/subagents/<slug>/   a subagent's worktree (branch task/<slug>)
+<director-clone>/.dashboard/agents/<slug>/      a task agent's worktree (branch agent/<slug>, spec §17)
 ```
+
+The player writes each agent's prompt to `dashboard-prompt.md` in that
+worktree's git directory; a task agent leaves its report there as
+`dashboard-report.md`, which the player reads and removes.
 
 A subagent clone is a fresh directory the player creates with nobody present
 to click through an agent CLI's first-run workspace-trust dialog. Nesting it
@@ -87,6 +94,9 @@ refs/explored/<slug>       a concluded spike's branch, moved here on `conclude:`
 refs/incoming/director/*   the director clone's main/task/* fetched in,
                             pre-validation (src/player.rs's `fetch`)
 refs/incoming/subagent/<slug>  a subagent clone's task/<slug>, pre-validation
+refs/incoming/agent/<slug>     a task agent clone's agent/<slug>, pre-validation (spec §17)
+refs/dashboard/agent/<slug>    the tip a task's task agent was launched at; never moved
+refs/dashboard/agent-asked/<slug>  the tested tip its task agent was last asked to review
 refs/dashboard/pins/<slug> the commit pins were computed from (spec §8.3)
 refs/dashboard/base/<slug> a spike's base commit (the tip at launch); never moved
 refs/dashboard/escalated/<slug>  set when a send-back would exceed
@@ -109,6 +119,7 @@ refs/notes/dashboard-explorations a spike round's verified answer + claim result
                                  finish commit; {concluded: true, ...} on the `conclude:` commit
 refs/notes/dashboard-conflicts   on a conflicted task's tip: the exact main commit an accept couldn't
                                  merge in, and the conflicted paths ({main, paths, at})
+refs/notes/dashboard-agent-reports  task agent reports read at a task tip: [{verdict, text, at}]
 ```
 
 Git config: the director clone carries `dashboard.home`; the hub carries
@@ -146,7 +157,9 @@ claims = 2                       # a spike's finish whose claims/findings don't 
 evidence = 1                     # a flaky-test-fix post whose flake doesn't reproduce
 
 [player]
-agent_cmd = "claude --dangerously-skip-permissions"   # default
+agent_cmd = "claude --dangerously-skip-permissions"        # the subagent; default
+task_agent_cmd = "claude --dangerously-skip-permissions"   # the task agent (spec §17); default.
+                                                           # "" turns task agents off
 ```
 
 `tests.toml` (project suite, on `main` and every task branch):
@@ -179,6 +192,8 @@ kind = "task"                    # or "spike" (spec §14): no depends_on/[check]
 phase = "p1"
 milestone = false
 depends_on = ["other-slug"]
+brief = "…"                      # the director's context for the task agent, pasted
+                                 # into its prompt (spec §17)
 
 [check]                          # the task's own failing-at-post check; added
 name = "…"                       # to tests.d/<slug>.toml in the same post commit
@@ -238,10 +253,14 @@ ignored — no `deny_unknown_fields` anywhere.
   interval 2s). `--once` runs a single tick, prints its report, and exits;
   this is what drives `scripts/e2e.sh` and what a supervisor (systemd timer,
   cron, a loop) should call if you don't want a long-running process.
-- `dashboard relaunch <slug>` — manually restarts a dead subagent session
-  with the same clone and prompt file. There is no automatic relaunch (see
-  Decisions below); a dead session just shows up in `status` and as a
-  `session_died` event.
+- `dashboard relaunch <slug> [--agent]` — manually restarts a dead subagent
+  session with the same clone and prompt file; `--agent` restarts the task
+  agent instead, with a fresh prompt for the task's current step. There is
+  no automatic relaunch (see Decisions below); a dead session just shows up
+  in `status` and as a `session_died` / `agent_died` event.
+- `dashboard ask <slug> <question…>` — pastes the director's question into
+  the task agent's session; the answer comes back as an `agent_report`
+  event.
 - `dashboard wait [--timeout SECS] [--all]` — the director's blocking
   listener (see Decisions). Prints every event past the director's cursor,
   advances it, and exits; `--timeout` exits 2 after N idle seconds; `--all`
@@ -344,6 +363,25 @@ back here):
   director merge is `history`. The walk over a task branch's new commits
   skips anything already on `main`. `status` lists every in-flight task,
   conflicted ones with their conflict.
+
+- **Task agents** (spec §17): the director's per-task delegates, launched
+  and mediated by the player instead of living inside the director's
+  session, so the operator can watch them (`tmux attach -t
+  dash-<project>-<slug>_agent`) and the hub records everything they do.
+  Launched automatically when an agent-managed task (any kind but a spike,
+  with `task_agent_cmd` non-empty) becomes `ready`, or is found `tested`
+  without one; the player pastes a review request on every new tested tip.
+  Its `Sessions` key is `state::agent_key(slug)` (`<slug>_agent`; `_` never
+  occurs in a slug). Its commits (`Actor::TaskAgent`) go through the same
+  post/send-back validation as a director's, plus: only `tests.toml`,
+  `tests.d/`, the hub's `test_paths` and `tasks/<slug>/`, only `[check]` in
+  `task.toml`, no markers, all `ownership`. A hub tip that moved under its
+  unimported commit gets a rebase request, not a strike. While task agents
+  are on, a director post/send-back on an agent-managed task is
+  `ownership`, and `ready`/`tested` events give way to `agent_launched` /
+  `agent_report`. Tests turn task agents off in their fixture roadmap
+  (`tests/common`'s `NO_TASK_AGENTS`) unless they're about them
+  (`tests/task_agent.rs`).
 
 Still undecided (spec §13): timeout/crash handling beyond manual relaunch,
 scope enforcement beyond pins, and suite-runtime cost at scale.

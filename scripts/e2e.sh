@@ -7,8 +7,9 @@
 #   plan alpha -> post alpha -> tmux launch -> tested -> send-back -> tested
 #   -> accept -> plan+post beta (depends on alpha) -> block -> escalated
 #   -> retire -> a spike (answer, send back, conclude) -> two tasks in
-#   parallel, a conflicting accept, its resolution -> a director rejection
-#   on main
+#   parallel, a conflicting accept, its resolution -> task agents on: a
+#   fake task agent posts and reviews a task in its own tmux session -> a
+#   director rejection on main
 #
 # asserting each transition via `dashboard status --no-color` and raw git
 # ref checks against the hub. See spec.md for the model and CLAUDE.md for
@@ -39,6 +40,8 @@ WORK=$(mktemp -d)
 DIR_REPO="$WORK/director"
 HOME_DIR="$WORK/home"
 FAKE_AGENT="$WORK/fake-agent.sh"
+FAKE_TASK_AGENT="$WORK/fake-task-agent.sh"
+TA_TEMPLATES="$WORK/ta-templates"
 
 TIMEOUT_SECS=60
 POLL_SECS=0.5
@@ -223,10 +226,67 @@ FAKE_AGENT_EOF
 }
 
 # --------------------------------------------------------------------------
+# The fake task agent (spec §17): stands in for a real task agent session.
+# Launched with "Step: post" in its prompt, it copies the post the scenario
+# prepared for its slug ($TA_TEMPLATES/<slug>/) into its worktree, commits it
+# on agent/<slug> and reports `posted`. Then it watches the hub: once the
+# subagent's work (<slug>.txt) is on task/<slug>, it reports `accept`.
+# --------------------------------------------------------------------------
+
+write_fake_task_agent() {
+  cat >"$FAKE_TASK_AGENT" <<'FAKE_TASK_AGENT_EOF'
+#!/bin/sh
+# Fake task agent driver (written by scripts/e2e.sh). $1 is the prompt.
+set -eu
+TEMPLATES=__TEMPLATES__
+
+git config user.name "E2E Fake Task Agent" || true
+git config user.email "fake-task-agent@example.com" || true
+git config commit.gpgsign false || true
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+slug=${branch#agent/}
+report="$(git rev-parse --absolute-git-dir)/dashboard-report.md"
+write_report() {
+  printf 'slug: %s\nstep: %s\ncommit: none\ncheck: %s.txt exists\nverdict: %s\nwhy: fake task agent.\nconcerns: none\n' \
+    "$slug" "$1" "$slug" "$2" >"$report.tmp"
+  mv "$report.tmp" "$report"
+}
+
+case "$1" in
+  *"Step: post"*)
+    git fetch -q origin
+    git merge -q --ff-only "origin/task/$slug"
+    cp -R "$TEMPLATES/$slug/." .
+    git add -A
+    git commit -q -m "post: $slug"
+    write_report post posted
+    ;;
+esac
+
+reviewed=""
+end=$(($(date +%s) + 60))
+while [ "$(date +%s)" -lt "$end" ]; do
+  git fetch -q origin || true
+  tip=$(git rev-parse "origin/task/$slug" 2>/dev/null || echo "")
+  if [ -n "$tip" ] && [ "$tip" != "$reviewed" ] && git cat-file -e "$tip:$slug.txt" 2>/dev/null; then
+    git merge -q --ff-only "origin/task/$slug" || true
+    write_report "review r1" accept
+    reviewed=$tip
+  fi
+  sleep 0.5
+done
+FAKE_TASK_AGENT_EOF
+  sed -i "s|__TEMPLATES__|$TA_TEMPLATES|" "$FAKE_TASK_AGENT"
+  chmod +x "$FAKE_TASK_AGENT"
+}
+
+# --------------------------------------------------------------------------
 # Setup: throwaway director repo + hub
 # --------------------------------------------------------------------------
 
 write_fake_agent
+write_fake_task_agent
 
 mkdir -p "$DIR_REPO"
 git -C "$DIR_REPO" init -q -b main
@@ -243,6 +303,7 @@ title = "Phase One"
 
 [player]
 agent_cmd = "$FAKE_AGENT"
+task_agent_cmd = ""
 EOF
 
 cat >"$DIR_REPO/tests.toml" <<'EOF'
@@ -592,6 +653,54 @@ assert_contains "$(hub_main_body)" "Task: delta" "hub main's merge commit"
 for t in gamma delta; do
   git --git-dir "$HOME_DIR/hub.git" cat-file -e "refs/heads/main:tests.d/$t.toml" || { echo "e2e: tests.d/$t.toml missing on main" >&2; exit 1; }
 done
+
+# --------------------------------------------------------------------------
+# 7b. Task agents (spec §17): a roadmap commit on main turns them on; the
+#     player launches a fake task agent for the newly planned epsilon in
+#     its own tmux session; it posts (imported as the task agent's), the
+#     subagent finishes, the task agent reports accept, the director accepts
+#     on it, and the task agent's session ends with the task.
+# --------------------------------------------------------------------------
+
+log "step 7b: a task agent posts and reviews epsilon"
+git -C "$DIR_REPO" checkout -q main
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/main
+sed -i "s|^task_agent_cmd = \"\"|task_agent_cmd = \"$FAKE_TASK_AGENT\"|" "$DIR_REPO/roadmap.toml"
+git -C "$DIR_REPO" commit -q -am "roadmap: turn task agents on"
+hub_has_task_agents() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:roadmap.toml | grep -qF "$FAKE_TASK_AGENT"; }
+wait_until "roadmap with task agents on main" hub_has_task_agents
+
+mkdir -p "$TA_TEMPLATES/epsilon/tasks/epsilon" "$TA_TEMPLATES/epsilon/tests.d"
+echo "Create epsilon.txt. Tests you add must be pure." >"$TA_TEMPLATES/epsilon/tasks/epsilon/prompt.md"
+printf '#!/bin/sh\necho ok > epsilon.txt\n' >"$TA_TEMPLATES/epsilon/tasks/epsilon/agent.sh"
+printf '[[check]]\nname = "epsilon-check"\ncmd = "test -f epsilon.txt"\n' >"$TA_TEMPLATES/epsilon/tests.d/epsilon.toml"
+
+git -C "$DIR_REPO" checkout -q -b task/epsilon main
+mkdir -p "$DIR_REPO/tasks/epsilon"
+printf 'title = "epsilon"\nphase = "p1"\nbrief = "a fake task agent posts this"\n\n[check]\nname = "epsilon-check"\ncmd = "test -f epsilon.txt"\n' >"$DIR_REPO/tasks/epsilon/task.toml"
+git -C "$DIR_REPO" add -A
+git -C "$DIR_REPO" commit -q -m "plan: epsilon"
+
+wait_until "epsilon's task agent session exists" session_alive epsilon_agent
+wait_until "epsilon's subagent session exists" session_alive epsilon
+post_sha=$(git --git-dir "$HOME_DIR/hub.git" log --format=%H --grep='^post: epsilon' refs/heads/task/epsilon)
+assert_contains "$(git --git-dir "$HOME_DIR/hub.git" notes --ref refs/notes/dashboard-imports show "$post_sha")" '"actor":"task_agent"' "epsilon's post import note"
+
+agent_recommends_accept() { dash_status | grep -qF "reported: accept"; }
+wait_until "epsilon's task agent recommends accept" agent_recommends_accept
+assert_contains "$(dash_status)" "task agent: dash-${PROJECT}-epsilon_agent (alive)" "dashboard status"
+wait_out=$(dash wait --timeout 5)
+assert_contains "$wait_out" "agent_launched" "dashboard wait output"
+assert_contains "$wait_out" "verdict: accept" "dashboard wait output"
+ask_out=$(dash ask epsilon "why that check?")
+assert_contains "$ask_out" "asked task/epsilon's task agent" "dashboard ask output"
+
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/task/epsilon
+git -C "$DIR_REPO" commit -q --allow-empty -m "accept: epsilon" -m "the task agent recommends it"
+wait_until "task/epsilon accepted" task_status_is epsilon accepted
+wait_until "epsilon's task agent session ended" session_gone epsilon_agent
 
 # --------------------------------------------------------------------------
 # 8. A director rejection path: commit a non-doc file on main ->

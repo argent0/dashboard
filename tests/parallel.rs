@@ -189,7 +189,7 @@ fn a_conflict_stops_the_accept_and_a_targeted_resolution_lands_it() {
 #[test]
 fn a_resolution_must_merge_the_recorded_main_commit() {
     let repo = director_repo();
-    write_file(repo.path(), "roadmap.toml", "title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n");
+    write_file(repo.path(), "roadmap.toml", &format!("title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"));
     commit(repo.path(), "declare docs_paths");
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());

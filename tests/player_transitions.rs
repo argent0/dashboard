@@ -364,7 +364,7 @@ fn send_back_rejected_when_touching_a_non_test_path() {
 #[test]
 fn send_back_exceeding_max_review_rounds_escalates_instead_of_importing() {
     let repo = director_repo();
-    write_file(repo.path(), "roadmap.toml", "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n\n[limits]\nmax_review_rounds = 1\n");
+    write_file(repo.path(), "roadmap.toml", &format!("title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n\n[limits]\nmax_review_rounds = 1\n{NO_TASK_AGENTS}"));
     commit(repo.path(), "set max_review_rounds = 1");
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
@@ -453,7 +453,7 @@ fn accept_stops_at_a_conflict_with_a_main_that_moved() {
     // docs_paths includes docs/, so the director can change it from main
     // directly (an ordinary, allowed main-only commit) on the same file the
     // subagent's finish writes.
-    write_file(repo.path(), "roadmap.toml", "title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n");
+    write_file(repo.path(), "roadmap.toml", &format!("title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"));
     commit(repo.path(), "declare docs_paths over docs/");
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());

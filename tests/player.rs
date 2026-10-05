@@ -39,7 +39,7 @@ fn open_player(home: &Home) -> Player<NullSessions> {
 /// have somewhere to write.
 fn director_repo_with_docs_paths() -> DirectorRepo {
     let repo = director_repo();
-    write_file(repo.path(), "roadmap.toml", "title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n");
+    write_file(repo.path(), "roadmap.toml", &format!("title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"));
     commit(repo.path(), "declare docs_paths");
     repo
 }
@@ -90,7 +90,7 @@ fn main_commit_whose_suite_fails_is_rejected_with_suite() {
     let hub_main_before = hub.rev_parse("refs/heads/main").unwrap();
     let mut player = open_player(&home);
 
-    write_file(repo.path(), "roadmap.toml", "title = \"Updated Title\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n");
+    write_file(repo.path(), "roadmap.toml", &format!("title = \"Updated Title\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"));
     commit(repo.path(), "update title");
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");

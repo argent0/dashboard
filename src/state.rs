@@ -91,6 +91,15 @@ pub struct TaskState {
     pub flaky: u32,
     /// The conflict to resolve, set only when `status == Conflicted`.
     pub conflict: Option<records::ConflictRecord>,
+    /// The task's task agent (spec §17), once one was launched.
+    pub agent: Option<AgentState>,
+}
+
+/// A task agent's runtime state and its latest report on the task's tip.
+#[derive(Debug, Clone)]
+pub struct AgentState {
+    pub alive: bool,
+    pub report: Option<records::AgentReport>,
 }
 
 /// A spike's progress, read from the hub (spec §14).
@@ -197,6 +206,7 @@ fn derive_task(
     let is_accepted = accepted.contains_key(slug);
     let is_explored = records::is_explored(hub, slug);
     let alive = live_session(slug);
+    let agent = records::agent_launched(hub, slug).then(|| AgentState { alive: live_session(&agent_key(slug)), report: None });
 
     let tip = task_tip(hub, slug, accepted, retired).ok_or_else(|| format!("no branch, retirement, or merge found for task {slug}"))?;
 
@@ -292,7 +302,15 @@ fn derive_task(
         }
     };
 
-    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite, alive, spike, flaky, conflict })
+    let agent = agent.map(|a| AgentState { report: records::agent_reports(hub, &tip).pop(), ..a });
+    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite, alive, spike, flaky, conflict, agent })
+}
+
+/// Whether `cfg`'s post and send-backs belong to a task agent (spec §17):
+/// task agents are on (`[player] task_agent_cmd`), and it isn't a spike,
+/// whose question the director writes with the operator.
+pub fn task_agent_managed(roadmap: &RoadmapConfig, cfg: &TaskConfig) -> bool {
+    roadmap.player.task_agents_enabled() && cfg.kind != TaskKind::Spike
 }
 
 /// Escalation causes that aren't already covered by retired/accepted: a
@@ -355,6 +373,13 @@ pub fn tmux_session_name(project: &str, slug: &str) -> String {
         s.chars().map(|c| if c == '.' || c == ':' { '-' } else { c }).collect()
     }
     format!("dash-{}-{}", sanitize(project), sanitize(slug))
+}
+
+/// The `Sessions` key of `slug`'s task agent (spec §17), next to the
+/// subagent's own key `slug`. `_` never appears in a slug, so it can't
+/// collide with another task's subagent session.
+pub fn agent_key(slug: &str) -> String {
+    format!("{slug}_agent")
 }
 
 /// Whether a tmux session named `name` is currently alive. `false` if tmux
