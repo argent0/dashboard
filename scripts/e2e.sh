@@ -276,7 +276,7 @@ git -C "$DIR_REPO" commit -q -m "plan: alpha"
 wait_until "task/alpha planned (ready)" task_status_is alpha ready
 
 # --------------------------------------------------------------------------
-# 2. Post alpha: prompt.md, agent.sh, the check added to tests.toml.
+# 2. Post alpha: prompt.md, agent.sh, the check in tests.d/alpha.toml.
 #    Tick -> launched in tmux. Tick until tested.
 # --------------------------------------------------------------------------
 
@@ -296,11 +296,8 @@ cat >"$DIR_REPO/tasks/alpha/agent.sh" <<'EOF'
 #!/bin/sh
 echo ok > feature.txt
 EOF
-cat >"$DIR_REPO/tests.toml" <<'EOF'
-[[check]]
-name = "baseline"
-cmd = "true"
-
+mkdir -p "$DIR_REPO/tests.d"
+cat >"$DIR_REPO/tests.d/alpha.toml" <<'EOF'
 [[check]]
 name = "alpha-check"
 cmd = "test -f feature.txt"
@@ -321,7 +318,7 @@ assert_contains "$wait_out" "tested" "dashboard wait output"
 assert_contains "$wait_out" "alpha" "dashboard wait output"
 
 # --------------------------------------------------------------------------
-# 4. Send back r1: reviews/r1.md, a new check in tests.toml, agent-r1.sh.
+# 4. Send back r1: reviews/r1.md, a tighter check in tests.d/alpha.toml, agent-r1.sh.
 #    Tick -> in_revision. The fake agent pulls the review, runs agent-r1.sh,
 #    and commits. Tick until tested again.
 # --------------------------------------------------------------------------
@@ -339,11 +336,7 @@ cat >"$DIR_REPO/tasks/alpha/agent-r1.sh" <<'EOF'
 #!/bin/sh
 echo ok2 > feature2.txt
 EOF
-cat >"$DIR_REPO/tests.toml" <<'EOF'
-[[check]]
-name = "baseline"
-cmd = "true"
-
+cat >"$DIR_REPO/tests.d/alpha.toml" <<'EOF'
 [[check]]
 name = "alpha-check"
 cmd = "test -f feature.txt && test -f feature2.txt"
@@ -413,15 +406,7 @@ cat >"$DIR_REPO/tasks/beta/agent.sh" <<'EOF'
 #!/bin/sh
 git commit --allow-empty -m "block: stale test" -m "featureb.txt can't be produced as specified; the check needs a design change."
 EOF
-cat >"$DIR_REPO/tests.toml" <<'EOF'
-[[check]]
-name = "baseline"
-cmd = "true"
-
-[[check]]
-name = "alpha-check"
-cmd = "test -f feature.txt && test -f feature2.txt"
-
+cat >"$DIR_REPO/tests.d/beta.toml" <<'EOF'
 [[check]]
 name = "beta-check"
 cmd = "test -f featureb.txt"
@@ -540,8 +525,10 @@ wait_until "probe's tmux session is gone" session_gone probe
 
 # --------------------------------------------------------------------------
 # 7c. Parallel tasks (spec §4): gamma and delta posted side by side, both
-#     subagents live at once. Both posts append to tests.toml, so once gamma
-#     is accepted, the player can't merge main into delta to land its accept:
+#     subagents live at once. Each post adds its own tests.d/<slug>.toml, so
+#     the suite never conflicts; but both agents write shared.txt
+#     differently, so once gamma is accepted, the player can't merge main
+#     into delta to land its accept:
 #     delta goes `conflicted`, and the director resolves exactly that
 #     conflict (merging the recorded main commit), which lands the accept.
 # --------------------------------------------------------------------------
@@ -550,7 +537,6 @@ log "step 7c: two tasks in parallel, a conflict, a targeted resolution"
 git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" checkout -q main
 git -C "$DIR_REPO" merge -q --ff-only hub/main
-tests_before=$(cat "$DIR_REPO/tests.toml")
 for t in gamma delta; do
   git -C "$DIR_REPO" checkout -q -b "task/$t" main
   mkdir -p "$DIR_REPO/tasks/$t"
@@ -566,8 +552,8 @@ for t in gamma delta; do
   git -C "$DIR_REPO" checkout -q "task/$t"
   echo "Create $t.txt." >"$DIR_REPO/tasks/$t/prompt.md"
   printf 'title = "%s"\nphase = "p1"\n\n[check]\nname = "%s-check"\ncmd = "test -f %s.txt"\n' "$t" "$t" "$t" >"$DIR_REPO/tasks/$t/task.toml"
-  printf '#!/bin/sh\necho ok > %s.txt\n' "$t" >"$DIR_REPO/tasks/$t/agent.sh"
-  printf '%s\n\n[[check]]\nname = "%s-check"\ncmd = "test -f %s.txt"\n' "$tests_before" "$t" "$t" >"$DIR_REPO/tests.toml"
+  printf '#!/bin/sh\necho ok > %s.txt\necho %s > shared.txt\n' "$t" "$t" >"$DIR_REPO/tasks/$t/agent.sh"
+  printf '[[check]]\nname = "%s-check"\ncmd = "test -f %s.txt"\n' "$t" "$t" >"$DIR_REPO/tests.d/$t.toml"
   git -C "$DIR_REPO" add -A
   git -C "$DIR_REPO" commit -q -m "post: $t"
 done
@@ -591,18 +577,21 @@ wait_out=$(dash wait --timeout 5)
 assert_contains "$wait_out" "conflict" "dashboard wait output"
 assert_contains "$wait_out" "$main_at_conflict" "the conflict event names the main commit"
 
-# The resolution merges exactly that main commit and touches only tests.toml.
+# The resolution merges exactly that main commit and touches only shared.txt.
 git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" merge -q --ff-only hub/task/delta
 if git -C "$DIR_REPO" merge -q --no-edit "$main_at_conflict" >/dev/null 2>&1; then
-  echo "e2e: expected tests.toml to conflict when resolving delta" >&2
+  echo "e2e: expected shared.txt to conflict when resolving delta" >&2
   exit 1
 fi
-printf '%s\n\n[[check]]\nname = "gamma-check"\ncmd = "test -f gamma.txt"\n\n[[check]]\nname = "delta-check"\ncmd = "test -f delta.txt"\n' "$tests_before" >"$DIR_REPO/tests.toml"
+printf 'gamma\ndelta\n' >"$DIR_REPO/shared.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q --no-edit
 wait_until "task/delta accepted" task_status_is delta accepted
 assert_contains "$(hub_main_body)" "Task: delta" "hub main's merge commit"
+for t in gamma delta; do
+  git --git-dir "$HOME_DIR/hub.git" cat-file -e "refs/heads/main:tests.d/$t.toml" || { echo "e2e: tests.d/$t.toml missing on main" >&2; exit 1; }
+done
 
 # --------------------------------------------------------------------------
 # 8. A director rejection path: commit a non-doc file on main ->

@@ -161,6 +161,14 @@ retry_failed = 1                 # default 0; re-run a failing check up to N mor
 retry_on = ["Text file busy"]    # optional regexes: retry only if a failing run's output matches
 ```
 
+`tests.d/<slug>.toml` (a task's suite fragment, added by its post; spec §6.2):
+only `[[check]]` entries, same shape. The suite is `tests.toml`'s checks plus
+every `tests.d/*.toml`'s in path order (`config::suite_at`); check names must
+be unique across all of them. Per-task files mean parallel posts never
+conflict on the suite. A post's task check must be in its own fragment, not
+`tests.toml`; fragments are pinned like `tests.toml`, and a subagent adding
+one is a `pins` strike.
+
 `tasks/<slug>/task.toml`:
 ```toml
 title = "…"
@@ -171,12 +179,12 @@ milestone = false
 depends_on = ["other-slug"]
 
 [check]                          # the task's own failing-at-post check; added
-name = "…"                       # to tests.toml in the same post commit
+name = "…"                       # to tests.d/<slug>.toml in the same post commit
 cmd = "…"
 ```
 
 A flaky-test-fix's extra `task.toml` fields (spec §15; `[check]` is the
-stability proof and is *not* added to `tests.toml`, which needs `list_cmd`):
+stability proof and is *not* added to the suite; `tests.toml` needs `list_cmd`):
 ```toml
 fix_paths = ["tests/a.rs"]       # plain files unpinned for this task
 [[replace]]

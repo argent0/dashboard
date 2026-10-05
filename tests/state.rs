@@ -269,6 +269,7 @@ fn pins_are_recomputed_and_violations_detected() {
 
     plan_task(path, &hub, "pinned-task", "title = \"Pinned\"\nphase = \"p1\"\n");
     write_file(path, "tasks/pinned-task/prompt.md", "do it\n");
+    write_file(path, "tests.d/pinned-task.toml", "[[check]]\nname = \"pinned-task-check\"\ncmd = \"true\"\n");
     let pin_commit = commit(path, "post: pinned-task");
     push_ref(path, "refs/heads/task/pinned-task");
 
@@ -276,6 +277,7 @@ fn pins_are_recomputed_and_violations_detected() {
     let pinned = records::pinned_files(&hub, "pinned-task").expect("pins were just set");
     assert!(pinned.contains_key("tests.toml"));
     assert!(pinned.contains_key("tests/test_foo.py"));
+    assert!(pinned.contains_key("tests.d/pinned-task.toml"));
     assert!(pinned.contains_key("tasks/pinned-task/prompt.md"));
 
     // Unmodified candidate: no violations.

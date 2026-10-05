@@ -356,17 +356,13 @@ impl Runner {
         (result, failed_output)
     }
 
-    /// Reads `tests.toml` at `commit` and runs every `[[check]]`. Missing or
-    /// invalid `tests.toml` is reported via `error`, not a panic. An empty
-    /// check list passes.
+    /// Reads the suite at `commit` (`tests.toml` plus every `tests.d/*.toml`)
+    /// and runs every `[[check]]`. A missing or invalid suite is reported via
+    /// `error`, not a panic. An empty check list passes.
     pub fn run_suite(&self, commit: &str) -> SuiteResult {
-        let text = match self.hub.show_file(commit, "tests.toml") {
-            Some(t) => t,
-            None => return SuiteResult::failing(format!("tests.toml not found at {commit}")),
-        };
-        let cfg = match config::tests_config_from_str(&text) {
+        let cfg = match config::suite_at(&self.hub, commit) {
             Ok(c) => c,
-            Err(e) => return SuiteResult::failing(format!("tests.toml: {e}")),
+            Err(e) => return SuiteResult::failing(e),
         };
 
         let mut checks = Vec::with_capacity(cfg.check.len());

@@ -122,7 +122,7 @@ fn the_stress_check_may_not_join_tests_toml() {
     let tests = format!("{TESTS_TOML}\n[[check]]\nname = \"stable\"\ncmd = \"grep -qx flaky_stable tests/inventory.txt\"\n");
     let (_player, report) = plan_and_post(&repo, &home, &alternating(home_dir.path()), &tests);
     assert_eq!(report.rejected[0].reason, Reason::Post, "{report}");
-    assert!(report.rejected[0].message.contains("tests.toml"), "{report}");
+    assert!(report.rejected[0].message.contains("must not be added to the suite"), "{report}");
 }
 
 #[test]

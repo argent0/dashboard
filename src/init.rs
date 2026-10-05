@@ -58,8 +58,7 @@ pub fn init(director_dir: &Path, name: Option<&str>, home: Option<PathBuf>) -> R
     let roadmap_text = director.show_file("refs/heads/main", "roadmap.toml").ok_or_else(|| "roadmap.toml not found at main's tip".to_string())?;
     config::roadmap_config_from_str(&roadmap_text).map_err(|e| format!("roadmap.toml: {e}"))?;
 
-    let tests_text = director.show_file("refs/heads/main", "tests.toml").ok_or_else(|| "tests.toml not found at main's tip".to_string())?;
-    config::tests_config_from_str(&tests_text).map_err(|e| format!("tests.toml: {e}"))?; // also runs Check::validate on every entry
+    config::suite_at(&director, "refs/heads/main")?; // tests.toml + tests.d/; also runs Check::validate on every entry
 
     // ---- project name and home ----
     let project = match name {

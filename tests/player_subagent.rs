@@ -65,7 +65,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
         &format!("tasks/{slug}/task.toml"),
         &format!("title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
-    write_file(repo.path(), "tests.toml", &format!("[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"));
+    write_file(repo.path(), &format!("tests.d/{slug}.toml"), &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"));
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
     assert_eq!(report.imported.len(), 1, "post: {slug} not imported: {report}");
@@ -192,7 +192,7 @@ fn launch_skipped_with_an_error_when_the_clone_dir_already_exists() {
     checkout_branch(repo.path(), "task/leftover");
     write_file(repo.path(), "tasks/leftover/prompt.md", "do it\n");
     write_file(repo.path(), "tasks/leftover/task.toml", "title = \"Leftover\"\nphase = \"p1\"\n\n[check]\nname = \"leftover-check\"\ncmd = \"test -f feature.txt\"\n");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"leftover-check\"\ncmd = \"test -f feature.txt\"\n");
+    write_file(repo.path(), "tests.d/leftover.toml", "[[check]]\nname = \"leftover-check\"\ncmd = \"test -f feature.txt\"\n");
     commit(repo.path(), "post: leftover");
 
     let report = player.tick().expect("tick should succeed");
@@ -306,6 +306,23 @@ fn finish_modifying_a_pinned_file_is_rejected_with_pins_and_relayed() {
 }
 
 #[test]
+fn finish_adding_a_suite_fragment_is_rejected_with_pins() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    plan_and_post(&repo, &mut player, "frag");
+    commit_in_clone(&repo, "frag", "tests.d/extra.toml", "[[check]]\nname = \"extra\"\ncmd = \"true\"\n", "add a suite check");
+
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Pins);
+    assert!(report.rejected[0].message.contains("tests.d/extra.toml"), "{}", report.rejected[0].message);
+    assert_ne!(task_status(&hub, "frag"), Status::Tested);
+}
+
+#[test]
 fn finish_with_a_failing_suite_is_rejected_then_a_fix_on_top_passes() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
@@ -385,7 +402,7 @@ fn subagent_commit_built_on_a_stale_pre_send_back_tip_is_diverged_history() {
     assert_eq!(task_status(&hub, "d"), Status::Tested);
 
     director_pull_task_branch(repo.path(), "d");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"d-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
+    write_file(repo.path(), "tests.d/d.toml", "[[check]]\nname = \"d-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
     write_file(repo.path(), "tasks/d/reviews/r1.md", "add feature2.txt too\n");
     commit(repo.path(), "send-back: d r1");
     let report = player.tick().expect("send-back tick should succeed");
@@ -476,7 +493,7 @@ fn full_loop_post_finish_send_back_fix_finish_accept() {
     assert_eq!(task_status(&hub, "full"), Status::Tested);
 
     director_pull_task_branch(repo.path(), "full");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"full-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
+    write_file(repo.path(), "tests.d/full.toml", "[[check]]\nname = \"full-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
     write_file(repo.path(), "tasks/full/reviews/r1.md", "please also add feature2.txt\n");
     commit(repo.path(), "send-back: full r1");
     let report = player.tick().expect("send-back tick should succeed");

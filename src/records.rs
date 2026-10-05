@@ -341,8 +341,9 @@ fn add_pinned_path(hub: &Git, commit: &str, path: &str, map: &mut BTreeMap<Strin
 
 /// The pinned path -> blob hash map for `slug`, computed fresh from the
 /// commit `set_pins` last recorded (`None` if pins were never taken):
-/// `tests.toml`, every `test_paths` entry of the tests.toml *at that
-/// commit*, and everything under `tasks/<slug>/`. A spike pins only
+/// `tests.toml`, every suite fragment under `tests.d/`, every `test_paths`
+/// entry of the tests.toml *at that commit*, and everything under
+/// `tasks/<slug>/`. A spike pins only
 /// `tasks/<slug>/` (spec §14): it never merges, so the project's tests are
 /// the subagent's to change while exploring.
 pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
@@ -351,6 +352,7 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
 
     if !is_spike_at(hub, &commit, slug) {
         add_pinned_path(hub, &commit, "tests.toml", &mut map);
+        add_pinned_path(hub, &commit, &format!("{}/", config::SUITE_DIR), &mut map);
         if let Some(text) = hub.show_file(&commit, "tests.toml") {
             if let Ok(cfg) = config::tests_config_from_str(&text) {
                 for test_path in &cfg.test_paths {
@@ -386,19 +388,28 @@ pub fn is_spike_at(hub: &Git, commit: &str, slug: &str) -> bool {
 
 /// Every pinned path that `candidate_commit` leaves missing or changed. A
 /// slug with no recorded pins has nothing to violate. New files at
-/// `candidate_commit` that aren't in the pinned set are never violations.
+/// `candidate_commit` that aren't in the pinned set are never violations,
+/// except a new suite fragment (`tests.d/*.toml`) on a non-spike task: the
+/// suite is the director's, so adding a check to it is as off-limits as
+/// editing `tests.toml`.
 pub fn check_pins(hub: &Git, slug: &str, candidate_commit: &str) -> Vec<String> {
     let pinned = match pinned_files(hub, slug) {
         Some(m) => m,
         None => return Vec::new(),
     };
-    pinned
-        .into_iter()
-        .filter_map(|(path, expected)| match hub.blob_hash(candidate_commit, &path) {
-            Some(actual) if actual == expected => None,
-            _ => Some(path),
+    let mut violations: Vec<String> = pinned
+        .iter()
+        .filter_map(|(path, expected)| match hub.blob_hash(candidate_commit, path) {
+            Some(actual) if actual == *expected => None,
+            _ => Some(path.clone()),
         })
-        .collect()
+        .collect();
+    let pins_commit = hub.rev_parse(&format!("refs/dashboard/pins/{slug}")).unwrap_or_default();
+    if !is_spike_at(hub, &pins_commit, slug) {
+        let added = hub.ls_tree_files(candidate_commit, &format!("{}/", config::SUITE_DIR)).into_iter().filter(|p| config::is_suite_fragment(p) && !pinned.contains_key(p));
+        violations.extend(added);
+    }
+    violations
 }
 
 // --------------------------------------------------------------------------

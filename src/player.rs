@@ -875,8 +875,9 @@ impl<S: Sessions> Player<S> {
     /// spec §9's post row: status must be `ready` (other tasks may be in
     /// flight: spec §4's parallel tasks); every accepted dependency's merge must already be an
     /// ancestor of `candidate` (else the branch hasn't been unblocked into
-    /// yet); `task.toml` must parse and declare a check; `tests.toml` must
-    /// carry a matching entry (spec §6.3); and that check must currently
+    /// yet); `task.toml` must parse and declare a check; its suite fragment
+    /// `tests.d/<slug>.toml` must carry a matching entry and the whole suite
+    /// must load (spec §6.3); and that check must currently
     /// *fail* (spec §3.1's evidence requirement).
     fn validate_post(&self, slug: &str, candidate: &str, status: Status, hub_state: &state::HubState) -> Result<(), String> {
         let task = hub_state.tasks.iter().find(|t| t.slug == slug).ok_or_else(|| format!("post: task/{slug}: no task state"))?;
@@ -906,20 +907,25 @@ impl<S: Sessions> Player<S> {
         let cfg = config::task_config_from_str(&text).map_err(|e| format!("post: task/{slug}: {task_toml_path}: {e}"))?;
         let check = cfg.check.ok_or_else(|| format!("post: task/{slug}: {task_toml_path} has no [check] section"))?;
 
-        let tests_text = self.hub.show_file(candidate, "tests.toml").ok_or_else(|| format!("post: task/{slug}: tests.toml missing"))?;
-        let tests_cfg = config::tests_config_from_str(&tests_text).map_err(|e| format!("post: task/{slug}: tests.toml: {e}"))?;
-        let has_matching_entry = tests_cfg.check.iter().any(|c| c.name == check.name && c.cmd == check.cmd && c.runs == check.runs && c.min_pass == check.min_pass);
+        let suite = config::suite_at(&self.hub, candidate).map_err(|e| format!("post: task/{slug}: {e}"))?;
+        let fragment_path = config::suite_fragment_path(slug);
+        let fragment = self.hub.blob_hash(candidate, &fragment_path).is_some();
         if cfg.kind == TaskKind::FlakyTestFix {
             // The stress check is a one-off proof for this task, an exception
             // to spec §6.3: it must not slow every future suite.
-            if tests_cfg.check.iter().any(|c| c.name == check.name) {
-                return Err(format!("post: task/{slug}: a flaky-test-fix's check {:?} must not be added to tests.toml", check.name));
+            if fragment || suite.check.iter().any(|c| c.name == check.name) {
+                return Err(format!("post: task/{slug}: a flaky-test-fix's check {:?} must not be added to the suite (tests.toml or {fragment_path})", check.name));
             }
-            if tests_cfg.list_cmd.is_none() {
+            if suite.list_cmd.is_none() {
                 return Err(format!("post: task/{slug}: a flaky-test-fix needs `list_cmd` in tests.toml (the player compares test inventories with it)"));
             }
-        } else if !has_matching_entry {
-            return Err(format!("post: task/{slug}: tests.toml has no [[check]] entry matching the task check {:?} (same name, cmd, runs, min_pass)", check.name));
+        } else {
+            // Read the fragment on its own: the check must live there, not in
+            // tests.toml, so parallel posts never edit the same file.
+            let own = self.hub.show_file(candidate, &fragment_path).and_then(|t| config::suite_from_parts("", &[(fragment_path.clone(), t)]).ok()).map(|c| c.check).unwrap_or_default();
+            if !own.iter().any(|c| c.name == check.name && c.cmd == check.cmd && c.runs == check.runs && c.min_pass == check.min_pass) {
+                return Err(format!("post: task/{slug}: {fragment_path} has no [[check]] entry matching the task check {:?} (same name, cmd, runs, min_pass)", check.name));
+            }
         }
 
         let result = self.runner.run_task_check(candidate, slug).map_err(|e| format!("post: task/{slug}: {e}"))?;
@@ -934,8 +940,8 @@ impl<S: Sessions> Player<S> {
 
     /// spec §9's send-back row: the cumulative diff must add exactly the
     /// next review file (`reviews/r<N+1>.md`, `N` = the current review
-    /// round); every other changed path must be a test path (spec §6.2) or
-    /// `tests.toml` itself; a round beyond `max_review_rounds` escalates
+    /// round); every other changed path must be a test path (spec §6.2),
+    /// `tests.toml` itself, or a suite fragment under `tests.d/`; a round beyond `max_review_rounds` escalates
     /// instead of importing; and the project suite must now *fail* (spec
     /// §3.1's evidence requirement for a send-back). On success, re-pins and
     /// relays the review note to the subagent's session (spec §8.3).
@@ -960,7 +966,7 @@ impl<S: Sessions> Player<S> {
         let test_paths = self.hub.show_file(candidate, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).map(|c| c.test_paths).unwrap_or_default();
         let task_prefix = format!("tasks/{slug}/");
         for (_, path) in diffs {
-            if path == "tests.toml" || path.starts_with(&task_prefix) || path_under_test_paths(path, &test_paths) {
+            if path == "tests.toml" || config::is_suite_fragment(path) || path.starts_with(&task_prefix) || path_under_test_paths(path, &test_paths) {
                 continue;
             }
             let msg = format!("send-back: task/{slug}: a send-back may only add the review note and tests, not {path:?}");
@@ -1791,7 +1797,7 @@ Answer it in one new commit adding {} and {}.",
 
         let pins_violations = records::check_pins(&self.hub, slug, candidate);
         if !pins_violations.is_empty() {
-            let msg = format!("pins: task/{slug}'s finish claim changed or removed pinned files: {}", pins_violations.join(", "));
+            let msg = format!("pins: task/{slug}'s finish claim changed or removed pinned files (or added a tests.d/ suite fragment): {}", pins_violations.join(", "));
             return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
         }
 
@@ -2062,10 +2068,10 @@ fn launch_preamble(slug: &str, project: &str, pinned_paths: &[&str]) -> String {
     format!(
         "You are the subagent for task `{slug}` in project `{project}`. Your clone's `origin` remote \
 is the hub: fetch from it, and never push anywhere else.\n\n\
-Commit only when you believe the whole project suite (every [[check]] in tests.toml) passes. Leave \
-work in progress uncommitted.\n\n\
-You may add new tests, but you must not modify or delete tests.toml, anything under its test_paths, \
-or tasks/{slug}/. The pinned files, which must stay byte-for-byte identical, are:\n\
+Commit only when you believe the whole project suite (every [[check]] in tests.toml and tests.d/*.toml) \
+passes. Leave work in progress uncommitted.\n\n\
+You may add new tests, but you must not modify, delete, or add to tests.toml or tests.d/, touch anything \
+under its test_paths, or touch tasks/{slug}/. The pinned files, which must stay byte-for-byte identical, are:\n\
 {pinned_block}\n\n\
 If the task can't be done as specified, make an empty commit explaining why instead of forcing it \
 through:\n  git commit --allow-empty -m \"block: <short reason>\" -m \"<explanation>\"\n\n\

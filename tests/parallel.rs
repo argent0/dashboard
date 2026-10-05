@@ -39,47 +39,29 @@ fn transitions(report: &TickReport) -> Vec<Transition> {
     report.imported.iter().map(|i| i.2).collect()
 }
 
-const BASE_TESTS: &str = "[[check]]\nname = \"unit\"\ncmd = \"true\"\n";
-
-fn check_entry(name: &str, cmd: &str) -> String {
-    format!("\n[[check]]\nname = \"{name}\"\ncmd = \"{cmd}\"\n")
-}
-
-/// Where a post puts its task check in `tests.toml`. Two tasks appending
-/// both edit the end of the file, so the second one to land conflicts;
-/// one prepending and one appending merge cleanly.
-#[derive(Clone, Copy)]
-enum At {
-    End,
-    Start,
-}
-
-fn tests_toml(name: &str, cmd: &str, at: At) -> String {
-    match at {
-        At::End => format!("{BASE_TESTS}{}", check_entry(name, cmd)),
-        At::Start => format!("[[check]]\nname = \"{name}\"\ncmd = \"{cmd}\"\n\n{BASE_TESTS}"),
-    }
-}
-
-/// Plans `slug` and posts it with the task check `cmd`, placed `at` in the
-/// original `tests.toml`.
-fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, cmd: &str, at: At) {
+/// Plans `slug` and posts it with the task check `cmd`, in its own
+/// `tests.d/<slug>.toml`: parallel posts never touch the same suite file.
+fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, cmd: &str) {
     director_commit_on_branch(repo.path(), &format!("task/{slug}"), &format!("tasks/{slug}/task.toml"), &format!("title = \"{slug}\"\nphase = \"p1\"\n"), &format!("plan: {slug}"));
     let report = player.tick().expect("plan tick");
     assert!(report.rejected.is_empty(), "{report}");
 
     write_file(repo.path(), &format!("tasks/{slug}/prompt.md"), "do it\n");
     write_file(repo.path(), &format!("tasks/{slug}/task.toml"), &format!("title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"{cmd}\"\n"));
-    write_file(repo.path(), "tests.toml", &tests_toml(&format!("{slug}-check"), cmd, at));
+    write_file(repo.path(), &format!("tests.d/{slug}.toml"), &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"{cmd}\"\n"));
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick");
     assert!(report.rejected.is_empty(), "post: {slug} rejected: {report}");
     assert!(transitions(&report).contains(&Transition::Post), "{report}");
 }
 
-/// A subagent finish adding `file`, recorded as validated by hand.
-fn finish(home: &Home, hub: &Git, slug: &str, file: &str) {
-    let sha = subagent_commit(&home.hub(), slug, file, "done\n", "finish work");
+/// A subagent finish writing `files` (one commit each), the last recorded
+/// as validated by hand.
+fn finish(home: &Home, hub: &Git, slug: &str, files: &[(&str, &str)]) {
+    let mut sha = String::new();
+    for (file, content) in files {
+        sha = subagent_commit(&home.hub(), slug, file, content, "finish work");
+    }
     records::record_import(hub, &sha, Actor::Subagent, Transition::Finish, Some(slug)).expect("record finish");
     assert_eq!(task_status(hub, slug), Status::Tested);
 }
@@ -91,26 +73,28 @@ fn accept(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) ->
 }
 
 /// `a` and `b` both posted at once and finished; `a` accepted first, so
-/// `main` moved under `b`.
-fn a_accepted_beside_b(repo: &DirectorRepo, home: &Home, hub: &Git, player: &mut Player<NullSessions>, a_cmd: &str, b_at: At) {
-    plan_and_post(repo, player, "a", a_cmd, At::End);
-    plan_and_post(repo, player, "b", "test -f b.txt", b_at);
-    finish(home, hub, "a", "a.txt");
-    finish(home, hub, "b", "b.txt");
+/// `main` moved under `b`. With `conflict`, both also wrote `shared.txt`
+/// differently, so `b` can't take `main` in cleanly.
+fn a_accepted_beside_b(repo: &DirectorRepo, home: &Home, hub: &Git, player: &mut Player<NullSessions>, a_cmd: &str, conflict: bool) {
+    plan_and_post(repo, player, "a", a_cmd);
+    plan_and_post(repo, player, "b", "test -f b.txt");
+    let shared = |who: &'static str| if conflict { vec![("shared.txt", who)] } else { Vec::new() };
+    finish(home, hub, "a", &[shared("from a\n"), vec![("a.txt", "done\n")]].concat());
+    finish(home, hub, "b", &[shared("from b\n"), vec![("b.txt", "done\n")]].concat());
     let report = accept(repo, player, "a");
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(task_status(hub, "a"), Status::Accepted);
 }
 
 /// The director's resolution of `b`'s conflict: merges `main_commit` into
-/// its branch and resolves tests.toml by keeping both checks, plus any
+/// its branch and resolves shared.txt by keeping both lines, plus any
 /// `extra` edits. Doesn't tick.
 fn resolve_b(repo: &DirectorRepo, main_commit: &str, extra: &[(&str, &str)]) -> String {
     director_pull_task_branch(repo.path(), "b");
     let git = Git::new(repo.path());
     git.run(&["fetch", "-q", "hub"]).expect("fetch hub");
-    assert!(git.run(&["merge", "-q", "--no-edit", main_commit]).is_err(), "tests.toml should conflict");
-    write_file(repo.path(), "tests.toml", &format!("{BASE_TESTS}{}{}", check_entry("a-check", "test -f a.txt"), check_entry("b-check", "test -f b.txt")));
+    assert!(git.run(&["merge", "-q", "--no-edit", main_commit]).is_err(), "shared.txt should conflict");
+    write_file(repo.path(), "shared.txt", "from a\nfrom b\n");
     for (path, content) in extra {
         write_file(repo.path(), path, content);
     }
@@ -127,8 +111,8 @@ fn two_tasks_can_be_in_flight_at_once() {
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
 
-    plan_and_post(&repo, &mut player, "a", "test -f a.txt", At::End);
-    plan_and_post(&repo, &mut player, "b", "test -f b.txt", At::End);
+    plan_and_post(&repo, &mut player, "a", "test -f a.txt");
+    plan_and_post(&repo, &mut player, "b", "test -f b.txt");
     assert_eq!(player.sessions().launched.iter().map(|l| l.slug.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
 }
 
@@ -138,14 +122,15 @@ fn the_player_merges_main_in_and_lands_the_accept() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", At::Start);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", false);
 
     let report = accept(&repo, &mut player, "b");
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(transitions(&report), vec![Transition::Accept, Transition::Sync, Transition::MergeAccept]);
     assert_eq!(task_status(&hub, "b"), Status::Accepted);
-    let tests = hub.show_file("refs/heads/main", "tests.toml").unwrap();
-    assert!(tests.contains("a-check") && tests.contains("b-check"), "{tests}");
+    // Both posts' checks reach main without either touching the other's file.
+    assert!(hub.show_file("refs/heads/main", "tests.d/a.toml").unwrap().contains("a-check"));
+    assert!(hub.show_file("refs/heads/main", "tests.d/b.toml").unwrap().contains("b-check"));
 }
 
 #[test]
@@ -155,7 +140,7 @@ fn a_merge_that_fails_the_suite_goes_back_to_the_subagent() {
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
     // a's check, now on main, is one b's finished work breaks.
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt && test ! -f b.txt", At::Start);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt && test ! -f b.txt", false);
     let main_before = hub.rev_parse("refs/heads/main");
 
     let report = accept(&repo, &mut player, "b");
@@ -178,7 +163,7 @@ fn a_conflict_stops_the_accept_and_a_targeted_resolution_lands_it() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", At::End);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
     let main_tip = hub.rev_parse("refs/heads/main").unwrap();
 
     let report = accept(&repo, &mut player, "b");
@@ -188,10 +173,10 @@ fn a_conflict_stops_the_accept_and_a_targeted_resolution_lands_it() {
     assert_eq!(b.status, Status::Conflicted);
     let conflict = b.conflict.expect("conflict recorded");
     assert_eq!(conflict.main, main_tip);
-    assert_eq!(conflict.paths, vec!["tests.toml".to_string()]);
+    assert_eq!(conflict.paths, vec!["shared.txt".to_string()]);
     let ev = events_of(&home, EventKind::Conflict);
     assert_eq!(ev.len(), 1);
-    assert!(ev[0].message.contains(&main_tip) && ev[0].message.contains("tests.toml"), "{}", ev[0].message);
+    assert!(ev[0].message.contains(&main_tip) && ev[0].message.contains("shared.txt"), "{}", ev[0].message);
 
     resolve_b(&repo, &main_tip, &[]);
     let report = player.tick().expect("resolve tick");
@@ -209,7 +194,7 @@ fn a_resolution_must_merge_the_recorded_main_commit() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", At::End);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
     let conflicted_with = hub.rev_parse("refs/heads/main").unwrap();
     accept(&repo, &mut player, "b");
     assert_eq!(task_status(&hub, "b"), Status::Conflicted);
@@ -247,7 +232,7 @@ fn a_resolution_may_not_change_paths_git_merged_cleanly() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", At::End);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
     let main_tip = hub.rev_parse("refs/heads/main").unwrap();
     accept(&repo, &mut player, "b");
     let tip_before = hub.rev_parse("refs/heads/task/b");
@@ -267,14 +252,14 @@ fn a_director_merge_without_a_recorded_conflict_is_history() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", At::End);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
 
     // b is tested and behind main, but merging main in is the player's job.
     director_pull_task_branch(repo.path(), "b");
     let git = Git::new(repo.path());
     git.run(&["fetch", "-q", "hub"]).unwrap();
     assert!(git.run(&["merge", "-q", "--no-edit", "hub/main"]).is_err());
-    write_file(repo.path(), "tests.toml", &format!("{BASE_TESTS}{}{}", check_entry("a-check", "test -f a.txt"), check_entry("b-check", "test -f b.txt")));
+    write_file(repo.path(), "shared.txt", "from a\nfrom b\n");
     commit(repo.path(), "unasked merge");
 
     let report = player.tick().expect("tick");

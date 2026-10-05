@@ -62,7 +62,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
         &format!("tasks/{slug}/task.toml"),
         &format!("title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
-    write_file(repo.path(), "tests.toml", &format!("[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"));
+    write_file(repo.path(), &format!("tests.d/{slug}.toml"), &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"));
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
     assert_eq!(report.imported.len(), 1, "post: {slug} not imported: {report}");
@@ -131,7 +131,7 @@ fn post_rejected_when_the_task_check_already_passes() {
     checkout_branch(repo.path(), "task/eager");
     write_file(repo.path(), "tasks/eager/prompt.md", "do it\n");
     write_file(repo.path(), "tasks/eager/task.toml", "title = \"Eager\"\nphase = \"p1\"\n\n[check]\nname = \"eager-check\"\ncmd = \"test -f feature.txt\"\n");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"eager-check\"\ncmd = \"test -f feature.txt\"\n");
+    write_file(repo.path(), "tests.d/eager.toml", "[[check]]\nname = \"eager-check\"\ncmd = \"test -f feature.txt\"\n");
     // The director's mistake: the file already exists, so the check already
     // passes at post — it must fail (spec §3.1).
     write_file(repo.path(), "feature.txt", "oops, already done\n");
@@ -158,7 +158,7 @@ fn post_rejected_when_dependencies_are_not_accepted() {
     checkout_branch(repo.path(), "task/b");
     write_file(repo.path(), "tasks/b/prompt.md", "do it\n");
     write_file(repo.path(), "tasks/b/task.toml", "title = \"B\"\nphase = \"p1\"\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n");
+    write_file(repo.path(), "tests.d/b.toml", "[[check]]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n");
     commit(repo.path(), "post: b (a not accepted yet)");
 
     let report = player.tick().expect("tick should succeed");
@@ -169,7 +169,7 @@ fn post_rejected_when_dependencies_are_not_accepted() {
 }
 
 #[test]
-fn post_rejected_when_tests_toml_entry_is_missing() {
+fn post_rejected_when_the_suite_fragment_is_missing() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
@@ -180,14 +180,57 @@ fn post_rejected_when_tests_toml_entry_is_missing() {
     checkout_branch(repo.path(), "task/notests");
     write_file(repo.path(), "tasks/notests/prompt.md", "do it\n");
     write_file(repo.path(), "tasks/notests/task.toml", "title = \"No tests entry\"\nphase = \"p1\"\n\n[check]\nname = \"notests-check\"\ncmd = \"test -f feature.txt\"\n");
-    // tests.toml deliberately left untouched.
-    commit(repo.path(), "post: notests (forgot tests.toml)");
+    // tests.d/notests.toml deliberately not added.
+    commit(repo.path(), "post: notests (forgot tests.d/notests.toml)");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Post);
-    assert!(report.rejected[0].message.contains("tests.toml"), "{}", report.rejected[0].message);
+    assert!(report.rejected[0].message.contains("tests.d/notests.toml has no [[check]]"), "{}", report.rejected[0].message);
     assert_eq!(task_status(&hub, "notests"), Status::Ready);
+}
+
+#[test]
+fn post_rejected_when_the_task_check_goes_in_tests_toml() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    plan(&repo, &mut player, "shared", "title = \"Shared\"\nphase = \"p1\"\n");
+
+    checkout_branch(repo.path(), "task/shared");
+    write_file(repo.path(), "tasks/shared/prompt.md", "do it\n");
+    write_file(repo.path(), "tasks/shared/task.toml", "title = \"Shared\"\nphase = \"p1\"\n\n[check]\nname = \"shared-check\"\ncmd = \"test -f feature.txt\"\n");
+    // The old shape: appended to the file every parallel post would edit.
+    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"shared-check\"\ncmd = \"test -f feature.txt\"\n");
+    commit(repo.path(), "post: shared (check in tests.toml)");
+
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Post);
+    assert!(report.rejected[0].message.contains("tests.d/shared.toml"), "{}", report.rejected[0].message);
+    assert_eq!(task_status(&hub, "shared"), Status::Ready);
+}
+
+#[test]
+fn post_rejected_when_a_check_name_is_declared_twice() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+
+    plan(&repo, &mut player, "dup", "title = \"Dup\"\nphase = \"p1\"\n");
+
+    checkout_branch(repo.path(), "task/dup");
+    write_file(repo.path(), "tasks/dup/prompt.md", "do it\n");
+    write_file(repo.path(), "tasks/dup/task.toml", "title = \"Dup\"\nphase = \"p1\"\n\n[check]\nname = \"unit\"\ncmd = \"test -f feature.txt\"\n");
+    write_file(repo.path(), "tests.d/dup.toml", "[[check]]\nname = \"unit\"\ncmd = \"test -f feature.txt\"\n");
+    commit(repo.path(), "post: dup (reuses tests.toml's check name)");
+
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Post);
+    assert!(report.rejected[0].message.contains("more than once"), "{}", report.rejected[0].message);
 }
 
 #[test]
@@ -209,7 +252,7 @@ fn post_rejected_when_a_dependency_is_accepted_but_not_yet_merged_into_the_branc
     checkout_branch(repo.path(), "task/b");
     write_file(repo.path(), "tasks/b/prompt.md", "do it\n");
     write_file(repo.path(), "tasks/b/task.toml", "title = \"B\"\nphase = \"p1\"\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n");
+    write_file(repo.path(), "tests.d/b.toml", "[[check]]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n");
     commit(repo.path(), "post: b (branch never merged a's acceptance)");
 
     let report = player.tick().expect("tick should succeed");
@@ -234,7 +277,7 @@ fn send_back_happy_path() {
 
     // Tighten the task check so the suite now fails: real evidence for the
     // send-back (spec §3.1).
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"x-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
+    write_file(repo.path(), "tests.d/x.toml", "[[check]]\nname = \"x-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
     write_file(repo.path(), "tasks/x/reviews/r1.md", "Please also add feature2.txt\n");
     commit(repo.path(), "send-back: x r1");
 
@@ -285,7 +328,7 @@ fn send_back_rejected_with_the_wrong_round_number() {
     director_pull_task_branch(repo.path(), "z");
 
     // Round should be r1 (review_round is 0), not r2.
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"z-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
+    write_file(repo.path(), "tests.d/z.toml", "[[check]]\nname = \"z-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
     write_file(repo.path(), "tasks/z/reviews/r2.md", "skipping ahead\n");
     commit(repo.path(), "send-back: z r2 (wrong round)");
 
@@ -306,7 +349,7 @@ fn send_back_rejected_when_touching_a_non_test_path() {
     post_and_finish(&repo, &hub, &home, &mut player, "w");
     director_pull_task_branch(repo.path(), "w");
 
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"w-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
+    write_file(repo.path(), "tests.d/w.toml", "[[check]]\nname = \"w-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
     write_file(repo.path(), "tasks/w/reviews/r1.md", "also fix this other file\n");
     write_file(repo.path(), "src/unrelated.rs", "// not a test path\n");
     commit(repo.path(), "send-back: w r1 (touches src/unrelated.rs)");
@@ -331,7 +374,7 @@ fn send_back_exceeding_max_review_rounds_escalates_instead_of_importing() {
 
     // Round 1: within the limit, imports normally.
     director_pull_task_branch(repo.path(), "v");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"v-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
+    write_file(repo.path(), "tests.d/v.toml", "[[check]]\nname = \"v-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n");
     write_file(repo.path(), "tasks/v/reviews/r1.md", "add feature2.txt too\n");
     commit(repo.path(), "send-back: v r1");
     let report = player.tick().expect("tick should succeed");
@@ -407,21 +450,25 @@ fn accept_rejected_when_not_tested() {
 #[test]
 fn accept_stops_at_a_conflict_with_a_main_that_moved() {
     let repo = director_repo();
-    // docs_paths includes tests.toml, so the director can edit the
-    // project-wide suite from main directly (an ordinary, allowed
-    // main-only commit), on the same lines the task's post edited.
-    write_file(repo.path(), "roadmap.toml", "title = \"Test Project\"\ndocs_paths = [\"tests.toml\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n");
-    commit(repo.path(), "declare docs_paths over tests.toml");
+    // docs_paths includes docs/, so the director can change it from main
+    // directly (an ordinary, allowed main-only commit) on the same file the
+    // subagent's finish writes.
+    write_file(repo.path(), "roadmap.toml", "title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n");
+    commit(repo.path(), "declare docs_paths over docs/");
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
 
-    post_and_finish(&repo, &hub, &home, &mut player, "conflicted");
+    plan(&repo, &mut player, "conflicted", "title = \"conflicted\"\nphase = \"p1\"\n");
+    post(&repo, &mut player, "conflicted");
+    subagent_commit(&home.hub(), "conflicted", "docs/notes.md", "the subagent's notes\n", "notes");
+    finish(&home, &hub, "conflicted");
+    assert_eq!(task_status(&hub, "conflicted"), Status::Tested);
 
-    // Main adds its own check where the post added the task's.
+    // Main writes the same file differently.
     checkout_branch(repo.path(), "main");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"no-feature\"\ncmd = \"test ! -f feature.txt\"\n");
-    commit(repo.path(), "docs: tighten tests.toml");
+    write_file(repo.path(), "docs/notes.md", "the director's notes\n");
+    commit(repo.path(), "docs: notes");
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 0, "{report}");
     assert_eq!(report.imported.len(), 1, "{report}");
@@ -430,7 +477,7 @@ fn accept_stops_at_a_conflict_with_a_main_that_moved() {
     director_pull_task_branch(repo.path(), "conflicted");
     commit_empty(repo.path(), "accept: conflicted");
 
-    // Both sides edited tests.toml: the player can't merge main in, so the
+    // Both sides wrote docs/notes.md: the player can't merge main in, so the
     // accept stops (no strike) for the director to resolve (spec §11).
     let report = player.tick().expect("tick should succeed");
     assert!(report.rejected.is_empty(), "{report}");
@@ -568,7 +615,7 @@ fn empty_marker_on_top_of_a_rejected_non_empty_commit_is_ownership() {
     checkout_branch(repo.path(), "task/stack");
     write_file(repo.path(), "tasks/stack/prompt.md", "do it\n");
     write_file(repo.path(), "tasks/stack/task.toml", "title = \"Stack\"\nphase = \"p1\"\n\n[check]\nname = \"stack-check\"\ncmd = \"true\"\n");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"stack-check\"\ncmd = \"true\"\n");
+    write_file(repo.path(), "tests.d/stack.toml", "[[check]]\nname = \"stack-check\"\ncmd = \"true\"\n");
     // The task check trivially always passes — this post will be rejected.
     commit(repo.path(), "post: stack (bad, check already passes)");
     commit_empty(repo.path(), "accept: stack (marker stacked on the rejected post)");
@@ -596,7 +643,7 @@ fn two_post_rejections_escalate_the_task() {
     checkout_branch(repo.path(), "task/strikeout");
     write_file(repo.path(), "tasks/strikeout/prompt.md", "attempt 1\n");
     write_file(repo.path(), "tasks/strikeout/task.toml", "title = \"Strikeout\"\nphase = \"p1\"\n\n[check]\nname = \"strikeout-check\"\ncmd = \"true\"\n");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"strikeout-check\"\ncmd = \"true\"\n");
+    write_file(repo.path(), "tests.d/strikeout.toml", "[[check]]\nname = \"strikeout-check\"\ncmd = \"true\"\n");
     commit(repo.path(), "post: strikeout attempt 1 (always passes)");
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");

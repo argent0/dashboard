@@ -179,6 +179,12 @@ the others to absorb it.
   (fixtures, `conftest.py`, test config). The tool can't tell which files
   are tests in an arbitrary language, so the project declares it.
 
+The suite also includes every `tests.d/*.toml` fragment: `[[check]]`
+entries only, read in path order after `tests.toml`'s. A check name must be
+unique across all of them. Fragments exist so that parallel tasks (§4)
+never edit the same suite file: each post adds its own (§6.3), and two
+tasks only conflict there when they really change the same check.
+
 **The suite passes** when every check passes. Once a task is merged its
 checks and test files are project tests, not "that task's tests". The
 invariant is that the project suite passes at every commit on `main`.
@@ -187,8 +193,9 @@ invariant is that the project suite passes at every commit on `main`.
 
 Each task's `task.toml` declares the task's own check (same shape as
 `[[check]]`): the thing that must fail at post and is the task's reason to
-exist. In the post commit the director also adds it to `tests.toml`, so on
-completion it is part of the suite.
+exist. In the post commit the director also adds it to the task's own
+suite fragment, `tests.d/<slug>.toml`, so on completion it is part of the
+suite. It goes there, not into `tests.toml`.
 
 ### 6.4 Stale tests
 
@@ -197,7 +204,8 @@ that a test is stale — rather than inconvenient — is a design decision and
 belongs to the director, never the subagent:
 
 - **Foreseen:** the director updates or deletes the stale test (and its
-  `tests.toml` entry) in the task's post commit, visible in the diff.
+  `tests.toml` or `tests.d/` entry) in the task's post commit, visible in
+  the diff.
 - **Found mid-task:** the subagent cannot touch pinned tests, so it
   **blocks**, explaining the conflict. That escalates the task (§10); the
   director and operator replan, typically retiring it and posting a
@@ -232,6 +240,7 @@ branch moves to `refs/retired/<slug>`; its slug is never reused.
 roadmap.toml                   on main: title, phases (id, title, goal),
                                docs_paths, [limits] (§10)
 tests.toml                     project suite: [[check]] entries, test_paths
+tests.d/<slug>.toml            the suite fragment a task's post adds: its check
 tasks/<slug>/task.toml         title, phase, milestone, depends_on, check
 tasks/<slug>/prompt.md         director → subagent instructions
 tasks/<slug>/reviews/r<N>.md   director's send-back notes, round N
@@ -251,12 +260,14 @@ send-back. Until then the director may keep refining tests freely.
 The player records git's blob hash (`git rev-parse <tip>:<file>`) of every
 file that exists at that moment under:
 
-- `tests.toml` and every entry of its `test_paths` (the whole test tree),
+- `tests.toml`, every `tests.d/` fragment, and every entry of `test_paths`
+  (the whole test tree),
 - `tasks/<slug>/`.
 
 Every subagent commit must leave each pinned file present and byte-identical
 — mechanically checked, no trust involved. New files are allowed: the
-subagent may add tests (which become project tests on merge).
+subagent may add tests (which become project tests on merge), but not a new
+`tests.d/` fragment: the suite's checks are the director's.
 
 Pins close tampering with the tests themselves, not every way of beating
 them (e.g. special-casing the code under test, or a new file that
@@ -271,7 +282,7 @@ failed validation is a rejection with the listed reason (§10).
 |---|---|---|---|
 | **plan** | new branch `task/<slug>` from `main`, adding `tasks/<slug>/task.toml` (director) | slug unused (incl. retired); `depends_on` slugs exist and aren't retired; no cycles | `plan` |
 | **replan** | edits `tasks/<slug>/task.toml` on a not-yet-posted branch (director) | same as plan | `plan` |
-| **post** | adds `prompt.md`, the task check and its test files, `tests.toml` entry, stale-test updates (director) | all `depends_on` accepted and merged into the branch (§11); task check **fails** | `post` |
+| **post** | adds `prompt.md`, the task check and its test files, `tests.d/<slug>.toml` entry, stale-test updates (director) | all `depends_on` accepted and merged into the branch (§11); task check **fails** | `post` |
 | **launch** | — (player) | task check still **fails** at the tip; records pins; starts `tmux` session running `claude` in a fresh subagent clone with `prompt.md` | — |
 | **finish** | code, optionally new tests (subagent) | pins unchanged; project suite **passes** | `pins`, `suite` |
 | **block** | `block:` marker (subagent) | — | — (escalates) |
@@ -547,8 +558,8 @@ proves the replacement stable. `tests.toml` needs `list_cmd`, printing one
 test per line.
 
 - *Pins*: only `fix_paths` are unpinned; `tasks/<slug>/` stays pinned.
-- *Post*: the §6.3 rules, except the `[check]` must not be in `tests.toml`
-  (a stress check would slow every later suite). The evidence must reproduce
+- *Post*: the §6.3 rules, except the `[check]` must not be in the suite (no
+  `tests.d/<slug>.toml`; a stress check would slow every later suite). The evidence must reproduce
   the flake, else the post is an `evidence` rejection.
 - *No repro*: `evidence` has a strike limit of 1. The player retires the task
   itself (§9 allows no other retirer): it moves the branch to
@@ -573,7 +584,7 @@ of regexes. When the check fails, the player re-runs it, all its `runs`, up
 to N more times; it passes if any attempt does, and failing every attempt is
 still one `suite` strike. With `retry_on`, only a failure whose output
 matches is retried, so any other failure is a strike at once. Both fields are
-director-owned and pinned with `tests.toml`.
+director-owned and pinned with the suite.
 
 Retries never apply to a task's own `[check]` (§6.3) or to evidence (§15),
 and the subagent's verdict stays plain: it is never told of them.

@@ -250,6 +250,67 @@ impl TestsConfig {
     }
 }
 
+/// The directory of per-task suite fragments (spec §6.2): each post adds its
+/// task check as `tests.d/<slug>.toml` instead of appending to `tests.toml`,
+/// so parallel tasks never edit the same file.
+pub const SUITE_DIR: &str = "tests.d";
+
+/// `tests.d/<slug>.toml`: where a task's post puts its task check.
+pub fn suite_fragment_path(slug: &str) -> String {
+    format!("{SUITE_DIR}/{slug}.toml")
+}
+
+/// Whether `path` is a suite fragment: a `.toml` file directly in `tests.d/`.
+pub fn is_suite_fragment(path: &str) -> bool {
+    path.strip_prefix(SUITE_DIR).and_then(|rest| rest.strip_prefix('/')).is_some_and(|name| !name.contains('/') && name.ends_with(".toml"))
+}
+
+/// A `tests.d/*.toml` fragment: only `[[check]]` entries. `test_paths` and
+/// `list_cmd` stay project-wide, in `tests.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct TestsFragment {
+    check: Vec<Check>,
+}
+
+/// The whole project suite: `tests.toml` (`base`) plus every fragment, in
+/// path order, as `(path, text)`. Check names must be unique across all of
+/// them, since results are keyed by name.
+pub(crate) fn suite_from_parts(base: &str, fragments: &[(String, String)]) -> Result<TestsConfig, String> {
+    let mut cfg = tests_config_from_str(base).map_err(|e| format!("tests.toml: {e}"))?;
+    let mut sorted: Vec<&(String, String)> = fragments.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (path, text) in sorted {
+        let frag: TestsFragment = toml::from_str(text).map_err(|e| format!("{path}: {e}"))?;
+        for c in &frag.check {
+            c.validate().map_err(|e| format!("{path}: {e}"))?;
+        }
+        cfg.check.extend(frag.check);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for c in &cfg.check {
+        if !seen.insert(c.name.as_str()) {
+            return Err(format!("check name {:?} is declared more than once across tests.toml and tests.d/", c.name));
+        }
+    }
+    Ok(cfg)
+}
+
+/// The project suite at `rev`: `tests.toml` plus every `tests.d/*.toml`.
+pub(crate) fn suite_at(git: &crate::git::Git, rev: &str) -> Result<TestsConfig, String> {
+    let base = git.show_file(rev, "tests.toml").ok_or_else(|| format!("tests.toml not found at {rev}"))?;
+    let fragments: Vec<(String, String)> = git
+        .ls_tree_files(rev, &format!("{SUITE_DIR}/"))
+        .into_iter()
+        .filter(|p| is_suite_fragment(p))
+        .map(|p| {
+            let text = git.show_file(rev, &p).unwrap_or_default();
+            (p, text)
+        })
+        .collect();
+    suite_from_parts(&base, &fragments)
+}
+
 // --------------------------------------------------------------------------
 // tasks/<slug>/task.toml (spec §8.2)
 // --------------------------------------------------------------------------
@@ -675,6 +736,37 @@ mod tests {
         "#;
         let err = tests_config_from_str(toml).unwrap_err();
         assert!(err.contains("min_pass"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn suite_merges_fragments_in_path_order() {
+        let base = "test_paths = [\"tests/\"]\n[[check]]\nname = \"unit\"\ncmd = \"true\"\n";
+        let frags = vec![
+            ("tests.d/b.toml".to_string(), "[[check]]\nname = \"b\"\ncmd = \"true\"\n".to_string()),
+            ("tests.d/a.toml".to_string(), "[[check]]\nname = \"a\"\ncmd = \"true\"\n".to_string()),
+        ];
+        let cfg = suite_from_parts(base, &frags).unwrap();
+        let names: Vec<&str> = cfg.check.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["unit", "a", "b"]);
+        assert_eq!(cfg.test_paths, ["tests/"]);
+    }
+
+    #[test]
+    fn suite_rejects_duplicate_names_and_bad_fragments() {
+        let base = "[[check]]\nname = \"unit\"\ncmd = \"true\"\n";
+        let dup = vec![("tests.d/a.toml".to_string(), "[[check]]\nname = \"unit\"\ncmd = \"false\"\n".to_string())];
+        assert!(suite_from_parts(base, &dup).unwrap_err().contains("more than once"));
+        let bad = vec![("tests.d/a.toml".to_string(), "[[check]]\nname = \"x\"\ncmd = \"true\"\nruns = 0\n".to_string())];
+        assert!(suite_from_parts(base, &bad).unwrap_err().starts_with("tests.d/a.toml"));
+    }
+
+    #[test]
+    fn suite_fragment_paths() {
+        assert_eq!(suite_fragment_path("foo"), "tests.d/foo.toml");
+        assert!(is_suite_fragment("tests.d/foo.toml"));
+        assert!(!is_suite_fragment("tests.d/sub/foo.toml"));
+        assert!(!is_suite_fragment("tests.d/README.md"));
+        assert!(!is_suite_fragment("tests.dx/foo.toml"));
     }
 
     #[test]

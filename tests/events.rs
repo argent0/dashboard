@@ -59,7 +59,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
         &format!("tasks/{slug}/task.toml"),
         &format!("title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f {feature}\"\n"),
     );
-    write_file(repo.path(), "tests.toml", &format!("[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f {feature}\"\n"));
+    write_file(repo.path(), &format!("tests.d/{slug}.toml"), &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f {feature}\"\n"));
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
     assert_eq!(report.imported.len(), 1, "post: {slug} not imported: {report}");

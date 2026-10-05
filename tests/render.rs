@@ -46,7 +46,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
         &format!("tasks/{slug}/task.toml"),
         &format!("title = \"{slug} title\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
-    write_file(repo.path(), "tests.toml", &format!("[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"));
+    write_file(repo.path(), &format!("tests.d/{slug}.toml"), &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"));
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
     assert_eq!(report.launched, vec![slug.to_string()], "{report}");
