@@ -119,7 +119,8 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
 
     // ---- phases ----
     let phase_ids: HashSet<&str> = state.roadmap.phases.iter().map(|p| p.id.as_str()).collect();
-    for phase in &state.roadmap.phases {
+    let hidden_ids: HashSet<&str> = state.roadmap.phases.iter().filter(|p| p.hidden).map(|p| p.id.as_str()).collect();
+    for phase in state.roadmap.phases.iter().filter(|p| !p.hidden) {
         let tasks: Vec<&TaskState> = live.iter().filter(|t| t.config.phase == phase.id).copied().collect();
         let header = phase.title.clone().unwrap_or_else(|| phase.id.clone());
         render_phase(&mut out, &header, phase.goal.as_deref(), &tasks, color, width);
@@ -128,9 +129,16 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     if !no_phase.is_empty() {
         render_phase(&mut out, "(no phase)", None, &no_phase, color, width);
     }
+    if !hidden_ids.is_empty() {
+        let n = live.iter().filter(|t| hidden_ids.contains(t.config.phase.as_str())).count();
+        let plural = |k: usize| if k == 1 { "" } else { "s" };
+        let k = hidden_ids.len();
+        out.push(style(&format!("({k} hidden phase{}, {n} task{})", plural(k), plural(n)), &[c::DIM], color));
+        out.push(String::new());
+    }
 
     // ---- milestones ----
-    let milestones: Vec<&TaskState> = live.iter().filter(|t| t.config.milestone).copied().collect();
+    let milestones: Vec<&TaskState> = live.iter().filter(|t| t.config.milestone && !hidden_ids.contains(t.config.phase.as_str())).copied().collect();
     out.push(style("⚑ Milestones", &[c::BOLD, c::MAGENTA], color));
     if milestones.is_empty() {
         out.push(none_line(color));
@@ -401,7 +409,7 @@ mod tests {
     fn roadmap() -> RoadmapConfig {
         RoadmapConfig {
             title: Some("Widget".to_string()),
-            phases: vec![Phase { id: "p1".to_string(), title: Some("Phase One".to_string()), goal: Some("ship the widget".to_string()) }],
+            phases: vec![Phase { id: "p1".to_string(), title: Some("Phase One".to_string()), goal: Some("ship the widget".to_string()), hidden: false }],
             docs_paths: vec![],
             limits: Limits { max_review_rounds: 2, strikes: StrikeLimits::default() },
             player: Default::default(),
@@ -466,6 +474,22 @@ mod tests {
         assert!(out.contains("in-phase"), "{out}");
         assert!(out.contains("(no phase)"), "{out}");
         assert!(out.contains("stray"), "{out}");
+    }
+
+    #[test]
+    fn hidden_phases_are_collapsed_but_still_counted() {
+        let mut old = task("old-task", "p0", Status::Accepted);
+        old.config.milestone = true;
+        let tasks = vec![old, task("new-task", "p1", Status::Ready)];
+        let mut state = hub_state(tasks);
+        state.roadmap.phases.insert(0, Phase { id: "p0".to_string(), title: Some("Phase Zero".to_string()), goal: None, hidden: true });
+        let out = render_plain(&state);
+        assert!(!out.contains("Phase Zero"), "{out}");
+        assert!(!out.contains("old-task"), "{out}");
+        assert!(!out.contains("(no phase)"), "{out}");
+        assert!(out.contains("(1 hidden phase, 1 task)"), "{out}");
+        assert!(out.contains("1/2 accepted (50%)"), "{out}");
+        assert!(out.contains("new-task"), "{out}");
     }
 
     #[test]

@@ -126,6 +126,8 @@ docs_paths = ["docs/adr"]        # paths the director may touch on main besides 
 id = "p1"
 title = "…"
 goal = "…"
+hidden = false                   # true: left out of `status` (phase list + milestones),
+                                 # still counted in Overall; shown as "(N hidden phases, M tasks)"
 
 [limits]
 max_review_rounds = 2            # default 2

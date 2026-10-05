@@ -25,6 +25,10 @@ pub struct Phase {
     pub title: Option<String>,
     #[serde(default)]
     pub goal: Option<String>,
+    /// Left out of `status`'s phase list and milestones (e.g. a finished,
+    /// old phase); its tasks still count toward the overall progress.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

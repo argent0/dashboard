@@ -237,7 +237,7 @@ branch moves to `refs/retired/<slug>`; its slug is never reused.
 ### 8.2 Files
 
 ```
-roadmap.toml                   on main: title, phases (id, title, goal),
+roadmap.toml                   on main: title, phases (id, title, goal, hidden),
                                docs_paths, [limits] (§10)
 tests.toml                     project suite: [[check]] entries, test_paths
 tests.d/<slug>.toml            the suite fragment a task's post adds: its check
