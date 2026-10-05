@@ -35,12 +35,15 @@ pub struct Phase {
 #[serde(default)]
 pub struct Limits {
     pub max_review_rounds: u32,
+    /// How many times a subagent may contest the tests it must pass
+    /// (spec §18); one more escalates.
+    pub max_contest_rounds: u32,
     pub strikes: StrikeLimits,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_review_rounds: 2, strikes: StrikeLimits::default() }
+        Self { max_review_rounds: 2, max_contest_rounds: 2, strikes: StrikeLimits::default() }
     }
 }
 
@@ -663,6 +666,7 @@ mod tests {
         assert!(cfg.phases.is_empty());
         assert!(cfg.docs_paths.is_empty());
         assert_eq!(cfg.limits.max_review_rounds, 2);
+        assert_eq!(cfg.limits.max_contest_rounds, 2);
         assert_eq!(cfg.limits.strikes.history, 2);
         assert_eq!(cfg.limits.strikes.suite, 2);
         assert_eq!(cfg.player.agent_cmd, "claude --dangerously-skip-permissions");

@@ -426,7 +426,7 @@ impl<S: Sessions> Player<S> {
             }
 
             let session_just_died = matches!(prev, Some((_, true))) && !alive;
-            let still_in_flight = matches!(task.status, Status::Posted | Status::InProgress | Status::InRevision);
+            let still_in_flight = matches!(task.status, Status::Posted | Status::InProgress | Status::InRevision | Status::Contested);
             if session_just_died && still_in_flight {
                 events::append(&self.home, EventKind::SessionDied, Some(&task.slug), &format!("task/{}'s subagent session died", task.slug))?;
             }
@@ -792,6 +792,11 @@ impl<S: Sessions> Player<S> {
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
             Some(Status::Tested) => self.try_send_back(slug, tip, candidate, &diffs, &hub_state, Actor::Director, report),
+            Some(Status::Contested) if managed => {
+                let msg = format!("task/{slug}'s contest is its task agent's to answer (spec §18), not the director's: ask it (`dashboard ask {slug}`)");
+                self.reject(slug, candidate, Reason::Ownership, msg, report)
+            }
+            Some(Status::Contested) => self.try_contest_reply(slug, tip, candidate, &diffs, &hub_state, Actor::Director, report),
             Some(Status::Conflicted) => {
                 let main = hub_state.tasks.iter().find(|t| t.slug == slug).and_then(|t| t.conflict.as_ref()).map(|c| c.main.clone()).unwrap_or_default();
                 let msg = format!("task/{slug} is conflicted: resolve it with a merge of main {main} on the hub's task tip (or retire it)");
@@ -1055,6 +1060,76 @@ impl<S: Sessions> Player<S> {
         let review_body = self.hub.show_file(candidate, &expected_path).unwrap_or_default();
         let header = format!("Review round {round} from the director. Fetch it: git pull --ff-only origin task/{slug}. Then make the whole project suite pass and commit.");
         self.sessions.send(slug, &format!("{header}\n\n{review_body}"));
+        Ok(())
+    }
+
+    // ---- contest (spec §18) ----
+
+    /// A subagent's `contest:` marker: a test it must pass is wrong. Like a
+    /// block it must be a clean marker on the hub tip, but it doesn't
+    /// escalate: the task is `contested` until the task agent (or the
+    /// director) replies. A contest beyond `max_contest_rounds` escalates
+    /// instead of importing, as a send-back beyond `max_review_rounds` does.
+    fn try_contest(&mut self, slug: &str, hub_tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+        if !self.hub.diff_names(hub_tip, candidate).is_empty() {
+            let msg = format!("history: task/{slug}'s contest: commit isn't a clean reset to the hub tip — reset to hub, then contest");
+            return self.reject_and_relay(slug, candidate, Reason::History, msg, report);
+        }
+        if records::is_spike_at(&self.hub, hub_tip, slug) {
+            let msg = format!("suite: task/{slug} is a spike: it has no director's test to contest (block: instead)");
+            return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
+        }
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let n = hub_state.tasks.iter().find(|t| t.slug == slug).map(|t| t.contest_round).unwrap_or(0) + 1;
+        let max = hub_state.roadmap.limits.max_contest_rounds;
+        if n > max {
+            let subject = self.hub.commit_subject(candidate).unwrap_or_default();
+            let cause = format!("contest rounds exceeded: {n} > {max} ({subject})");
+            records::record_escalation(&self.hub, slug, candidate, &cause)?;
+            report.escalated.push((slug.to_string(), cause));
+            return Ok(());
+        }
+
+        let hub_ref = format!("refs/heads/task/{slug}");
+        self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Contest, Some(slug))?;
+        report.imported.push((hub_ref, candidate.to_string(), Transition::Contest));
+        self.sessions.send(slug, &format!("contest c{n} recorded; don't commit further. The reply will be pasted here."));
+        Ok(())
+    }
+
+    /// The reply to a contest, by the task agent or (task agents off) the
+    /// director: one commit adding `tasks/<slug>/contests/c<N>.md` and
+    /// optionally fixed tests, nothing else. No suite requirement, and no
+    /// review round spent: the reply may keep the test and explain it. The
+    /// player re-pins and relays the reply to the subagent.
+    fn try_contest_reply(&mut self, slug: &str, tip: &str, candidate: &str, diffs: &[(char, String)], hub_state: &state::HubState, actor: Actor, report: &mut TickReport) -> Result<(), String> {
+        let task = hub_state.tasks.iter().find(|t| t.slug == slug).ok_or_else(|| format!("contest: task/{slug}: no task state"))?;
+        let n = task.contest_round + 1;
+        let expected = format!("tasks/{slug}/contests/c{n}.md");
+        if !diffs.iter().any(|(st, p)| *st == 'A' && *p == expected) {
+            let msg = format!("ownership: task/{slug} is contested: the reply must add {expected}");
+            return self.reject_by(actor, slug, candidate, Reason::Ownership, msg, report);
+        }
+        let test_paths = self.hub.show_file(tip, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).map(|c| c.test_paths).unwrap_or_default();
+        let task_prefix = format!("tasks/{slug}/");
+        if let Some((_, path)) = diffs.iter().find(|(_, p)| !(p == "tests.toml" || config::is_suite_fragment(p) || p.starts_with(&task_prefix) || path_under_test_paths(p, &test_paths))) {
+            let msg = format!("ownership: task/{slug}: a contest reply may only add the reply and fix tests, not {path:?}");
+            return self.reject_by(actor, slug, candidate, Reason::Ownership, msg, report);
+        }
+
+        let hub_ref = format!("refs/heads/task/{slug}");
+        self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, candidate, actor, Transition::ContestReply, Some(slug))?;
+        report.imported.push((hub_ref, candidate.to_string(), Transition::ContestReply));
+
+        records::set_pins(&self.hub, slug, candidate)?;
+        let reply = self.hub.show_file(candidate, &expected).unwrap_or_default();
+        let header = format!(
+            "Reply to your contest c{n}. Fetch it: git pull --ff-only origin task/{slug} (tests may have changed; they're re-pinned). \
+Then make the whole project suite pass and commit, or contest/block again."
+        );
+        self.sessions.send(slug, &format!("{header}\n\n{reply}"));
         Ok(())
     }
 
@@ -1418,10 +1493,10 @@ Answer it in one new commit adding {} and {}.",
         // A spike the operator gives up on may also be retired once its
         // finish is validated (spec §14); an ordinary tested task may not.
         let tested_spike = status == Some(Status::Tested) && records::is_spike_at(&self.hub, tip, slug);
-        let allowed = tested_spike || matches!(status, Some(Status::Pending | Status::Ready | Status::Orphaned | Status::Conflicted | Status::Escalated));
+        let allowed = tested_spike || matches!(status, Some(Status::Pending | Status::Ready | Status::Orphaned | Status::Conflicted | Status::Contested | Status::Escalated));
         if !allowed {
             let msg = format!(
-                "retire: task/{slug} is {} — retire is only allowed while pending/ready/orphaned (not posted or in flight), conflicted or escalated",
+                "retire: task/{slug} is {} — retire is only allowed while pending/ready/orphaned (not posted or in flight), conflicted, contested or escalated",
                 status.map(|s| s.as_str()).unwrap_or("unknown")
             );
             return self.reject(slug, candidate, Reason::Retire, msg, report);
@@ -1765,7 +1840,7 @@ Answer it in one new commit adding {} and {}.",
         }
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
         let status = hub_state.tasks.iter().find(|t| t.slug == slug).map(|t| t.status);
-        if !matches!(status, Some(Status::Posted | Status::InProgress | Status::InRevision)) {
+        if !matches!(status, Some(Status::Posted | Status::InProgress | Status::InRevision | Status::Contested)) {
             return Err(format!(
                 "relaunch: task/{slug} is {} — relaunch only applies while posted, in progress, or in revision",
                 status.map(|s| s.as_str()).unwrap_or("unknown")
@@ -1870,7 +1945,10 @@ Answer it in one new commit adding {} and {}.",
                 report.imported.push((hub_ref, candidate.to_string(), Transition::Block));
                 return Ok(());
             }
-            let msg = "suite: empty commit is neither a finish claim nor a block: marker".to_string();
+            if subject.starts_with("contest:") {
+                return self.try_contest(slug, hub_tip, candidate, report);
+            }
+            let msg = "suite: empty commit is neither a finish claim nor a block:/contest: marker".to_string();
             return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
         }
 
@@ -2084,6 +2162,10 @@ run git fetch origin && git rebase origin/task/{slug}, re-run the task's check i
                 self.try_send_back(slug, tip, candidate, &diffs, &hub_state, Actor::TaskAgent, report)?;
                 "send-back"
             }
+            Status::Contested => {
+                self.try_contest_reply(slug, tip, candidate, &diffs, &hub_state, Actor::TaskAgent, report)?;
+                "contest reply"
+            }
             other => {
                 let msg = format!("ownership: task/{slug} is {}: there is nothing for its task agent to commit now", other.as_str());
                 return self.reject_by(Actor::TaskAgent, slug, candidate, Reason::Ownership, msg, report);
@@ -2092,7 +2174,11 @@ run git fetch origin && git rebase origin/task/{slug}, re-run the task's check i
 
         let key = state::agent_key(slug);
         if report.imported.iter().any(|(_, sha, _)| sha == candidate) {
-            let next = if step == "post" { "the subagent is launched" } else { "the review is relayed to the subagent" };
+            let next = match step {
+                "post" => "the subagent is launched",
+                "send-back" => "the review is relayed to the subagent",
+                _ => "your reply is relayed to the subagent",
+            };
             self.sessions.send(
                 &key,
                 &format!("The player imported your {step} at {}; {next}. Write your report if you haven't yet, then wait: the player pastes the next review request here.", short(candidate)),
@@ -2140,12 +2226,13 @@ run git fetch origin && git rebase origin/task/{slug}, re-run the task's check i
             let step = match task.status {
                 Status::Ready => Some(AgentStep::Post),
                 Status::Tested => Some(AgentStep::Review),
+                Status::Contested => Some(AgentStep::Contest),
                 _ => None,
             };
             if let Some(step) = step.filter(|_| state::task_agent_managed(&hub_state.roadmap, &task.config)) {
                 if task.agent.is_none() {
                     self.launch_task_agent(task, step, &hub_state.roadmap, report)?;
-                } else if step == AgentStep::Review && records::agent_asked(&self.hub, &task.slug).as_deref() != Some(task.tip.as_str()) {
+                } else if step != AgentStep::Post && records::agent_asked(&self.hub, &task.slug).as_deref() != Some(task.tip.as_str()) {
                     records::set_agent_asked(&self.hub, &task.slug, &task.tip)?;
                     let text = self.agent_step_text(task, step, &hub_state.roadmap);
                     self.sessions.send(&state::agent_key(&task.slug), &text);
@@ -2163,7 +2250,7 @@ run git fetch origin && git rebase origin/task/{slug}, re-run the task's check i
         // Recorded first, so a launch that fails below is never retried
         // every tick (as for subagents; `dashboard relaunch --agent`).
         records::set_agent_launched(&self.hub, slug, &task.tip)?;
-        if step == AgentStep::Review {
+        if step != AgentStep::Post {
             records::set_agent_asked(&self.hub, slug, &task.tip)?;
         }
 
@@ -2258,8 +2345,25 @@ changed this round: git diff {base} {tip}. Check that it does what the task aske
 it. Then either:\n\
 - recommend accept: commit nothing, report verdict: accept;\n\
 - send back: ONE commit adding tasks/{slug}/reviews/r{round}.md (what is wrong) and a new or updated test that makes the suite \
-fail again, report verdict: sent-back. A concern you can't turn into a failing test isn't a send-back: report verdict: unsure.{cap}",
+fail again, report verdict: sent-back. Before committing it, run that test against the subagent's code as it is and confirm it \
+fails, for the reason your review gives: a send-back the suite still passes is a `review` strike. Run it only on the subagent's \
+code: never write code of your own to see how the test should pass. A concern you can't turn into a failing test isn't a \
+send-back: report verdict: unsure.{cap}",
                     tip = task.tip
+                )
+            }
+            AgentStep::Contest => {
+                let n = task.contest_round + 1;
+                let reason = task.contest.clone().unwrap_or_default();
+                format!(
+                    "Step: contest c{n}. The subagent says a test it must pass is wrong (it can't be satisfied, or demands one particular \
+implementation instead of behaviour):\n\n{reason}\n\n\
+Update your branch: git fetch origin && git merge --ff-only origin/task/{slug}. Judge it from the task and the tests, still \
+without writing any implementation. Then reply in ONE commit adding tasks/{slug}/contests/c{n}.md, your answer to the subagent, \
+and, if it's right, the fixed tests (tests and tests.d/ only). If the test is right, the reply alone explains how it can be met. \
+A reply spends no review round; the subagent may contest {} more time(s) before the task escalates. Then write your report \
+(step: contest c{n}, verdict: replied).",
+                    roadmap.limits.max_contest_rounds.saturating_sub(n)
                 )
             }
             AgentStep::Wait => format!(
@@ -2309,11 +2413,12 @@ fail again, report verdict: sent-back. A concern you can't turn into a failing t
         let step = match task.status {
             Status::Pending | Status::Ready | Status::Orphaned => AgentStep::Post,
             Status::Tested => AgentStep::Review,
+            Status::Contested => AgentStep::Contest,
             _ => AgentStep::Wait,
         };
         let prompt_file = Self::git_dir(&dir)?.join("dashboard-prompt.md");
         self.write_agent_prompt(task, step, &hub_state.roadmap, &dir, &prompt_file, true)?;
-        if step == AgentStep::Review {
+        if step != AgentStep::Post && step != AgentStep::Wait {
             records::set_agent_asked(&self.hub, slug, &task.tip)?;
         }
         self.sessions.launch(&key, &dir, &hub_state.roadmap.player.task_agent_cmd, &prompt_file)
@@ -2420,7 +2525,8 @@ fn save_player_state(home: &Home, last: &BTreeMap<String, (Status, bool)>) -> Re
 /// so the director hears `agent_launched` and `agent_report` instead.
 fn status_event(task: &state::TaskState, managed: bool) -> Option<(EventKind, String)> {
     match task.status {
-        Status::Ready | Status::Tested if managed => None,
+        Status::Ready | Status::Tested | Status::Contested if managed => None,
+        Status::Contested => Some((EventKind::Contested, task.contest.clone().unwrap_or_default())),
         Status::Tested if task.spike.is_some() => {
             Some((EventKind::Tested, "spike finish validated — claims passed; review the findings with the operator, then send back a new question or conclude".to_string()))
         }
@@ -2508,6 +2614,9 @@ under its test_paths, or touch tasks/{slug}/. The pinned files, which must stay 
 {pinned_block}\n\n\
 If the task can't be done as specified, make an empty commit explaining why instead of forcing it \
 through:\n  git commit --allow-empty -m \"block: <short reason>\" -m \"<explanation>\"\n\n\
+If instead a test you must pass is wrong (it can't be satisfied, or it demands one particular implementation rather than \
+behaviour), reset to the hub tip and contest it with an empty commit naming the test and why; the reply is pasted here:\n  \
+git commit --allow-empty -m \"contest: <test name>\" -m \"<why it's wrong>\"\n\n\
 Never push, rebase, amend, reset published commits, or create merge commits.\n\n\
 The player will paste messages (rejections, director reviews) into this session as things happen — \
 follow their recovery instructions."
@@ -2519,6 +2628,8 @@ follow their recovery instructions."
 enum AgentStep {
     Post,
     Review,
+    /// Reply to the subagent's contest (spec §18).
+    Contest,
     /// Nothing pending (a relaunch while the subagent works).
     Wait,
 }
@@ -2538,8 +2649,11 @@ push: the player fetches your branch, validates each commit, and pastes its verd
 reset a commit the player imported, and never create merge commits.\n\n\
 Rules:\n\
 - Never write a throwaway implementation: not to prove a test can pass, not to try out a fix, not even in a scratch directory you \
-delete afterwards. Implementing is the subagent's job; reason about the tests from the task and the existing code. The only thing \
-you run before a post is the task's check, on the code as it is, to see it fail.\n\
+delete afterwards. Implementing is the subagent's job; reason about the tests from the task and the existing code. You may run \
+any test you write against the code as it is (the base before a post, the subagent's work before a send-back) to see it fail for \
+the right reason, but never against code you wrote to make it pass.\n\
+- Test observable behaviour through the task's interface, not internals or one particular implementation. The subagent may \
+contest a test it can't satisfy or that over-specifies, and you then have to reply.\n\
 - Every test you write or send back must be pure: no effects outside its own sandbox, no shared state, no network, real clock or \
 unseeded randomness, no dependence on test order. The prompt.md you write passes this rule on to the subagent in one line.\n\
 - Write only tests, tests.toml, tests.d/ and files under tasks/{slug}/, never product code. In task.toml only [check] is yours; \
@@ -2550,10 +2664,10 @@ Director's brief: {brief}\n\n\
 After each step, and after answering a question from the director, write your report: exactly the block below, to {report}.tmp, \
 then mv it to {report} (the player reads and removes it). No diffs and no code in it.\n\n\
 slug: {slug}\n\
-step: post | review r<N> | question\n\
+step: post | review r<N> | contest c<N> | question\n\
 commit: <sha, or \"none\">\n\
 check: <one line: what the task's check asserts and why it fails / now passes>\n\
-verdict: posted | accept | sent-back | unsure | answer\n\
+verdict: posted | accept | sent-back | replied | unsure | answer\n\
 why: <two or three sentences>\n\
 concerns: <anything cross-task the director should know, or \"none\">\n\n\
 The player pastes later steps into this session (review requests, the director's questions, rejections of your commits); wait for \
@@ -2564,7 +2678,7 @@ them between steps.",
 
 /// The `verdict:` of a task agent's report, or `unknown`.
 fn report_verdict(text: &str) -> String {
-    const KNOWN: [&str; 5] = ["posted", "accept", "sent-back", "unsure", "answer"];
+    const KNOWN: [&str; 6] = ["posted", "accept", "sent-back", "replied", "unsure", "answer"];
     text.lines()
         .find_map(|l| l.trim().strip_prefix("verdict:"))
         .and_then(|v| v.split_whitespace().next())

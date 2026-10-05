@@ -30,6 +30,7 @@ fn status_style(status: Status) -> StatusStyle {
         Status::Posted => StatusStyle { icon: "▶", codes: &[c::YELLOW] },
         Status::InRevision => StatusStyle { icon: "↻", codes: &[c::MAGENTA] },
         Status::Conflicted => StatusStyle { icon: "⇄", codes: &[c::RED] },
+        Status::Contested => StatusStyle { icon: "?", codes: &[c::MAGENTA] },
         Status::Escalated => StatusStyle { icon: "✗", codes: &[c::RED] },
         Status::Ready => StatusStyle { icon: "●", codes: &[c::CYAN] },
         Status::Pending => StatusStyle { icon: "○", codes: &[c::GRAY] },
@@ -41,8 +42,8 @@ fn status_style(status: Status) -> StatusStyle {
 /// Live statuses, in the order the overall summary line and per-phase rows
 /// display them. `Retired` is deliberately excluded — it's counted (and
 /// shown) separately, never part of the live denominator.
-const LIVE_STATUS_ORDER: [Status; 10] =
-    [Status::Accepted, Status::Tested, Status::InProgress, Status::Posted, Status::InRevision, Status::Conflicted, Status::Escalated, Status::Ready, Status::Pending, Status::Orphaned];
+const LIVE_STATUS_ORDER: [Status; 11] =
+    [Status::Accepted, Status::Tested, Status::InProgress, Status::Posted, Status::InRevision, Status::Conflicted, Status::Contested, Status::Escalated, Status::Ready, Status::Pending, Status::Orphaned];
 
 fn actor_label(actor: Actor) -> &'static str {
     match actor {
@@ -186,7 +187,7 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     }
 
     // ---- in flight ----
-    let in_flight: Vec<&TaskState> = live.iter().chain(spikes.iter()).filter(|t| matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision | Status::Conflicted)).copied().collect();
+    let in_flight: Vec<&TaskState> = live.iter().chain(spikes.iter()).filter(|t| matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision | Status::Conflicted | Status::Contested)).copied().collect();
     out.push(style(&if in_flight.len() > 1 { format!("In flight ({})", in_flight.len()) } else { "In flight".to_string() }, &[c::BOLD], color));
     if in_flight.is_empty() {
         out.push(none_line(color));
@@ -338,9 +339,19 @@ fn render_in_flight(out: &mut Vec<String>, state: &HubState, t: &TaskState, colo
         out.push(format!("  spike round {}{}", sp.round, sp.answer.as_ref().map(|a| format!(", latest answer: {a}")).unwrap_or_default()));
     }
 
+    if let Some(reason) = &t.contest {
+        let line = format!("  contested: {}", first_line_truncated(reason));
+        out.push(style(&truncate(&line, width), &[c::MAGENTA], color));
+    }
+
     let max_rounds = state.roadmap.limits.max_review_rounds;
     let round_codes: &[&str] = if t.review_round >= max_rounds { &[c::RED] } else { &[] };
-    out.push(format!("  round {}", style(&format!("r{}/{}", t.review_round, max_rounds), round_codes, color)));
+    let contests = if t.contest_round > 0 || t.contest.is_some() {
+        format!(", contests c{}/{}", t.contest_round + u32::from(t.contest.is_some()), state.roadmap.limits.max_contest_rounds)
+    } else {
+        String::new()
+    };
+    out.push(format!("  round {}{contests}", style(&format!("r{}/{}", t.review_round, max_rounds), round_codes, color)));
 
     let strike_bits: Vec<String> = Reason::ALL
         .iter()
@@ -424,7 +435,7 @@ mod tests {
             title: Some("Widget".to_string()),
             phases: vec![Phase { id: "p1".to_string(), title: Some("Phase One".to_string()), goal: Some("ship the widget".to_string()), hidden: false }],
             docs_paths: vec![],
-            limits: Limits { max_review_rounds: 2, strikes: StrikeLimits::default() },
+            limits: Limits { max_review_rounds: 2, max_contest_rounds: 2, strikes: StrikeLimits::default() },
             player: Default::default(),
         }
     }
@@ -437,6 +448,8 @@ mod tests {
             tip: "deadbeef".to_string(),
             strikes: BTreeMap::new(),
             review_round: 0,
+            contest_round: 0,
+            contest: None,
             escalation: None,
             post_mortem: None,
             suite: None,

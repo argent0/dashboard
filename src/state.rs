@@ -32,6 +32,9 @@ pub enum Status {
     /// An accept the player couldn't land: merging `main` conflicts, and the
     /// director must resolve that specific conflict (spec §11).
     Conflicted,
+    /// The subagent contested a test it must pass (spec §18): the task
+    /// agent (or the director) must reply.
+    Contested,
     Escalated,
     Accepted,
     /// A concluded spike (spec §14): never merged, its branch kept under
@@ -51,6 +54,7 @@ impl Status {
             Status::Tested => "tested",
             Status::InRevision => "in_revision",
             Status::Conflicted => "conflicted",
+            Status::Contested => "contested",
             Status::Escalated => "escalated",
             Status::Accepted => "accepted",
             Status::Explored => "explored",
@@ -73,6 +77,10 @@ pub struct TaskState {
     /// whose scope == slug, per reason").
     pub strikes: BTreeMap<Reason, u32>,
     pub review_round: u32,
+    /// Contests answered so far: `tasks/<slug>/contests/c*.md` at the tip.
+    pub contest_round: u32,
+    /// The subagent's reason, set only when `status == Contested`.
+    pub contest: Option<String>,
     /// The cause text, set only when `status == Escalated`.
     pub escalation: Option<String>,
     /// The post-mortem body, set only when `status == Retired`.
@@ -247,6 +255,7 @@ fn derive_task(
             .count() as u32,
     };
 
+    let contest_round = contest_files(hub, &tip, slug).len() as u32;
     let flaky = flakes.iter().filter(|f| f.scope == slug).count() as u32;
     let suite = cached_suite_summary(hub, &tip);
     let note = records::import_note(hub, &tip);
@@ -259,6 +268,7 @@ fn derive_task(
     let mut escalation: Option<String> = None;
     let mut post_mortem: Option<String> = None;
     let mut conflict: Option<records::ConflictRecord> = None;
+    let mut contest: Option<String> = None;
 
     let status = if is_retired {
         post_mortem = hub.commit_body(&tip);
@@ -276,7 +286,11 @@ fn derive_task(
     } else {
         match note.as_ref().map(|n| n.transition) {
             Some(Transition::Finish) => Status::Tested,
-            Some(Transition::SendBack | Transition::SyncRevision) => Status::InRevision,
+            Some(Transition::SendBack | Transition::SyncRevision | Transition::ContestReply) => Status::InRevision,
+            Some(Transition::Contest) => {
+                contest = Some(marker_text(hub, &tip, "contest:"));
+                Status::Contested
+            }
             Some(Transition::Post) => {
                 if alive {
                     Status::InProgress
@@ -303,7 +317,7 @@ fn derive_task(
     };
 
     let agent = agent.map(|a| AgentState { report: records::agent_reports(hub, &tip).pop(), ..a });
-    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, escalation, post_mortem, suite, alive, spike, flaky, conflict, agent })
+    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, contest_round, contest, escalation, post_mortem, suite, alive, spike, flaky, conflict, agent })
 }
 
 /// Whether `cfg`'s post and send-backs belong to a task agent (spec §17):
@@ -334,12 +348,7 @@ fn escalation_cause(
     }
 
     if matches!(note, Some(n) if n.transition == Transition::Block) {
-        let subject = hub.commit_subject(tip).unwrap_or_default();
-        let subject = subject.strip_prefix("block:").map(str::trim_start).unwrap_or(&subject).to_string();
-        let body = hub.commit_body(tip).unwrap_or_default();
-        let body = body.trim();
-        let text = if body.is_empty() { subject } else { format!("{subject}\n{body}") };
-        return Some(format!("blocked: {text}"));
+        return Some(format!("blocked: {}", marker_text(hub, tip, "block:")));
     }
 
     if let Some(rec) = records::escalation(hub, slug) {
@@ -347,6 +356,26 @@ fn escalation_cause(
     }
 
     None
+}
+
+/// A marker commit's explanation: its subject without `prefix`, then its body.
+fn marker_text(hub: &Git, commit: &str, prefix: &str) -> String {
+    let subject = hub.commit_subject(commit).unwrap_or_default();
+    let subject = subject.strip_prefix(prefix).map(str::trim_start).unwrap_or(&subject).to_string();
+    let body = hub.commit_body(commit).unwrap_or_default();
+    let body = body.trim();
+    if body.is_empty() { subject } else { format!("{subject}\n{body}") }
+}
+
+/// The contest replies on a task at `commit`: `tasks/<slug>/contests/c<N>.md`.
+pub fn contest_files(hub: &Git, commit: &str, slug: &str) -> Vec<String> {
+    hub.ls_tree_files(commit, &format!("tasks/{slug}/contests/"))
+        .into_iter()
+        .filter(|f| {
+            let base = f.rsplit('/').next().unwrap_or("");
+            base.strip_prefix('c').and_then(|r| r.strip_suffix(".md")).is_some_and(|n| n.parse::<u32>().is_ok())
+        })
+        .collect()
 }
 
 /// Reads every cached check result at `commit` (never runs anything) and

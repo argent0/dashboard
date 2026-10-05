@@ -59,6 +59,10 @@ pub enum Transition {
     SyncRevision,
     /// A director's resolution of a recorded merge conflict (spec §11).
     Resolve,
+    /// A subagent's `contest:` marker: a test it must pass is wrong (spec §18).
+    Contest,
+    /// The reply to a contest (task agent, or director): back to the subagent.
+    ContestReply,
 }
 
 impl Transition {
@@ -79,6 +83,8 @@ impl Transition {
             Transition::Sync => "sync",
             Transition::SyncRevision => "sync_revision",
             Transition::Resolve => "resolve",
+            Transition::Contest => "contest",
+            Transition::ContestReply => "contest_reply",
         }
     }
 }

@@ -142,6 +142,7 @@ hidden = false                   # true: left out of `status` (phase list + mile
 
 [limits]
 max_review_rounds = 2            # default 2
+max_contest_rounds = 2           # default 2: subagent contests per task (spec §18)
 
 [limits.strikes]                 # each defaults to 2 (spec §10)
 history = 2
@@ -382,6 +383,16 @@ back here):
   `agent_report`. Tests turn task agents off in their fixture roadmap
   (`tests/common`'s `NO_TASK_AGENTS`) unless they're about them
   (`tests/task_agent.rs`).
+
+- **Contests** (spec §18): a subagent's `contest:` marker (clean, like
+  `block:`) says a test it must pass is wrong. The task goes `contested`
+  (`Transition::Contest`), not escalated; the task agent (or, task agents
+  off, the director) replies with one commit adding
+  `tasks/<slug>/contests/c<N>.md` and optionally fixed tests
+  (`Transition::ContestReply` → `in_revision`, re-pinned, relayed, no
+  suite requirement, no review round). `TaskState::contest_round` counts
+  the `contests/c*.md` at the tip; a contest past `max_contest_rounds`
+  escalates without being imported.
 
 Still undecided (spec §13): timeout/crash handling beyond manual relaunch,
 scope enforcement beyond pins, and suite-runtime cost at scale.

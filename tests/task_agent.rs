@@ -393,8 +393,100 @@ fn ask_relaunch_and_death_of_a_task_agent() {
     assert!(player.ask("s", "still there?").is_err(), "dead: ask must say so");
 
     player.relaunch_agent("s").expect("relaunch");
-    let call = player.sessions().launched.iter().filter(|c| c.slug == "s_agent").last().unwrap().clone();
+    let call = player.sessions().launched.iter().rfind(|c| c.slug == "s_agent").unwrap().clone();
     let prompt = std::fs::read_to_string(&call.prompt_file).unwrap();
     assert!(prompt.contains("You were relaunched") && prompt.contains("Step: post"), "{prompt}");
     assert!(player.sessions().alive("s_agent"));
+}
+
+// --------------------------------------------------------------------------
+// Contests (spec §18)
+// --------------------------------------------------------------------------
+
+/// plan -> the task agent's post -> the subagent contests the task check.
+fn plan_post_contest(repo: &DirectorRepo, player: &mut Player<NullSessions>) -> TickReport {
+    plan(repo, player);
+    agent_post(repo);
+    player.tick().expect("post tick");
+    let dir = paths::subagent_clone(&repo.director_path(), "s");
+    ensure_identity(&dir);
+    Git::new(&dir).run(&["commit", "-q", "--allow-empty", "-m", "contest: s-check", "-m", "feature.txt can't exist in a pure test"]).unwrap();
+    player.tick().expect("contest tick")
+}
+
+#[test]
+fn a_contest_goes_to_the_task_agent_and_its_reply_back_to_the_subagent() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    let report = plan_post_contest(&repo, &mut player);
+    assert_eq!(report.imported.first().map(|i| i.2), Some(Transition::Contest), "{report}");
+    let t = task(&hub, "s");
+    assert_eq!(t.status, Status::Contested);
+    assert!(t.contest.as_deref().unwrap_or("").contains("pure test"), "{:?}", t.contest);
+    let asked: Vec<String> = agent_sent(&player).into_iter().filter(|m| m.starts_with("Step: contest c1")).collect();
+    assert_eq!(asked.len(), 1, "{:?}", agent_sent(&player));
+    assert!(asked[0].contains("pure test"), "{}", asked[0]);
+    assert!(!events::read_all(&home).iter().any(|e| e.kind == EventKind::Contested), "the task agent's to answer");
+
+    let dir = agent_dir(&repo);
+    Git::new(&dir).run(&["fetch", "-q", "origin"]).unwrap();
+    Git::new(&dir).run(&["merge", "-q", "--ff-only", "origin/task/s"]).unwrap();
+    let sha = agent_commit(&repo, &[("tasks/s/contests/c1.md", "fair: check feature.txt is created by the build\n")], "reply: s c1");
+    let report = player.tick().expect("reply tick");
+    assert_eq!(report.imported.first().map(|i| i.2), Some(Transition::ContestReply), "{report}");
+    assert_eq!(records::import_note(&hub, &sha).unwrap().actor, Actor::TaskAgent);
+    let t = task(&hub, "s");
+    assert_eq!(t.status, Status::InRevision);
+    assert_eq!((t.contest_round, t.review_round), (1, 0), "a reply spends no review round");
+    assert_eq!(hub.rev_parse("refs/dashboard/pins/s").as_deref(), Some(sha.as_str()), "re-pinned at the reply");
+    assert!(player.sessions().sent.iter().any(|(k, m)| k == "s" && m.contains("Reply to your contest c1") && m.contains("created by the build")));
+}
+
+#[test]
+fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalates() {
+    let repo = director_repo(); // task agents off
+    write_file(repo.path(), "roadmap.toml", &format!("title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\n\n[limits]\nmax_contest_rounds = 1\n{NO_TASK_AGENTS}"));
+    commit(repo.path(), "one contest only");
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", PLAN, "plan: s");
+    player.tick().expect("plan tick");
+    checkout_branch(repo.path(), "task/s");
+    write_file(repo.path(), "tasks/s/prompt.md", "make feature.txt\n");
+    write_file(repo.path(), "tasks/s/task.toml", &format!("{PLAN}{CHECK}"));
+    write_file(repo.path(), "tests.d/s.toml", "[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n");
+    commit(repo.path(), "post: s");
+    player.tick().expect("post tick");
+
+    let clone = paths::subagent_clone(&repo.director_path(), "s");
+    ensure_identity(&clone);
+    commit_empty(&clone, "contest: s-check");
+    player.tick().expect("contest tick");
+    assert_eq!(task(&hub, "s").status, Status::Contested);
+    assert!(events::read_all(&home).iter().any(|e| e.kind == EventKind::Contested), "the director's to answer");
+
+    // The reply needs its file.
+    director_pull_task_branch(repo.path(), "s");
+    write_file(repo.path(), "tests.d/s.toml", "[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\nruns = 1\n");
+    commit(repo.path(), "a reply without a reply file");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert!(report.rejected[0].message.contains("contests/c1.md"), "{}", report.rejected[0].message);
+
+    write_file(repo.path(), "tasks/s/contests/c1.md", "the test stands: create feature.txt\n");
+    commit(repo.path(), "reply: s c1");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.imported.first().map(|i| i.2), Some(Transition::ContestReply), "{report}");
+
+    Git::new(&clone).run(&["pull", "-q", "--ff-only", "origin", "task/s"]).unwrap();
+    commit_empty(&clone, "contest: s-check again");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.escalated.len(), 1, "{report}");
+    assert!(report.escalated[0].1.contains("contest rounds exceeded: 2 > 1"), "{}", report.escalated[0].1);
+    assert_eq!(task(&hub, "s").status, Status::Escalated);
 }

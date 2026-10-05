@@ -31,6 +31,8 @@ pub enum EventKind {
     Conflict,
     /// An accept whose merge with `main` failed the suite: back to the subagent.
     MergeFailed,
+    /// A subagent contested a test and task agents are off: the director replies.
+    Contested,
     Ready,
     Accepted,
     Explored,
@@ -53,6 +55,7 @@ impl EventKind {
             EventKind::Escalated => "escalated",
             EventKind::Conflict => "conflict",
             EventKind::MergeFailed => "merge_failed",
+            EventKind::Contested => "contested",
             EventKind::Ready => "ready",
             EventKind::Accepted => "accepted",
             EventKind::Explored => "explored",
@@ -100,6 +103,9 @@ impl Event {
                 "git fetch hub && git checkout task/{slug} && git merge --ff-only hub/task/{slug}, then git merge <that main commit>, resolve only those paths, commit"
             )),
             EventKind::MergeFailed => Some("the subagent fixes it; wait for tested, then review and accept again".to_string()),
+            EventKind::Contested => Some(format!(
+                "reply on task/{slug} in one commit adding tasks/{slug}/contests/c<N>.md (plus fixed tests if it's right), or retire"
+            )),
             EventKind::Ready => Some(format!("git fetch hub && git merge (or checkout) hub/task/{slug} before posting")),
             EventKind::DirectorRejected => Some("fetch hub and fix with a new commit / reset".to_string()),
             EventKind::Accepted => Some("on main: git fetch hub; git merge --ff-only hub/main".to_string()),

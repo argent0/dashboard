@@ -225,6 +225,9 @@ commit is therefore one of:
 - a **block** — a `block:` marker commit whose body explains why the task
   can't be finished as specified (stale test, missing prerequisite, wrong
   approach, needs a human decision).
+- a **contest** — a `contest:` marker commit: a test it must pass is wrong
+  (unsatisfiable, or over-specified); the task goes back to the test's
+  author instead of escalating (§18).
 
 Work in progress stays uncommitted in the subagent's clone.
 
@@ -290,10 +293,11 @@ failed validation is a rejection with the listed reason (§10).
 | **launch** | — (player) | task check still **fails** at the tip; records pins; starts `tmux` session running `claude` in a fresh subagent clone with `prompt.md` | — |
 | **finish** | code, optionally new tests (subagent) | pins unchanged; project suite **passes** | `pins`, `suite` |
 | **block** | `block:` marker (subagent) | — | — (escalates) |
+| **contest** / **reply** | `contest:` marker (subagent); the reply (task agent or director) | §18 | §18 |
 | **send back** | adds `reviews/r<N>.md` + new/updated tests (director, or its task agent §17) | task is `tested`; project suite now **fails**; re-pins; relays the note | `review` |
 | **accept** | `accept:` marker (director) | task is `tested`; the player lands it (§11), merging `main` in first if it moved: a conflict leaves it `conflicted`, a suite failure caused by the merge sends it back to the subagent | `accept` |
 | **resolve** | merge of the recorded `main` commit into the task tip (director) | task is `conflicted`; merges exactly the `main` commit the conflict was recorded against; differs from git's own merge only on the recorded paths; re-pins; the player then lands the accept (§11) | `history`, `ownership` |
-| **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is conflicted or escalated; player moves the branch to `refs/retired/<slug>` and ends the subagent session | `retire` |
+| **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is conflicted, contested or escalated; player moves the branch to `refs/retired/<slug>` and ends the subagent session | `retire` |
 
 Any agent commit that breaks the history rules (§5) is rejected with reason
 `history`, whatever transition it was meant to be; a director commit that
@@ -326,10 +330,12 @@ its own limit in `roadmap.toml` under `[limits.strikes]`:
 | `claims` | subagent | a spike's finish claim whose findings or claims don't validate (§14) | 2 |
 
 Separately, `[limits] max_review_rounds` (default 2) caps legitimate
-send-backs.
+send-backs, and `[limits] max_contest_rounds` (default 2) caps a subagent's
+contests (§18).
 
 A task is **escalated** when any strike counter reaches its limit, a
-send-back would exceed `max_review_rounds`, or the subagent blocks. The
+send-back would exceed `max_review_rounds`, a contest would exceed
+`max_contest_rounds`, or the subagent blocks. The
 player stops relaying to the subagent, and the dashboard shows the cause.
 Counters never reset over a task's life. Rejections of director commits to
 `main` (not tied to a task) are shown but not counted.
@@ -399,7 +405,8 @@ commits.
 | `posted` | validated post, no live subagent session yet |
 | `in_progress` | subagent session alive and working (runtime, not git) |
 | `tested` | latest subagent commit validated as passing, awaiting director |
-| `in_revision` | latest director commit is a send-back, or landing an accept merged `main` in and the suite failed (§11); round N = count of `reviews/r*.md` |
+| `in_revision` | latest director commit is a send-back or a contest reply (§18), or landing an accept merged `main` in and the suite failed (§11); round N = count of `reviews/r*.md` |
+| `contested` | latest subagent commit is a `contest:` marker: the task agent (or director) must reply (§18) |
 | `conflicted` | landing an accept couldn't merge `main` in; the tip carries the conflict (the `main` commit and paths) for the director to resolve (§11) |
 | `escalated` | a strike limit reached, review rounds exceeded, or a `block:` marker; shown with its cause |
 | `accepted` | `Task: <slug>` merge commit on `main` |
@@ -647,10 +654,14 @@ source (§4) makes its commits the task agent's (`actor: task_agent`).
 as planned (`task.toml`, the phase goal, and the director's `brief`, a free
 text field of `task.toml` that is the director's channel to it), the report
 format, and the current step. The rules: never write a throwaway
-implementation (implementing is the subagent's; the only thing it runs
-before a post is the task check, to see it fail); every test it writes is
-pure, and its `prompt.md` passes that on; it writes no product code; it
-never commits a marker.
+implementation (implementing is the subagent's; it may run any test it
+writes against the code as it is, to see it fail for the right reason, but
+never against code it wrote); test observable behaviour, not one
+implementation (§18); every test it writes is pure, and its `prompt.md`
+passes that on; it writes no product code; it never commits a marker. The
+review step also asks it to run a send-back's new test on the subagent's
+code first, so a send-back the suite still passes doesn't cost a `review`
+strike.
 
 **What the player accepts from a task agent.** Only the newest commit of a
 fetch is validated, as one cumulative change from the hub tip:
@@ -659,6 +670,7 @@ fetch is validated, as one cumulative change from the hub tip:
 |---|---|---|---|
 | `ready` | adds `prompt.md`, the test files, `tests.d/<slug>.toml`, `[check]` in `task.toml` | the post row of §9 | `post`, `evidence` |
 | `tested` | adds `reviews/r<N>.md` + new/updated tests | the send-back row of §9 | `review` |
+| `contested` | adds `contests/c<N>.md` + optionally fixed tests | the reply row of §18 | `ownership` |
 | any | touches a path outside `tests.toml`, `tests.d/`, the hub's `test_paths` and `tasks/<slug>/`; changes `task.toml` beyond `[check]`; any other status | — | `ownership` |
 | any | an empty (marker) commit | — | `ownership` |
 | any | merge commit, or rewrites a commit imported from it | — | `history` |
@@ -685,5 +697,33 @@ accepts on an `accept` verdict, asks (`dashboard ask`) or takes an `unsure`
 to the operator; the decision stays the director's.
 
 **Events.** `agent_launched`, `agent_report`, `agent_died`. For an
-agent-managed task, `ready` and `tested` are not emitted: they're the task
+agent-managed task, `ready`, `tested` and `contested` are not emitted: they're the task
 agent's to act on, and the director hears its report instead.
+
+## 18. Contests
+
+A task agent writes its tests without an implementation to check them
+against (§17), so a test can be wrong: impossible to satisfy, or written
+around one implementation instead of the behaviour the task asks for. A
+`block:` would escalate, and the task would be retired and replanned for what
+is often a small fix to the test. A **contest** sends it back the other way
+instead.
+
+| Transition | Commit (author) | Player checks | Rejection reason |
+|---|---|---|---|
+| **contest** | `contest:` marker naming the test, body = why it's wrong (subagent) | a clean marker on the hub tip (as `block:`); not a spike; within `max_contest_rounds`, else the task escalates and the marker isn't imported | `history`, `suite` |
+| **reply** | adds `tasks/<slug>/contests/c<N>.md` and optionally fixed tests (task agent; the director when task agents are off) | task is `contested`; only the reply, `tests.toml`, `tests.d/`, `test_paths` and `tasks/<slug>/`; re-pins; relays the reply to the subagent | `ownership` |
+
+- While `contested` (§12) the subagent waits; the player fetches nothing from
+  it. The task agent is asked to reply (once per contest), still without
+  writing any implementation. Without task agents, the director gets a
+  `contested` event.
+- The reply has no suite requirement: it may keep the test and explain how
+  it can be met, or fix it. It spends no review round; the task returns to
+  `in_revision`.
+- `[limits] max_contest_rounds` (default 2) caps contests per task, counted
+  as the `contests/c*.md` replies at the tip plus the new one. One more
+  escalates, with the subagent's reason in the cause.
+- A contested task may be retired (§9).
+- `block:` stays the escape for everything else: a missing prerequisite, a
+  wrong approach, a stale test (§6.4), a decision only a human can make.
