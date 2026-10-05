@@ -228,6 +228,36 @@ fn finish_happy_path_is_tested_with_a_note_sent() {
     assert!(sent.iter().any(|(slug, msg)| slug == "x" && msg.contains("awaiting director review")), "{sent:?}");
 }
 
+#[test]
+fn messages_come_from_prompts_kdl_on_main() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+
+    // The director rewords a template on main; an invalid edit is rejected
+    // and leaves the old file in force.
+    let starter = dashboard::prompts::STARTER;
+    write_file(repo.path(), "prompts.kdl", &starter.replace("{answer}", "{answr}"));
+    commit(repo.path(), "prompts: typo");
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Ownership);
+    assert!(report.rejected[0].message.contains("unknown placeholder {answr}"), "{report}");
+
+    repo.git().run(&["reset", "-q", "--hard", "HEAD~1"]).unwrap();
+    let old = "finish accepted — tests passed, awaiting director review; don't commit further";
+    write_file(repo.path(), "prompts.kdl", &starter.replace(old, "all green, sit tight"));
+    commit(repo.path(), "prompts: shorter finish note");
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.imported.len(), 1, "{report}");
+
+    plan_and_post(&repo, &mut player, "x");
+    commit_in_clone(&repo, "x", "feature.txt", "done\n", "finish work");
+    player.tick().expect("tick should succeed");
+    let sent = &player.sessions().sent;
+    assert!(sent.iter().any(|(slug, msg)| slug == "x" && msg == "all green, sit tight"), "{sent:?}");
+}
+
 /// Once a task is accepted, its worktree — and the local branch that
 /// checked it out in the shared subagent workspace — should be gone: the
 /// hub's own `task/<slug>` ref is the permanent record (spec §8.1), so

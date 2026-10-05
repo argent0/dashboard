@@ -301,55 +301,6 @@ fn is_round_file(name: &str, ext: &str) -> bool {
 }
 
 // --------------------------------------------------------------------------
-// Text for the subagent
-// --------------------------------------------------------------------------
-
-/// The player-written preamble for a spike's prompt file (the counterpart of
-/// `launch_preamble` for ordinary tasks).
-pub fn spike_preamble(slug: &str, project: &str, pinned_paths: &[&str]) -> String {
-    let mut sorted = pinned_paths.to_vec();
-    sorted.sort_unstable();
-    let pinned_block = if sorted.is_empty() { "  (no pinned files recorded)".to_string() } else { sorted.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n") };
-    format!(
-        "You are the subagent for SPIKE `{slug}` in project `{project}`. Your clone's `origin` remote \
-is the hub: fetch from it, and never push anywhere else.\n\n\
-A spike answers a question; it does not ship code. Nothing you commit is ever merged into main, and the \
-project suite does not need to pass. Explore freely: change any file you like in your clone, outside the \
-pinned files below. The question (below the prompt) is fixed; don't reword it.\n\n\
-Commit only when you can answer it, as ONE commit that adds, for the current round N:\n\
-  - tasks/{slug}/findings/N.md : free-form findings (what worked, what didn't, your recommendation)\n\
-  - tasks/{slug}/claims/N.toml : your answer and the claims that back it:\n\n\
-      answer = \"yes\"          # one of the question's answers, or \"inconclusive\"\n\n\
-      [[claim]]\n\
-      name = \"streams-at-2x\"\n\
-      kind = \"spike\"          # or \"baseline\"\n\
-      supports = \"yes\"        # spike claims: the answer this backs\n\
-      cmd = \"tasks/{slug}/claims/throughput.sh --expect-min 2x\"\n\
-      # optional: runs, min_pass, timeout (seconds, default 600)\n\n\
-The player runs every claim itself from the repo root (`sh -c <cmd>`, exit 0 passes; a command may print a last \
-line `METRICS {{\"throughput\": 2.1}}` to record measurements). A baseline claim describes the code as it is now \
-and must pass on the base commit. A spike claim describes what you achieved: it must pass on your branch and \
-FAIL on the base commit, where only tasks/{slug}/ is copied over from your branch. So keep claim scripts under \
-tasks/{slug}/claims/ and make them exercise your work; a claim that passes without your work is rejected. Any \
-answer other than \"inconclusive\" needs at least one passing spike claim with `supports` set to that answer, \
-and one failing claim rejects the whole finish. The director's own baseline claims, if any, also run.\n\n\
-You must not modify or delete the pinned files, which must stay byte-for-byte identical:\n\
-{pinned_block}\n\n\
-If you can't make progress, make an empty commit explaining why instead of forcing an answer:\n  \
-git commit --allow-empty -m \"block: <short reason>\" -m \"<explanation>\"\n\n\
-Never push, rebase, amend, reset published commits, or create merge commits.\n\n\
-The player will paste messages (rejections, a refined question from the director) into this session as \
-things happen — follow their instructions."
-    )
-}
-
-/// The question section appended to a spike's prompt, and relayed again with
-/// each new round.
-pub fn question_block(round: u32, raw_question_toml: &str) -> String {
-    format!("## The question (round {round})\n\n```toml\n{}\n```", raw_question_toml.trim_end())
-}
-
-// --------------------------------------------------------------------------
 // Tests
 // --------------------------------------------------------------------------
 
@@ -387,20 +338,5 @@ mod tests {
         assert!(!send_back_path_ok("tasks/s/baseline/3.toml", "s", 2));
         assert!(!send_back_path_ok("src/lib.rs", "s", 2));
         assert!(!send_back_path_ok("tasks/s/claims/2.toml", "s", 2));
-    }
-
-    #[test]
-    fn question_block_wraps_the_toml() {
-        let b = question_block(2, "question = \"q\"\n");
-        assert!(b.starts_with("## The question (round 2)"));
-        assert!(b.contains("question = \"q\""));
-    }
-
-    #[test]
-    fn spike_preamble_names_the_slug_and_pins() {
-        let p = spike_preamble("probe", "proj", &["tasks/probe/task.toml", "tasks/probe/prompt.md"]);
-        assert!(p.contains("SPIKE `probe`"));
-        assert!(p.contains("  - tasks/probe/prompt.md"));
-        assert!(p.contains("tasks/probe/claims/N.toml"));
     }
 }

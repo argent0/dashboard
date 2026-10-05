@@ -28,7 +28,9 @@ src/init.rs     `dashboard init`: creates the hub and wires up the director <-> 
 src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based result cache
 src/records.rs  provenance/enforcement records: import notes, rejections, pins, retirements, accepted-merge lookup,
                 spike base commits and exploration notes
-src/flaky.rs    flaky-test-fix (spec §15): inventory comparison, evidence verdict text, subagent prompt
+src/flaky.rs    flaky-test-fix (spec §15): inventory comparison, evidence verdict text
+src/prompts.rs  prompts.kdl (spec §19): template validation, the max-bytes cap, rendering
+src/prompts.kdl the starter prompts.kdl `dashboard init` commits (embedded with include_str!)
 src/spike.rs    spikes (spec §14): reading a round, running claims against the base-with-overlay, evaluating a finish
 src/state.rs    derives every task's status (spec §12) purely from the hub + session liveness
 src/player.rs   the player: fetch, validate, import, launch/relay, merge, task agents — spec §5/§7/§9/§11/§17
@@ -37,7 +39,8 @@ src/render.rs   renders `state::HubState` + recent events to the status text
 src/ui.rs       styling/width helpers (color codes, bars, truncation, terminal width)
 ```
 
-`Cargo.toml`: `serde`/`serde_json`/`toml` for parsing, `clap` for the CLI;
+`Cargo.toml`: `serde`/`serde_json`/`toml` for parsing, `kdl` for
+`prompts.kdl`, `clap` for the CLI;
 `tempfile` as a dev-dependency for the integration tests in `tests/`, which
 build real throwaway git repos. Ordinary Rust that can keep growing more
 crates and surface — there's no zero-deps constraint.
@@ -86,7 +89,7 @@ up as untracked noise in the operator's own `git status`.
 
 ```
 refs/heads/main            director-owned; player-only writes except
-                            roadmap.toml / docs_paths commits (spec §5)
+                            roadmap.toml / prompts.kdl / docs_paths commits (spec §5)
 refs/heads/task/<slug>     one per task, never deleted even once accepted
                             (spec §8.1) — moved, not deleted, on retire
 refs/retired/<slug>        a retired task's branch, moved here by the player
@@ -162,6 +165,29 @@ agent_cmd = "claude --dangerously-skip-permissions"        # the subagent; defau
 task_agent_cmd = "claude --dangerously-skip-permissions"   # the task agent (spec §17); default.
                                                            # "" turns task agents off
 ```
+
+`prompts.kdl` (on `main`, required; spec §19): every text the player
+writes into a prompt file or pastes into a session, as named templates.
+`src/prompts.kdl` is the starter and documents each template's
+placeholders.
+```kdl
+max-bytes 6144                   # cap on each delivered prompt's static text
+                                 # (placeholders and what fills them not counted)
+subagent max-bytes=512 {         # optional: cap on each template in the section
+    launch max-bytes=1536 #"""   # optional: this template's cap, instead of the section's
+        You are the subagent for task `{slug}` in project `{project}`. …
+        """#
+    finish-accepted "finish accepted — …"
+    …
+}
+spike { … }
+task-agent { … }
+```
+Validation (`prompts::Prompts::parse`, at `init` and on every `main`
+import, `ownership` otherwise): every template present, none unknown, only
+its own `{placeholders}` (other braces are literal), every composed
+prompt within `max-bytes`, and every template within its own or its
+section's `max-bytes=`. The player reads it from main's tip each time.
 
 `tests.toml` (project suite, on `main` and every task branch):
 ```toml
@@ -242,8 +268,10 @@ ignored — no `deny_unknown_fields` anywhere.
 ## CLI
 
 - `dashboard init [--name N]` — run inside the director clone (must have a
-  local `main` with `roadmap.toml`/`tests.toml`). Creates the home, `git
-  clone --bare`s it into `hub.git`, and wires up the two-way config links.
+  local `main` with `roadmap.toml`/`tests.toml`). Commits the starter
+  `prompts.kdl` on `main` if there's none (validates it otherwise), creates
+  the home, `git clone --bare`s it into `hub.git`, and wires up the
+  two-way config links.
 - `dashboard` / `dashboard status [--no-color] [--width N]` — the default:
   renders the roadmap derived from the hub.
 - `dashboard watch [-n SECS]` — `status` re-rendered in place every N

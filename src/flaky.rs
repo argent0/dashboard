@@ -55,19 +55,12 @@ pub fn miss(evidence: &Evidence, result: &CheckResult) -> Option<String> {
     ))
 }
 
-/// The extra paragraph in a flaky-test-fix subagent's prompt.
-pub fn preamble(fix_paths: &[String], replace: &[Replace]) -> String {
+/// The `{fix_paths}` and `{replacements}` lists of a flaky-test-fix
+/// subagent's prompt (`subagent.flaky` in prompts.kdl).
+pub fn prompt_lists(fix_paths: &[String], replace: &[Replace]) -> (String, String) {
     let files = fix_paths.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n");
     let tests = replace.iter().map(|r| format!("  - replace `{}` with a stable `{}`", r.old, r.new)).collect::<Vec<_>>().join("\n");
-    format!(
-        "This is a flaky-test-fix task. The test is flaky, not wrong: replace it with a stable one that \
-checks the same thing, without weakening its assertions. These files, and only these, are yours to \
-edit (the rest of the test tree is pinned):\n{files}\n\nThe tests:\n{tests}\n\n\
-Don't remove or rename any other test. You may delete the old test or leave it.\n\n\
-Change nothing else: not production code, and no other test file (new test files are fine). \
-If the flake turns out to be in the product code, the test isn't what's wrong: don't work \
-around it, make a `block:` commit saying so, and the director will replan it as an ordinary task."
-    )
+    (files, tests)
 }
 
 #[cfg(test)]

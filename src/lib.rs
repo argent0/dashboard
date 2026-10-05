@@ -15,3 +15,4 @@ pub mod player;
 pub mod events;
 pub mod spike;
 pub mod flaky;
+pub mod prompts;

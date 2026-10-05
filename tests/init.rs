@@ -9,6 +9,7 @@ use common::*;
 use dashboard::git::Git;
 use dashboard::init;
 use dashboard::paths::{self, Home};
+use dashboard::prompts;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -63,6 +64,33 @@ fn happy_path_via_library() {
     // the director repo's .gitignore now excludes it.
     let gitignore = repo.git().show_file("refs/heads/main", ".gitignore").expect(".gitignore should exist on main");
     assert!(gitignore.lines().any(|l| l.trim() == "/.dashboard/"), "gitignore missing /.dashboard/: {gitignore:?}");
+}
+
+#[test]
+fn commits_the_starter_prompts_and_keeps_an_existing_one() {
+    let repo = director_repo();
+    let home_dir = temp_home();
+    let report = init::init(repo.path(), None, Some(fresh_home(&home_dir))).expect("init should succeed");
+    let hub = Git::new(&report.hub);
+    assert_eq!(hub.show_file("refs/heads/main", "prompts.kdl").unwrap().trim_end(), prompts::STARTER.trim_end());
+
+    let repo = director_repo();
+    let custom = prompts::STARTER.replace("max-bytes 6144", "max-bytes 7000");
+    write_file(repo.path(), "prompts.kdl", &custom);
+    commit(repo.path(), "own prompts");
+    let home_dir = temp_home();
+    let report = init::init(repo.path(), None, Some(fresh_home(&home_dir))).expect("init should succeed");
+    assert_eq!(Git::new(&report.hub).show_file("refs/heads/main", "prompts.kdl").unwrap().trim_end(), custom.trim_end());
+}
+
+#[test]
+fn invalid_prompts_kdl_errors() {
+    let repo = director_repo();
+    write_file(repo.path(), "prompts.kdl", "max-bytes 100\n");
+    commit(repo.path(), "broken prompts");
+    let home_dir = temp_home();
+    let err = init::init(repo.path(), None, Some(fresh_home(&home_dir))).unwrap_err();
+    assert!(err.contains("prompts.kdl: missing template(s)"), "unexpected error: {err}");
 }
 
 #[test]

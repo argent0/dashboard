@@ -22,6 +22,7 @@ use crate::events::{self, EventKind};
 use crate::flaky;
 use crate::git::Git;
 use crate::paths::{self, Home};
+use crate::prompts::{self, Prompts};
 use crate::records::{self, Actor, RejectionRecord, Transition};
 use crate::spike;
 use crate::state::{self, Status};
@@ -514,7 +515,7 @@ impl<S: Sessions> Player<S> {
         let roadmap = self.roadmap_at(base).map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
         for (_, path) in self.hub.diff_names(base, candidate) {
             if !path_allowed(&path, &roadmap.docs_paths) {
-                return Err((Reason::Ownership, format!("ownership: main commit touches {path:?}, which is neither roadmap.toml nor a docs_paths entry")));
+                return Err((Reason::Ownership, format!("ownership: main commit touches {path:?}, which is neither roadmap.toml, prompts.kdl nor a docs_paths entry")));
             }
         }
         match self.hub.show_file(candidate, "roadmap.toml") {
@@ -522,6 +523,12 @@ impl<S: Sessions> Player<S> {
                 config::roadmap_config_from_str(&text).map_err(|e| (Reason::Ownership, format!("ownership: roadmap.toml: {e}")))?;
             }
             None => return Err((Reason::Ownership, "ownership: roadmap.toml missing".to_string())),
+        }
+        match self.hub.show_file(candidate, prompts::FILE) {
+            Some(text) => {
+                Prompts::parse(&text).map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
+            }
+            None => return Err((Reason::Ownership, format!("ownership: {} missing: it holds every prompt the player sends (spec §19)", prompts::FILE))),
         }
         let suite = self.runner.run_suite(candidate);
         self.note_flakes("_main", candidate, &suite);
@@ -826,11 +833,13 @@ impl<S: Sessions> Player<S> {
         let rec = records::record_rejection(&self.hub, slug, candidate, reason, actor, &msg)?;
         report.rejected.push(rec);
         if actor == Actor::TaskAgent {
+            let prompts = self.prompts()?;
             let recovery = match reason {
-                Reason::History => format!("git fetch origin && git reset --hard origin/task/{slug}, then redo your commit"),
-                _ => format!("fix it with a new commit on top, or git reset --hard origin/task/{slug} and redo it"),
+                Reason::History => "task-agent.recovery-history",
+                _ => "task-agent.recovery-other",
             };
-            self.sessions.send(&state::agent_key(slug), &format!("The player rejected your commit.\n\n{msg}\n\nRecovery: {recovery}"));
+            let recovery = prompts.render(recovery, &[("slug", slug)]);
+            self.sessions.send(&state::agent_key(slug), &prompts.render("task-agent.rejected", &[("message", &msg), ("recovery", &recovery)]));
         }
         Ok(())
     }
@@ -1058,8 +1067,8 @@ impl<S: Sessions> Player<S> {
 
         records::set_pins(&self.hub, slug, candidate)?;
         let review_body = self.hub.show_file(candidate, &expected_path).unwrap_or_default();
-        let header = format!("Review round {round} from the director. Fetch it: git pull --ff-only origin task/{slug}. Then make the whole project suite pass and commit.");
-        self.sessions.send(slug, &format!("{header}\n\n{review_body}"));
+        let text = self.prompts()?.render("subagent.review", &[("round", &round.to_string()), ("slug", slug), ("review", &review_body)]);
+        self.sessions.send(slug, &text);
         Ok(())
     }
 
@@ -1094,7 +1103,8 @@ impl<S: Sessions> Player<S> {
         self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
         records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Contest, Some(slug))?;
         report.imported.push((hub_ref, candidate.to_string(), Transition::Contest));
-        self.sessions.send(slug, &format!("contest c{n} recorded; don't commit further. The reply will be pasted here."));
+        let text = self.prompts()?.render("subagent.contest-recorded", &[("n", &n.to_string())]);
+        self.sessions.send(slug, &text);
         Ok(())
     }
 
@@ -1125,11 +1135,8 @@ impl<S: Sessions> Player<S> {
 
         records::set_pins(&self.hub, slug, candidate)?;
         let reply = self.hub.show_file(candidate, &expected).unwrap_or_default();
-        let header = format!(
-            "Reply to your contest c{n}. Fetch it: git pull --ff-only origin task/{slug} (tests may have changed; they're re-pinned). \
-Then make the whole project suite pass and commit, or contest/block again."
-        );
-        self.sessions.send(slug, &format!("{header}\n\n{reply}"));
+        let text = self.prompts()?.render("subagent.contest-reply", &[("n", &n.to_string()), ("slug", slug), ("reply", &reply)]);
+        self.sessions.send(slug, &text);
         Ok(())
     }
 
@@ -1211,14 +1218,8 @@ Then make the whole project suite pass and commit, or contest/block again."
             }
             records::set_pins(&self.hub, slug, &head)?;
             report.merge_failed.push((slug.to_string(), format!("the suite fails with main merged into task/{slug}; back to the subagent\n{}", suite.summary())));
-            self.sessions.send(
-                slug,
-                &format!(
-                    "main was merged into task/{slug} to accept it, and the project suite now fails on the merge. Fetch it: git pull --ff-only origin task/{slug}. \
-Make the whole suite pass and commit. The pinned files are re-pinned at the merge.\n\n{}",
-                    suite.summary()
-                ),
-            );
+            let text = self.prompts()?.render("subagent.merge-failed", &[("slug", slug), ("summary", &suite.summary())]);
+            self.sessions.send(slug, &text);
             return Ok(());
         }
 
@@ -1365,7 +1366,8 @@ Make the whole suite pass and commit. The pinned files are re-pinned at the merg
                     records::ExplorationNote { slug: slug.to_string(), round: ev.round, question: ev.question.question.clone(), answer: ev.answer.clone(), claims: ev.claims, concluded: false, at: 0 },
                 )?;
                 report.imported.push((hub_ref, candidate.to_string(), Transition::Finish));
-                self.sessions.send(slug, &format!("finish accepted — claims verified (answer: {}), awaiting director review; don't commit further", ev.answer));
+                let text = self.prompts()?.render("spike.finish-accepted", &[("answer", &ev.answer)]);
+                self.sessions.send(slug, &text);
                 Ok(())
             }
         }
@@ -1444,13 +1446,14 @@ Make the whole suite pass and commit. The pinned files are re-pinned at the merg
 
         records::set_pins(&self.hub, slug, candidate)?;
         let raw = self.hub.show_file(candidate, &question_file).unwrap_or_default();
-        let header = format!(
-            "Round {next}: the director sent your spike back with a new question. Fetch it: git pull --ff-only origin task/{slug}. \
-Answer it in one new commit adding {} and {}.",
-            spike::findings_path(slug, next),
-            spike::claims_path(slug, next)
+        let prompts = self.prompts()?;
+        let round = next.to_string();
+        let header = prompts.render(
+            "spike.next-round",
+            &[("round", &round), ("slug", slug), ("findings", &spike::findings_path(slug, next)), ("claims", &spike::claims_path(slug, next))],
         );
-        self.sessions.send(slug, &format!("{header}\n\n{}", spike::question_block(next, &raw)));
+        let question = prompts.render("spike.question", &[("round", &round), ("question", raw.trim_end())]);
+        self.sessions.send(slug, &Prompts::with_block(&header, &question));
         Ok(())
     }
 
@@ -1686,6 +1689,13 @@ Answer it in one new commit adding {} and {}.",
         Ok(())
     }
 
+    /// prompts.kdl at main's tip (spec §19), validated on its way onto main.
+    fn prompts(&self) -> Result<Prompts, String> {
+        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
+        let text = self.hub.show_file(&main_tip, prompts::FILE).ok_or_else(|| format!("{} missing on main: commit one (spec §19)", prompts::FILE))?;
+        Prompts::parse(&text)
+    }
+
     fn agent_cmd_at_main(&self) -> Result<String, String> {
         let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
         Ok(self.roadmap_at(&main_tip)?.player.agent_cmd)
@@ -1810,17 +1820,20 @@ Answer it in one new commit adding {} and {}.",
     fn write_prompt_file(&self, slug: &str, tip: &str, prompt_file: &Path) -> Result<(), String> {
         let prompt_body = self.hub.show_file(tip, &format!("tasks/{slug}/prompt.md")).ok_or_else(|| format!("tasks/{slug}/prompt.md missing at {tip}"))?;
         let pinned = records::pinned_files(&self.hub, slug).unwrap_or_default();
-        let pinned_paths: Vec<&str> = pinned.keys().map(|s| s.as_str()).collect();
+        let pinned = pinned_block(pinned.keys().map(|s| s.as_str()));
+        let prompts = self.prompts()?;
+        let vars = [("slug", slug), ("project", self.project.as_str()), ("pinned", pinned.as_str())];
         let content = if records::is_spike_at(&self.hub, tip, slug) {
             let round = records::spike_round(&self.hub, tip, slug);
             let question = self.hub.show_file(tip, &spike::question_path(slug, round)).unwrap_or_default();
-            format!("{}\n\n---\n\n{prompt_body}\n\n{}", spike::spike_preamble(slug, &self.project, &pinned_paths), spike::question_block(round, &question))
+            let question = prompts.render("spike.question", &[("round", &round.to_string()), ("question", question.trim_end())]);
+            prompts.spike_launch(&prompts.render("spike.launch", &vars), &prompt_body, &question)
         } else {
-            let mut preamble = launch_preamble(slug, &self.project, &pinned_paths);
-            if let Some(cfg) = records::task_config_at(&self.hub, tip, slug).filter(|c| c.kind == TaskKind::FlakyTestFix) {
-                preamble = format!("{preamble}\n\n{}", flaky::preamble(&cfg.fix_paths, &cfg.replace));
-            }
-            format!("{preamble}\n\n---\n\n{prompt_body}")
+            let flaky = records::task_config_at(&self.hub, tip, slug).filter(|c| c.kind == TaskKind::FlakyTestFix).map(|cfg| {
+                let (fix_paths, replacements) = flaky::prompt_lists(&cfg.fix_paths, &cfg.replace);
+                prompts.render("subagent.flaky", &[("fix_paths", &fix_paths), ("replacements", &replacements)])
+            });
+            prompts.subagent_launch(&prompts.render("subagent.launch", &vars), flaky.as_deref(), &prompt_body)
         };
         std::fs::write(prompt_file, content).map_err(|e| format!("{}: {e}", prompt_file.display()))
     }
@@ -1986,7 +1999,8 @@ Answer it in one new commit adding {} and {}.",
         self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
         records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Finish, Some(slug))?;
         report.imported.push((hub_ref, candidate.to_string(), Transition::Finish));
-        self.sessions.send(slug, "finish accepted — tests passed, awaiting director review; don't commit further");
+        let text = self.prompts()?.render("subagent.finish-accepted", &[]);
+        self.sessions.send(slug, &text);
         Ok(())
     }
 
@@ -2058,11 +2072,13 @@ Answer it in one new commit adding {} and {}.",
             return Ok(());
         }
 
+        let prompts = self.prompts()?;
         let recovery = match reason {
-            Reason::History => format!("run `git fetch origin && git reset --hard origin/task/{slug}`, then redo your work and commit"),
-            _ => "fix it with a new commit on top".to_string(),
+            Reason::History => "subagent.recovery-history",
+            _ => "subagent.recovery-other",
         };
-        self.sessions.send(slug, &format!("{msg}\n\nRecovery: {recovery}"));
+        let recovery = prompts.render(recovery, &[("slug", slug)]);
+        self.sessions.send(slug, &prompts.render("subagent.rejected", &[("message", &msg), ("recovery", &recovery)]));
         Ok(())
     }
 
@@ -2112,13 +2128,8 @@ Answer it in one new commit adding {} and {}.",
                 return self.reject_by(Actor::TaskAgent, slug, &incoming, Reason::History, msg, report);
             }
             if self.agent_rebase_told.get(slug) != Some(&incoming) {
-                self.sessions.send(
-                    &state::agent_key(slug),
-                    &format!(
-                        "task/{slug} moved on the hub under your commit (main merged in, or a replan). Nothing was rejected: \
-run git fetch origin && git rebase origin/task/{slug}, re-run the task's check if your post is affected, and leave the result committed."
-                    ),
-                );
+                let text = self.prompts()?.render("task-agent.rebase", &[("slug", slug)]);
+                self.sessions.send(&state::agent_key(slug), &text);
                 self.agent_rebase_told.insert(slug.to_string(), incoming);
             }
             return Ok(());
@@ -2174,17 +2185,16 @@ run git fetch origin && git rebase origin/task/{slug}, re-run the task's check i
 
         let key = state::agent_key(slug);
         if report.imported.iter().any(|(_, sha, _)| sha == candidate) {
-            let next = match step {
-                "post" => "the subagent is launched",
-                "send-back" => "the review is relayed to the subagent",
-                _ => "your reply is relayed to the subagent",
+            let template = match step {
+                "post" => "task-agent.imported-post",
+                "send-back" => "task-agent.imported-send-back",
+                _ => "task-agent.imported-reply",
             };
-            self.sessions.send(
-                &key,
-                &format!("The player imported your {step} at {}; {next}. Write your report if you haven't yet, then wait: the player pastes the next review request here.", short(candidate)),
-            );
+            let text = self.prompts()?.render(template, &[("commit", short(candidate))]);
+            self.sessions.send(&key, &text);
         } else if let Some((_, cause)) = report.escalated.iter().find(|(s, _)| s == slug) {
-            self.sessions.send(&key, &format!("task/{slug} is escalated ({cause}). Stop here: the director decides with the operator and may ask you about it."));
+            let text = self.prompts()?.render("task-agent.escalated", &[("slug", slug), ("cause", cause)]);
+            self.sessions.send(&key, &text);
         }
         Ok(())
     }
@@ -2234,7 +2244,7 @@ run git fetch origin && git rebase origin/task/{slug}, re-run the task's check i
                     self.launch_task_agent(task, step, &hub_state.roadmap, report)?;
                 } else if step != AgentStep::Post && records::agent_asked(&self.hub, &task.slug).as_deref() != Some(task.tip.as_str()) {
                     records::set_agent_asked(&self.hub, &task.slug, &task.tip)?;
-                    let text = self.agent_step_text(task, step, &hub_state.roadmap);
+                    let text = self.agent_step_text(&self.prompts()?, task, step, &hub_state.roadmap);
                     self.sessions.send(&state::agent_key(&task.slug), &text);
                 }
             }
@@ -2284,92 +2294,55 @@ run git fetch origin && git rebase origin/task/{slug}, re-run the task's check i
     /// The task agent's prompt: the player's preamble (its role and rules,
     /// the task, the report format), then the step it starts on.
     fn write_agent_prompt(&self, task: &state::TaskState, step: AgentStep, roadmap: &RoadmapConfig, dir: &Path, prompt_file: &Path, relaunched: bool) -> Result<(), String> {
-        let report_file = Self::git_dir(dir)?.join("dashboard-report.md");
-        let toml = self.hub.show_file(&task.tip, &format!("tasks/{}/task.toml", task.slug)).unwrap_or_default();
+        let prompts = self.prompts()?;
+        let report_file = Self::git_dir(dir)?.join("dashboard-report.md").display().to_string();
+        let slug = task.slug.as_str();
+        let toml = self.hub.show_file(&task.tip, &format!("tasks/{slug}/task.toml")).unwrap_or_default();
         let goal = roadmap.phases.iter().find(|p| p.id == task.config.phase).and_then(|p| p.goal.clone()).unwrap_or_default();
-        let mut text = agent_preamble(&task.slug, &self.project, &task.config, &toml, &goal, &report_file);
-        if relaunched {
-            text.push_str(&format!(
-                "\n\nYou were relaunched: an earlier session's context is gone. Rebuild what you need from the repo: tasks/{}/ (task.toml, prompt.md, reviews/) on origin/task/{} and its history.",
-                task.slug, task.slug
-            ));
-        }
-        text.push_str(&format!("\n\n---\n\n{}", self.agent_step_text(task, step, roadmap)));
+        let phase = if goal.is_empty() { task.config.phase.clone() } else { format!("{}: {goal}", task.config.phase) };
+        let brief = if task.config.brief.trim().is_empty() { "(none)" } else { task.config.brief.trim() };
+        let preamble = prompts.render(
+            "task-agent.preamble",
+            &[("slug", slug), ("project", &self.project), ("phase", &phase), ("task_toml", toml.trim()), ("brief", brief), ("report_file", &report_file)],
+        );
+        let relaunched = relaunched.then(|| prompts.render("task-agent.relaunched", &[("slug", slug)]));
+        let text = prompts.agent_launch(&preamble, relaunched.as_deref(), &self.agent_step_text(&prompts, task, step, roadmap));
         std::fs::write(prompt_file, text).map_err(|e| format!("{}: {e}", prompt_file.display()))
     }
 
-    /// What the task agent is asked to do now: the post, a review round, or
-    /// nothing until the player pastes a step.
-    fn agent_step_text(&self, task: &state::TaskState, step: AgentStep, roadmap: &RoadmapConfig) -> String {
-        let slug = &task.slug;
+    /// What the task agent is asked to do now: the post, a review round, a
+    /// contest reply, or nothing until the player pastes a step.
+    fn agent_step_text(&self, prompts: &Prompts, task: &state::TaskState, step: AgentStep, roadmap: &RoadmapConfig) -> String {
+        let slug = task.slug.as_str();
         match step {
             AgentStep::Post => {
                 let check = if task.config.kind == TaskKind::FlakyTestFix {
-                    "- nothing in tests.d/: this is a flaky-test-fix (spec §15), whose [check] and [[evidence]] are already in its plan and stay out of the suite. \
-Your post is prompt.md, plus any test files its check needs that don't exist yet;"
-                        .to_string()
+                    prompts.render("task-agent.post-check-flaky", &[])
                 } else {
-                    format!(
-                        "- its [check] in tasks/{slug}/task.toml (unless the plan already has one) and the same check in tests.d/{slug}.toml \
-(same name, cmd, runs and min_pass; check names are unique across the whole suite);"
-                    )
+                    prompts.render("task-agent.post-check-task", &[("slug", slug)])
                 };
-                format!(
-                    "Step: post. task/{slug} is ready: its dependencies are accepted and merged in. Update your branch first: \
-git fetch origin && git merge --ff-only origin/task/{slug}. Then make ONE commit on agent/{slug} with:\n\
-- tasks/{slug}/prompt.md: task-specific instructions for the subagent only (the player prepends its own preamble on commit \
-discipline and the pinned files), including one line telling it every test it adds must be pure;\n\
-- the task's test files, under the suite's test_paths;\n\
-{check}\n\
-- updates to any existing test this task makes stale.\n\
-Before committing, run the task's check and confirm it fails, for the reason the task exists: the player rejects a post whose \
-check already passes. Then write your report (step: post)."
-                )
+                prompts.render("task-agent.post", &[("slug", slug), ("check", &check)])
             }
             AgentStep::Review => {
                 let round = task.review_round + 1;
                 let max = roadmap.limits.max_review_rounds;
                 let base = self.hub.rev_parse(&format!("refs/dashboard/pins/{slug}")).unwrap_or_else(|| format!("origin/task/{slug}~1"));
                 let cap = if round > max {
-                    format!("\nNo review rounds are left ({max} used): a send-back now escalates the task. Recommend accept, or report unsure.")
+                    prompts.render("task-agent.review-cap-over", &[("max", &max.to_string())])
                 } else if round == max {
-                    "\nThis is the last round you may send back.".to_string()
+                    prompts.render("task-agent.review-cap-last", &[])
                 } else {
                     String::new()
                 };
-                format!(
-                    "Step: review round {round}. The subagent's work on task/{slug} passed the whole project suite at {tip}; the player ran \
-it, so don't re-run it. Update your branch: git fetch origin && git merge --ff-only origin/task/{slug}. Read what the subagent \
-changed this round: git diff {base} {tip}. Check that it does what the task asked, stays in scope, doesn't game its own test \
-(special-cased inputs, monkeypatching, a helper that neuters other tests), adds no impure test, and won't break the tasks after \
-it. Then either:\n\
-- recommend accept: commit nothing, report verdict: accept;\n\
-- send back: ONE commit adding tasks/{slug}/reviews/r{round}.md (what is wrong) and a new or updated test that makes the suite \
-fail again, report verdict: sent-back. Before committing it, run that test against the subagent's code as it is and confirm it \
-fails, for the reason your review gives: a send-back the suite still passes is a `review` strike. Run it only on the subagent's \
-code: never write code of your own to see how the test should pass. A concern you can't turn into a failing test isn't a \
-send-back: report verdict: unsure.{cap}",
-                    tip = task.tip
-                )
+                prompts.render("task-agent.review", &[("round", &round.to_string()), ("slug", slug), ("tip", &task.tip), ("base", &base), ("cap", &cap)])
             }
             AgentStep::Contest => {
                 let n = task.contest_round + 1;
                 let reason = task.contest.clone().unwrap_or_default();
-                format!(
-                    "Step: contest c{n}. The subagent says a test it must pass is wrong (it can't be satisfied, or demands one particular \
-implementation instead of behaviour):\n\n{reason}\n\n\
-Update your branch: git fetch origin && git merge --ff-only origin/task/{slug}. Judge it from the task and the tests, still \
-without writing any implementation. Then reply in ONE commit adding tasks/{slug}/contests/c{n}.md, your answer to the subagent, \
-and, if it's right, the fixed tests (tests and tests.d/ only). If the test is right, the reply alone explains how it can be met. \
-A reply spends no review round; the subagent may contest {} more time(s) before the task escalates. Then write your report \
-(step: contest c{n}, verdict: replied).",
-                    roadmap.limits.max_contest_rounds.saturating_sub(n)
-                )
+                let remaining = roadmap.limits.max_contest_rounds.saturating_sub(n).to_string();
+                prompts.render("task-agent.contest", &[("n", &n.to_string()), ("slug", slug), ("reason", &reason), ("remaining", &remaining)])
             }
-            AgentStep::Wait => format!(
-                "Step: none right now. task/{slug} is {}: wait here for the player to paste your next step or a question from the director.",
-                task.status.as_str()
-            ),
+            AgentStep::Wait => prompts.render("task-agent.wait", &[("slug", slug), ("status", task.status.as_str())]),
         }
     }
 
@@ -2435,11 +2408,9 @@ A reply spends no review round; the subagent may contest {} more time(s) before 
             return Err(format!("ask: task/{slug}'s task agent is dead — `dashboard relaunch {slug} --agent` first"));
         }
         let report_file = Self::git_dir(&paths::agent_clone(&self.director, slug))?.join("dashboard-report.md");
-        let file = report_file.display();
-        self.sessions.send(
-            &key,
-            &format!("Question from the director: {question}\n\nAnswer with your report (step: question, verdict: answer or unsure), written to {file}.tmp and moved to {file}."),
-        );
+        let file = report_file.display().to_string();
+        let text = self.prompts()?.render("task-agent.question", &[("question", question), ("report_file", &file)]);
+        self.sessions.send(&key, &text);
         Ok(())
     }
 
@@ -2565,7 +2536,7 @@ fn valid_slug(s: &str) -> bool {
 /// `path` is allowed on a director `main` commit: exactly `roadmap.toml`, or
 /// under a `docs_paths` entry (an exact file match, or a directory prefix).
 fn path_allowed(path: &str, docs_paths: &[String]) -> bool {
-    if path == "roadmap.toml" {
+    if path == "roadmap.toml" || path == prompts::FILE {
         return true;
     }
     docs_paths.iter().any(|d| {
@@ -2595,32 +2566,11 @@ fn path_str(p: &Path) -> Result<&str, String> {
     p.to_str().ok_or_else(|| format!("{} is not valid UTF-8", p.display()))
 }
 
-/// The player-written preamble that opens a subagent's prompt file (spec
-/// §8.3, §9's launch row): who it is, the commit discipline, the paths it
-/// must leave untouched (spelled out, not just described), the `block:`
-/// escape hatch, the history rules, and the fact that the player pastes
-/// messages into this same session later.
-fn launch_preamble(slug: &str, project: &str, pinned_paths: &[&str]) -> String {
-    let mut sorted = pinned_paths.to_vec();
+/// The pinned files as a list for a subagent's prompt.
+fn pinned_block<'a>(paths: impl Iterator<Item = &'a str>) -> String {
+    let mut sorted: Vec<&str> = paths.collect();
     sorted.sort_unstable();
-    let pinned_block = if sorted.is_empty() { "  (no pinned files recorded)".to_string() } else { sorted.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n") };
-    format!(
-        "You are the subagent for task `{slug}` in project `{project}`. Your clone's `origin` remote \
-is the hub: fetch from it, and never push anywhere else.\n\n\
-Commit only when you believe the whole project suite (every [[check]] in tests.toml and tests.d/*.toml) \
-passes. Leave work in progress uncommitted.\n\n\
-You may add new tests, but you must not modify, delete, or add to tests.toml or tests.d/, touch anything \
-under its test_paths, or touch tasks/{slug}/. The pinned files, which must stay byte-for-byte identical, are:\n\
-{pinned_block}\n\n\
-If the task can't be done as specified, make an empty commit explaining why instead of forcing it \
-through:\n  git commit --allow-empty -m \"block: <short reason>\" -m \"<explanation>\"\n\n\
-If instead a test you must pass is wrong (it can't be satisfied, or it demands one particular implementation rather than \
-behaviour), reset to the hub tip and contest it with an empty commit naming the test and why; the reply is pasted here:\n  \
-git commit --allow-empty -m \"contest: <test name>\" -m \"<why it's wrong>\"\n\n\
-Never push, rebase, amend, reset published commits, or create merge commits.\n\n\
-The player will paste messages (rejections, director reviews) into this session as things happen — \
-follow their recovery instructions."
-    )
+    if sorted.is_empty() { "  (no pinned files recorded)".to_string() } else { sorted.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n") }
 }
 
 /// What a task agent is asked to do (spec §17).
@@ -2632,48 +2582,6 @@ enum AgentStep {
     Contest,
     /// Nothing pending (a relaunch while the subagent works).
     Wait,
-}
-
-/// The player-written preamble of a task agent's prompt (spec §17): its
-/// role, its rules, the task as planned, and the report it hands back.
-fn agent_preamble(slug: &str, project: &str, cfg: &TaskConfig, task_toml: &str, goal: &str, report_file: &Path) -> String {
-    let report = report_file.display();
-    let brief = if cfg.brief.trim().is_empty() { "(none)".to_string() } else { cfg.brief.trim().to_string() };
-    let phase = if goal.is_empty() { cfg.phase.clone() } else { format!("{}: {goal}", cfg.phase) };
-    format!(
-        "You are the task agent for task `{slug}` in project `{project}`: the director's delegate for this one task. You write its \
-post (the subagent's prompt and a currently failing test) and review the subagent's finished work. The subagent that implements \
-the task is a different agent you never talk to, and the director reads only your reports.\n\n\
-This directory is your worktree, on the local branch agent/{slug}; its origin remote is the hub. Commit on agent/{slug} and never \
-push: the player fetches your branch, validates each commit, and pastes its verdict into this session. Never rebase, amend or \
-reset a commit the player imported, and never create merge commits.\n\n\
-Rules:\n\
-- Never write a throwaway implementation: not to prove a test can pass, not to try out a fix, not even in a scratch directory you \
-delete afterwards. Implementing is the subagent's job; reason about the tests from the task and the existing code. You may run \
-any test you write against the code as it is (the base before a post, the subagent's work before a send-back) to see it fail for \
-the right reason, but never against code you wrote to make it pass.\n\
-- Test observable behaviour through the task's interface, not internals or one particular implementation. The subagent may \
-contest a test it can't satisfy or that over-specifies, and you then have to reply.\n\
-- Every test you write or send back must be pure: no effects outside its own sandbox, no shared state, no network, real clock or \
-unseeded randomness, no dependence on test order. The prompt.md you write passes this rule on to the subagent in one line.\n\
-- Write only tests, tests.toml, tests.d/ and files under tasks/{slug}/, never product code. In task.toml only [check] is yours; \
-the rest is the director's plan.\n\
-- Never commit accept:, retire: or any other marker: you recommend, the director decides.\n\n\
-The task, as the director planned it (phase {phase}):\n\n```toml\n{}\n```\n\n\
-Director's brief: {brief}\n\n\
-After each step, and after answering a question from the director, write your report: exactly the block below, to {report}.tmp, \
-then mv it to {report} (the player reads and removes it). No diffs and no code in it.\n\n\
-slug: {slug}\n\
-step: post | review r<N> | contest c<N> | question\n\
-commit: <sha, or \"none\">\n\
-check: <one line: what the task's check asserts and why it fails / now passes>\n\
-verdict: posted | accept | sent-back | replied | unsure | answer\n\
-why: <two or three sentences>\n\
-concerns: <anything cross-task the director should know, or \"none\">\n\n\
-The player pastes later steps into this session (review requests, the director's questions, rejections of your commits); wait for \
-them between steps.",
-        task_toml.trim()
-    )
 }
 
 /// The `verdict:` of a task agent's report, or `unknown`.

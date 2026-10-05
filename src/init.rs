@@ -6,6 +6,7 @@
 use crate::config;
 use crate::git::Git;
 use crate::paths::{self, Home};
+use crate::prompts::{self, Prompts};
 use std::path::{Path, PathBuf};
 
 // --------------------------------------------------------------------------
@@ -60,6 +61,10 @@ pub fn init(director_dir: &Path, name: Option<&str>, home: Option<PathBuf>) -> R
 
     config::suite_at(&director, "refs/heads/main")?; // tests.toml + tests.d/; also runs Check::validate on every entry
 
+    if let Some(text) = director.show_file("refs/heads/main", prompts::FILE) {
+        Prompts::parse(&text)?;
+    }
+
     // ---- project name and home ----
     let project = match name {
         Some(n) => n.to_string(),
@@ -87,6 +92,7 @@ pub fn init(director_dir: &Path, name: Option<&str>, home: Option<PathBuf>) -> R
     // main, so the ignore rule ships with main's very first commit in the
     // hub.
     ensure_dashboard_gitignore(&toplevel, &home.root)?;
+    ensure_prompts(&toplevel, &home.root)?;
 
     let creator = Git::new(&home.root);
     creator.run(&["init", "--quiet", "--bare", path_str(&hub_path)?]).map_err(|e| e.to_string())?;
@@ -151,28 +157,44 @@ fn ensure_dashboard_gitignore(toplevel: &Path, scratch_parent: &Path) -> Result<
         content.push('\n');
     }
     content.push_str("/.dashboard/\n");
+    commit_on_main(toplevel, scratch_parent, ".gitignore", &content, "dashboard: ignore subagent clones (.dashboard/)")
+}
 
+/// Commits the starter prompts.kdl (spec §19) on `main` if it has none; an
+/// existing one was already validated.
+fn ensure_prompts(toplevel: &Path, scratch_parent: &Path) -> Result<(), String> {
+    if Git::new(toplevel).show_file("refs/heads/main", prompts::FILE).is_some() {
+        return Ok(());
+    }
+    commit_on_main(toplevel, scratch_parent, prompts::FILE, prompts::STARTER, "dashboard: add the player's prompts (prompts.kdl)")
+}
+
+/// Commits `content` as `file` on `main`: in place when `main` is checked
+/// out here, else in a scratch worktree, then fast-forwarding the ref (see
+/// `ensure_dashboard_gitignore`).
+fn commit_on_main(toplevel: &Path, scratch_parent: &Path, file: &str, content: &str, message: &str) -> Result<(), String> {
+    let director = Git::new(toplevel);
     if director.run(&["symbolic-ref", "-q", "HEAD"]).ok().as_deref() == Some("refs/heads/main") {
-        std::fs::write(toplevel.join(".gitignore"), content).map_err(|e| e.to_string())?;
-        director.run(&["add", ".gitignore"]).map_err(|e| e.to_string())?;
-        director.run(&["commit", "--quiet", "-m", "dashboard: ignore subagent clones (.dashboard/)"]).map_err(|e| e.to_string())?;
+        std::fs::write(toplevel.join(file), content).map_err(|e| e.to_string())?;
+        director.run(&["add", file]).map_err(|e| e.to_string())?;
+        director.run(&["commit", "--quiet", "-m", message]).map_err(|e| e.to_string())?;
         return Ok(());
     }
 
-    let worktree_dir = scratch_parent.join("init-gitignore");
+    let worktree_dir = scratch_parent.join("init-commit");
     let _ = std::fs::remove_dir_all(&worktree_dir);
-    let tmp_branch = "__dashboard_init_gitignore";
+    let tmp_branch = "__dashboard_init_commit";
     let _ = director.run(&["branch", "-D", tmp_branch]);
     director
         .run(&["worktree", "add", "--quiet", "-B", tmp_branch, path_str(&worktree_dir)?, "refs/heads/main"])
-        .map_err(|e| format!("creating scratch worktree for .gitignore: {e}"))?;
+        .map_err(|e| format!("creating scratch worktree for {file}: {e}"))?;
 
     let commit_result = (|| -> Result<String, String> {
-        std::fs::write(worktree_dir.join(".gitignore"), &content).map_err(|e| e.to_string())?;
+        std::fs::write(worktree_dir.join(file), content).map_err(|e| e.to_string())?;
 
         let scratch = Git::new(&worktree_dir);
-        scratch.run(&["add", ".gitignore"]).map_err(|e| e.to_string())?;
-        scratch.run(&["commit", "--quiet", "-m", "dashboard: ignore subagent clones (.dashboard/)"]).map_err(|e| e.to_string())?;
+        scratch.run(&["add", file]).map_err(|e| e.to_string())?;
+        scratch.run(&["commit", "--quiet", "-m", message]).map_err(|e| e.to_string())?;
         scratch.rev_parse("HEAD").ok_or_else(|| "commit succeeded but HEAD is unreadable".to_string())
     })();
 

@@ -121,8 +121,9 @@ Enforced by the player on import; a violating commit is never imported.
   unchanged. The director commits to a task branch only through the
   transitions in §9.
 - **`main` is player-only**, except for director commits touching only
-  `roadmap.toml` or the doc paths declared in it (`docs_paths`). The player
-  runs the project suite on these like any other `main` commit.
+  `roadmap.toml`, `prompts.kdl` (§19) or the doc paths declared in
+  `roadmap.toml` (`docs_paths`). The player runs the project suite on these
+  like any other `main` commit.
 
 **Marker commits.** A few transitions are events with no content: *block*,
 *accept*, *retire*. They are empty commits (`--allow-empty`) whose subject
@@ -246,6 +247,7 @@ branch moves to `refs/retired/<slug>`; its slug is never reused.
 ```
 roadmap.toml                   on main: title, phases (id, title, goal, hidden),
                                docs_paths, [limits] (§10)
+prompts.kdl                    on main: every prompt the player sends (§19)
 tests.toml                     project suite: [[check]] entries, test_paths
 tests.d/<slug>.toml            the suite fragment a task's post adds: its check
 tasks/<slug>/task.toml         title, phase, milestone, depends_on, check
@@ -650,7 +652,7 @@ at `<director>/.dashboard/agents/<slug>/`, on the local branch
 fetches `agent/<slug>` into `refs/incoming/agent/<slug>`; provenance by fetch
 source (§4) makes its commits the task agent's (`actor: task_agent`).
 
-**Prompt.** The player writes it: the task agent's role and rules, the task
+**Prompt.** The player writes it from `prompts.kdl` (§19): the task agent's role and rules, the task
 as planned (`task.toml`, the phase goal, and the director's `brief`, a free
 text field of `task.toml` that is the director's channel to it), the report
 format, and the current step. The rules: never write a throwaway
@@ -658,7 +660,11 @@ implementation (implementing is the subagent's; it may run any test it
 writes against the code as it is, to see it fail for the right reason, but
 never against code it wrote); test observable behaviour, not one
 implementation (§18); every test it writes is pure, and its `prompt.md`
-passes that on; it writes no product code; it never commits a marker. The
+passes that on; it writes no product code; it never commits a marker. It
+is also told its tests are worked out with the subagent, not handed over
+once: contests (§18) and send-backs bounce them back and forth through the
+hub, and it treats each exchange as collaboration, conceding when the
+subagent is right. The
 review step also asks it to run a send-back's new test on the subagent's
 code first, so a send-back the suite still passes doesn't cost a `review`
 strike.
@@ -727,3 +733,34 @@ instead.
 - A contested task may be retired (§9).
 - `block:` stays the escape for everything else: a missing prerequisite, a
   wrong approach, a stale test (§6.4), a decision only a human can make.
+
+## 19. Prompts
+
+Every text the player gives an agent comes from `prompts.kdl` on `main`:
+the subagent's and spike subagent's preambles, the flaky-test-fix
+paragraph, the task agent's preamble and steps, and every message it pastes
+into a session (relayed reviews and contest replies, rejections and their
+recovery hints, finish acknowledgements, rebase requests, the director's
+questions). The rejection reasons themselves stay the player's own
+diagnostics; only the text around them is a template.
+
+- Each template is a named string under its section (`subagent`, `spike`,
+  `task-agent`) with `{name}` placeholders, each template allowing only its
+  own set. What fills them is the hub's: the slug, the pinned files,
+  prompt.md, a review, a check summary.
+- `max-bytes` caps the static text of every prompt the player delivers:
+  the templates that make it up (a task agent's launch is its preamble,
+  the relaunch note and its largest step), with placeholders removed. What
+  the agents and the director write (prompt.md, reviews, contest replies,
+  the brief) and check output aren't counted: the cap is on the player's
+  padding, not on what the agents say to each other.
+- The parts are capped too, optionally: `max-bytes=N` on a section limits
+  each of its templates, and on a template replaces its section's limit
+  for that one template. Same counting.
+- The file is required and director-owned. `dashboard init` commits a
+  starter when `main` has none, and validates one that's there. A `main`
+  commit whose copy doesn't parse, misses or adds a template, uses another
+  template's placeholder or exceeds `max-bytes` is an `ownership`
+  rejection, so `main` always carries a valid one. The player reads it from
+  `main`'s tip whenever it writes a prompt or sends a message, so an edit
+  applies to the next one; prompt files already written stay as they were.
