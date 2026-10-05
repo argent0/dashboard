@@ -18,12 +18,24 @@ use tempfile::TempDir;
 /// `Home` pointing at it, plus the guard keeping that TempDir alive.
 fn init_hub(repo: &DirectorRepo) -> (TempDir, Home) {
     let home_dir = temp_home();
-    let report = init::init(repo.path(), Some("proj"), Some(home_dir.path().join("home"))).expect("init should succeed");
+    let report = init::init(
+        repo.path(),
+        Some("proj"),
+        Some(home_dir.path().join("home")),
+    )
+    .expect("init should succeed");
     (home_dir, Home { root: report.home })
 }
 
 fn check(name: &str, cmd: &str, runs: u32, min_pass: u32) -> Check {
-    Check { name: name.to_string(), cmd: cmd.to_string(), runs, min_pass, retry_failed: 0, retry_on: vec![] }
+    Check {
+        name: name.to_string(),
+        cmd: cmd.to_string(),
+        runs,
+        min_pass,
+        retry_failed: 0,
+        retry_on: vec![],
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -41,7 +53,10 @@ fn deterministic_pass_and_fail() {
     let result = runner.run_check(&commit, &ok);
     assert!(result.pass);
     assert_eq!(result.exits, vec![0]);
-    assert!(result.output_tail.is_none(), "a fully-passing check should have no output_tail");
+    assert!(
+        result.output_tail.is_none(),
+        "a fully-passing check should have no output_tail"
+    );
 
     let bad = check("bad", "false", 1, 1);
     let result = runner.run_check(&commit, &bad);
@@ -61,18 +76,25 @@ fn threshold_passes_at_min_pass_2_fails_at_min_pass_3() {
     let runner = Runner::new(&home);
     let commit = repo.git().rev_parse("HEAD").unwrap();
 
-    let cmd = "n=$(cat count 2>/dev/null || echo 0); n=$((n+1)); echo $n > count; [ $((n % 2)) -eq 0 ]";
+    let cmd =
+        "n=$(cat count 2>/dev/null || echo 0); n=$((n+1)); echo $n > count; [ $((n % 2)) -eq 0 ]";
 
     let lenient = check("flaky", cmd, 4, 2);
     let result = runner.run_check(&commit, &lenient);
-    assert!(result.pass, "min_pass=2 over 4 runs (2 evens) should pass: {result:?}");
+    assert!(
+        result.pass,
+        "min_pass=2 over 4 runs (2 evens) should pass: {result:?}"
+    );
 
     // A different threshold is a different check as far as the cache is
     // concerned, so this re-runs from a freshly-cleaned worktree (fresh
     // counter file) rather than reusing the cached verdict above.
     let strict = check("flaky", cmd, 4, 3);
     let result = runner.run_check(&commit, &strict);
-    assert!(!result.pass, "min_pass=3 over 4 runs (2 evens) should fail: {result:?}");
+    assert!(
+        !result.pass,
+        "min_pass=3 over 4 runs (2 evens) should fail: {result:?}"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -94,10 +116,17 @@ fn cache_is_hit_on_second_call() {
     let first = runner.run_check(&commit, &c);
     assert!(first.pass);
     let second = runner.run_check(&commit, &c);
-    assert_eq!(second, first, "a cache hit must return exactly the cached result");
+    assert_eq!(
+        second, first,
+        "a cache hit must return exactly the cached result"
+    );
 
     let lines = std::fs::read_to_string(&log_path).unwrap();
-    assert_eq!(lines.lines().count(), 1, "the cache hit must not run the command again");
+    assert_eq!(
+        lines.lines().count(),
+        1,
+        "the cache hit must not run the command again"
+    );
 }
 
 #[test]
@@ -118,7 +147,11 @@ fn changed_threshold_misses_the_cache() {
     runner.run_check(&commit, &twice);
 
     let lines = std::fs::read_to_string(&log_path).unwrap();
-    assert_eq!(lines.lines().count(), 2, "a changed runs/min_pass must not reuse the cached result");
+    assert_eq!(
+        lines.lines().count(),
+        2,
+        "a changed runs/min_pass must not reuse the cached result"
+    );
 }
 
 #[test]
@@ -135,7 +168,11 @@ fn notes_merge_keeps_other_checks() {
     let mut cached = checks::cached(&hub, &commit);
     cached.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<&str> = cached.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, vec!["lint", "unit"], "writing the second check's note must not drop the first");
+    assert_eq!(
+        names,
+        vec!["lint", "unit"],
+        "writing the second check's note must not drop the first"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -158,7 +195,11 @@ fn suite_with_missing_tests_toml_fails_with_error() {
     assert!(!result.pass);
     assert!(result.error.is_some());
     assert!(result.checks.is_empty());
-    assert!(result.summary().contains("tests.toml"), "unexpected summary: {}", result.summary());
+    assert!(
+        result.summary().contains("tests.toml"),
+        "unexpected summary: {}",
+        result.summary()
+    );
 }
 
 #[test]
@@ -185,11 +226,17 @@ fn run_task_check_reads_task_toml() {
     let (_home_dir, home) = init_hub(&repo);
     let runner = Runner::new(&home);
 
-    write_file(repo.path(), "tasks/foo/task.toml", "title = \"Foo\"\n\n[check]\nname = \"foo-check\"\ncmd = \"true\"\n");
+    write_file(
+        repo.path(),
+        "tasks/foo/task.toml",
+        "title = \"Foo\"\n\n[check]\nname = \"foo-check\"\ncmd = \"true\"\n",
+    );
     let sha = commit(repo.path(), "plan: foo");
     push_main_to_hub(repo.path());
 
-    let result = runner.run_task_check(&sha, "foo").expect("task check should be found and run");
+    let result = runner
+        .run_task_check(&sha, "foo")
+        .expect("task check should be found and run");
     assert_eq!(result.name, "foo-check");
     assert!(result.pass);
 }
@@ -224,12 +271,18 @@ fn checking_two_different_commits_checks_each_out_correctly() {
     let presence = check("presence", "test -f marker.txt", 1, 1);
     // First commit predates marker.txt: the worktree is created fresh here.
     let result_first = runner.run_check(&first, &presence);
-    assert!(!result_first.pass, "marker.txt should not exist at the first commit");
+    assert!(
+        !result_first.pass,
+        "marker.txt should not exist at the first commit"
+    );
 
     // Second commit has it: this reuses (checks out + cleans) the same
     // worktree that was just prepared for `first`.
     let result_second = runner.run_check(&second, &presence);
-    assert!(result_second.pass, "marker.txt should exist at the second commit");
+    assert!(
+        result_second.pass,
+        "marker.txt should exist at the second commit"
+    );
 }
 
 #[test]
@@ -247,7 +300,10 @@ fn untracked_files_from_a_previous_run_are_cleaned() {
     // `git clean -ffd` away stray.txt before the next check runs.
     let checks_absence = check("no-stray", "test ! -f stray.txt", 1, 1);
     let result = runner.run_check(&commit, &checks_absence);
-    assert!(result.pass, "stray.txt from the previous run should have been cleaned");
+    assert!(
+        result.pass,
+        "stray.txt from the previous run should have been cleaned"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -264,7 +320,9 @@ fn output_tail_is_captured_on_failure() {
     let failing = check("boom", "echo failmsg 1>&2; exit 1", 1, 1);
     let result = runner.run_check(&commit, &failing);
     assert!(!result.pass);
-    let tail = result.output_tail.expect("a failing check must capture an output tail");
+    let tail = result
+        .output_tail
+        .expect("a failing check must capture an output tail");
     assert!(tail.contains("failmsg"), "unexpected tail: {tail}");
 }
 
@@ -276,11 +334,18 @@ fn output_tail_is_captured_on_failure() {
 /// in total, counting in a file under `dir`.
 fn fails_first(dir: &std::path::Path, fails: u32, msg: &str) -> String {
     let f = dir.join("n");
-    format!("n=$(cat {f} 2>/dev/null || echo 0); echo $((n+1)) > {f}; if [ $n -lt {fails} ]; then echo '{msg}'; exit 1; fi", f = f.display())
+    format!(
+        "n=$(cat {f} 2>/dev/null || echo 0); echo $((n+1)) > {f}; if [ $n -lt {fails} ]; then echo '{msg}'; exit 1; fi",
+        f = f.display()
+    )
 }
 
 fn retrying(name: &str, cmd: &str, retry_failed: u32, retry_on: &[&str]) -> Check {
-    Check { retry_failed, retry_on: retry_on.iter().map(|s| s.to_string()).collect(), ..check(name, cmd, 1, 1) }
+    Check {
+        retry_failed,
+        retry_on: retry_on.iter().map(|s| s.to_string()).collect(),
+        ..check(name, cmd, 1, 1)
+    }
 }
 
 #[test]
@@ -290,7 +355,12 @@ fn a_failing_check_passes_on_retry_and_says_so() {
     let runner = Runner::new(&home);
     let commit = repo.git().rev_parse("HEAD").unwrap();
 
-    let c = retrying("flaky", &fails_first(home_dir.path(), 1, "Text file busy"), 1, &[]);
+    let c = retrying(
+        "flaky",
+        &fails_first(home_dir.path(), 1, "Text file busy"),
+        1,
+        &[],
+    );
     let result = runner.run_check(&commit, &c);
     assert!(result.pass && result.flaky(), "{result:?}");
     assert_eq!(result.retries, 1);
@@ -319,13 +389,26 @@ fn retry_on_only_retries_matching_failures() {
     let runner = Runner::new(&home);
     let commit = repo.git().rev_parse("HEAD").unwrap();
 
-    let real = retrying("real", &fails_first(home_dir.path(), 1, "assertion failed"), 3, &["Text file busy", "os error 26"]);
+    let real = retrying(
+        "real",
+        &fails_first(home_dir.path(), 1, "assertion failed"),
+        3,
+        &["Text file busy", "os error 26"],
+    );
     let result = runner.run_check(&commit, &real);
     assert!(!result.pass);
-    assert_eq!(result.retries, 0, "an unlisted failure is a strike immediately");
+    assert_eq!(
+        result.retries, 0,
+        "an unlisted failure is a strike immediately"
+    );
 
     let other = TempDir::new().unwrap();
-    let env = retrying("env", &fails_first(other.path(), 1, "oops: os error 26"), 3, &["Text file busy", "os error 26"]);
+    let env = retrying(
+        "env",
+        &fails_first(other.path(), 1, "oops: os error 26"),
+        3,
+        &["Text file busy", "os error 26"],
+    );
     assert!(runner.run_check(&commit, &env).flaky());
 }
 
@@ -336,6 +419,16 @@ fn changing_the_retry_policy_invalidates_the_cached_verdict() {
     let runner = Runner::new(&home);
     let commit = repo.git().rev_parse("HEAD").unwrap();
 
-    assert_eq!(runner.run_check(&commit, &retrying("c", "false", 0, &[])).retries, 0);
-    assert_eq!(runner.run_check(&commit, &retrying("c", "false", 1, &[])).retries, 1);
+    assert_eq!(
+        runner
+            .run_check(&commit, &retrying("c", "false", 0, &[]))
+            .retries,
+        0
+    );
+    assert_eq!(
+        runner
+            .run_check(&commit, &retrying("c", "false", 1, &[]))
+            .retries,
+        1
+    );
 }

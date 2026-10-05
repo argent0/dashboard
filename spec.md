@@ -1,7 +1,7 @@
-# Director / Player / Subagent spec
+# Director / Player / Worker spec
 
 Working spec for evolving `dashboard` from a stateless `tasks.yaml` renderer
-into the enforcement point for a subagent-per-task roadmap loop, with all
+into the enforcement point for a worker-per-task roadmap loop, with all
 roadmap state derived from git. Greenfield: no backward compatibility with
 `tasks.yaml`, existing consumer roadmaps, or the current `dashboard` skill.
 
@@ -9,7 +9,7 @@ roadmap state derived from git. Greenfield: no backward compatibility with
 
 `dashboard` is a stateless CLI that renders `tasks.yaml` (progress bar,
 actionable-now list, blocked/in-revision sections). All orchestration around
-it — spawning subagents, judging their work, editing task state — happens by
+it — spawning workers, judging their work, editing task state — happens by
 hand inside a single Claude Code coordinator session following the
 `dashboard` skill's prose. Status is whatever someone typed into the YAML.
 This spec replaces that with state computed from git.
@@ -27,12 +27,12 @@ This spec replaces that with state computed from git.
 - **Task agent** — an LLM (Claude Code session), one per task, launched by
   the player: the director's delegate for that task, writing its post and
   send-backs and reviewing the finished work (§17).
-- **Subagent** — an LLM (Claude Code session), one per task, launched by the
+- **Worker** — an LLM (Claude Code session), one per task, launched by the
   player. Writes code (and may add new tests) until the project suite
   passes, then commits — or blocks.
 - **Player** — a process; `dashboard`'s new responsibility. The only writer
   of the canonical repo. Imports and validates every commit, runs every
-  test itself, launches subagents, counts strikes, merges accepted work,
+  test itself, launches workers, counts strikes, merges accepted work,
   retires dead tasks. Never trusts a narrated claim — only a test it ran
   itself.
 
@@ -42,7 +42,7 @@ This spec replaces that with state computed from git.
 
 Two failure modes motivate this:
 
-1. A subagent, eager to finish, claims success without it being true.
+1. A worker, eager to finish, claims success without it being true.
 2. A director rejects work without real grounds.
 
 Both are closed by requiring every claim to be a committed, currently
@@ -50,14 +50,14 @@ checkable test:
 
 - The director cannot **post** a task until it has committed a test that
   currently *fails*.
-- The subagent cannot **finish** a task until the whole project suite
+- The worker cannot **finish** a task until the whole project suite
   *passes*.
 - **Sending back** requires a new failing-test commit, not a prose objection.
 - **Accepting** is also a commit, not silence.
 
 Nobody writes a status. Status is a pure function of the repo (commits,
-branches, pins, check results, rejections) plus whether the subagent's
-session is alive. Director and subagent never talk directly; git is the only
+branches, pins, check results, rejections) plus whether the worker's
+session is alive. Director and worker never talk directly; git is the only
 channel.
 
 ### 3.2 Dead ends are normal
@@ -82,23 +82,23 @@ changing the model.
 
 ```
 director clone ──┐
-subagent clone ──┼─(player fetches, validates)─► hub (bare) ─► dashboard renders from hub
+worker clone ──┼─(player fetches, validates)─► hub (bare) ─► dashboard renders from hub
                  │                                 ├─ refs/notes/dashboard: cached check results
                  │                                 ├─ refs/rejected/…: rejected commits
                  │                                 └─ refs/retired/…: retired task branches
-tmux session  ◄──┘ (player launches the subagent, relays rejections/revisions)
+tmux session  ◄──┘ (player launches the worker, relays rejections/revisions)
 ```
 
 - **Hub** — a bare repository owned by the player. The only source of truth.
   Only the player updates its refs.
-- **Clones** — the director has one clone; the subagent gets its own clone
+- **Clones** — the director has one clone; the worker gets its own clone
   of the hub checked out on its task branch, and so does the task agent
   (§17). Separate clones, not
   worktrees: worktrees share refs. Agents fetch from the hub freely but
   never push.
 - **Provenance by fetch source.** The player pulls new commits from each
   clone. Commits fetched from the director's clone are the director's;
-  commits fetched from the subagent's clone are the subagent's. No tokens or
+  commits fetched from the worker's clone are the worker's. No tokens or
   author fields are needed to establish identity, and there is nothing to
   leak or forge in commit content.
 - **Parallel tasks.** Any number of tasks may be posted and in flight at
@@ -117,7 +117,7 @@ Enforced by the player on import; a violating commit is never imported.
   force push.
 - **No merge commits from agents.** The only merge commits are the
   player's own and the director's resolution of a recorded conflict (§11).
-- **Path ownership.** A subagent commit must leave every pin (§8.3)
+- **Path ownership.** A worker commit must leave every pin (§8.3)
   unchanged. The director commits to a task branch only through the
   transitions in §9.
 - **`main` is player-only**, except for director commits touching only
@@ -135,8 +135,8 @@ and topical.
 
 **Rejection.** The player leaves the hub branch untouched, stores the
 offending commit under `refs/rejected/<slug>/<n>` as evidence, records the
-reason so `dashboard` shows it, and relays it to the subagent's tmux session
-when the subagent is the author. The agent recovers in its own clone: a
+reason so `dashboard` shows it, and relays it to the worker's tmux session
+when the worker is the author. The agent recovers in its own clone: a
 fixing commit on top for content violations (e.g. restoring a pinned file),
 or `git reset --hard` to the hub ref for history violations. The player
 never modifies an agent's clone. Each rejection is a strike in its reason's
@@ -167,7 +167,7 @@ degenerate case `runs = 1, min_pass = 1`. This makes non-deterministic tests
 
 Thresholds are task-dependent. The director sets them when it writes the
 check; the operator may set or override them (the director commits the
-operator's choice). They live in pinned files, so the subagent can never
+operator's choice). They live in pinned files, so the worker can never
 lower a threshold to get a pass.
 
 A threshold check can still fail by chance on a correct implementation.
@@ -206,19 +206,19 @@ suite. It goes there, not into `tests.toml`.
 
 A task may legitimately change behaviour an existing test asserts. Deciding
 that a test is stale — rather than inconvenient — is a design decision and
-belongs to the director, never the subagent:
+belongs to the director, never the worker:
 
 - **Foreseen:** the director updates or deletes the stale test (and its
   `tests.toml` or `tests.d/` entry) in the task's post commit, visible in
   the diff.
-- **Found mid-task:** the subagent cannot touch pinned tests, so it
+- **Found mid-task:** the worker cannot touch pinned tests, so it
   **blocks**, explaining the conflict. That escalates the task (§10); the
   director and operator replan, typically retiring it and posting a
   replacement whose post commit fixes the stale test.
 
-## 7. Subagent commits
+## 7. Worker commits
 
-The subagent commits only when it believes it is done. Every subagent
+The worker commits only when it believes it is done. Every worker
 commit is therefore one of:
 
 - a **finish claim** — any non-empty commit. The player checks it (§9);
@@ -230,7 +230,7 @@ commit is therefore one of:
   (unsatisfiable, or over-specified); the task goes back to the test's
   author instead of escalating (§18).
 
-Work in progress stays uncommitted in the subagent's clone.
+Work in progress stays uncommitted in the worker's clone.
 
 ## 8. Task layout
 
@@ -251,7 +251,7 @@ prompts.kdl                    on main: every prompt the player sends (§19)
 tests.toml                     project suite: [[check]] entries, test_paths
 tests.d/<slug>.toml            the suite fragment a task's post adds: its check
 tasks/<slug>/task.toml         title, phase, milestone, depends_on, check
-tasks/<slug>/prompt.md         director → subagent instructions
+tasks/<slug>/prompt.md         director → worker instructions
 tasks/<slug>/reviews/r<N>.md   director's send-back notes, round N
 ```
 
@@ -263,7 +263,7 @@ files.
 ### 8.3 Pins
 
 Pins are computed by the player as late as possible: immediately before
-the subagent starts work — at launch, and again before relaying a
+the worker starts work — at launch, and again before relaying a
 send-back. Until then the director may keep refining tests freely.
 
 The player records git's blob hash (`git rev-parse <tip>:<file>`) of every
@@ -273,9 +273,9 @@ file that exists at that moment under:
   (the whole test tree),
 - `tasks/<slug>/`.
 
-Every subagent commit must leave each pinned file present and byte-identical
+Every worker commit must leave each pinned file present and byte-identical
 — mechanically checked, no trust involved. New files are allowed: the
-subagent may add tests (which become project tests on merge), but not a new
+worker may add tests (which become project tests on merge), but not a new
 `tests.d/` fragment: the suite's checks are the director's.
 
 Pins close tampering with the tests themselves, not every way of beating
@@ -292,21 +292,21 @@ failed validation is a rejection with the listed reason (§10).
 | **plan** | new branch `task/<slug>` from `main`, adding `tasks/<slug>/task.toml` (director) | slug unused (incl. retired); `depends_on` slugs exist and aren't retired; no cycles | `plan` |
 | **replan** | edits `tasks/<slug>/task.toml` on a not-yet-posted branch (director) | same as plan | `plan` |
 | **post** | adds `prompt.md`, the task check and its test files, `tests.d/<slug>.toml` entry, stale-test updates (director, or its task agent §17) | all `depends_on` accepted and merged into the branch (§11); task check **fails** | `post` |
-| **launch** | — (player) | task check still **fails** at the tip; records pins; starts `tmux` session running `claude` in a fresh subagent clone with `prompt.md` | — |
-| **finish** | code, optionally new tests (subagent) | pins unchanged; project suite **passes** | `pins`, `suite` |
-| **block** | `block:` marker (subagent) | — | — (escalates) |
-| **contest** / **reply** | `contest:` marker (subagent); the reply (task agent or director) | §18 | §18 |
+| **launch** | — (player) | task check still **fails** at the tip; records pins; starts `tmux` session running `claude` in a fresh worker clone with `prompt.md` | — |
+| **finish** | code, optionally new tests (worker) | pins unchanged; project suite **passes** | `pins`, `suite` |
+| **block** | `block:` marker (worker) | — | — (escalates) |
+| **contest** / **reply** | `contest:` marker (worker); the reply (task agent or director) | §18 | §18 |
 | **send back** | adds `reviews/r<N>.md` + new/updated tests (director, or its task agent §17) | task is `tested`; project suite now **fails**; re-pins; relays the note | `review` |
-| **accept** | `accept:` marker (director) | task is `tested`; the player lands it (§11), merging `main` in first if it moved: a conflict leaves it `conflicted`, a suite failure caused by the merge sends it back to the subagent | `accept` |
+| **accept** | `accept:` marker (director) | task is `tested`; the player lands it (§11), merging `main` in first if it moved: a conflict leaves it `conflicted`, a suite failure caused by the merge sends it back to the worker | `accept` |
 | **resolve** | merge of the recorded `main` commit into the task tip (director) | task is `conflicted`; merges exactly the `main` commit the conflict was recorded against; differs from git's own merge only on the recorded paths; re-pins; the player then lands the accept (§11) | `history`, `ownership` |
-| **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is conflicted, contested or escalated; player moves the branch to `refs/retired/<slug>` and ends the subagent session | `retire` |
+| **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is conflicted, contested or escalated; player moves the branch to `refs/retired/<slug>` and ends the worker session | `retire` |
 
 Any agent commit that breaks the history rules (§5) is rejected with reason
 `history`, whatever transition it was meant to be; a director commit that
 fits no transition is rejected with reason `ownership`.
 
-The subagent's tmux session persists across send-backs, so the same
-subagent, with its context, handles them. It ends when the task is accepted
+The worker's tmux session persists across send-backs, so the same
+worker, with its context, handles them. It ends when the task is accepted
 or retired.
 
 Check results (check, commit, per-run exit codes) are cached as git notes
@@ -322,23 +322,23 @@ its own limit in `roadmap.toml` under `[limits.strikes]`:
 |---|---|---|---|
 | `history` | either | rebase, amend, force push, merge commit | 2 |
 | `ownership` | director, task agent | commit that fits no transition, or touches paths it may not | 2 |
-| `pins` | subagent | finish claim modified or deleted a pinned file | 2 |
-| `suite` | subagent | finish claim where the project suite fails | 2 |
+| `pins` | worker | finish claim modified or deleted a pinned file | 2 |
+| `suite` | worker | finish claim where the project suite fails | 2 |
 | `plan` | director | invalid plan/replan (bad slug, bad dependency, cycle) | 2 |
 | `post` | director, task agent | post whose task check passes, or whose dependencies aren't met | 2 |
 | `review` | director, task agent | send-back where the suite still passes — an objection without evidence | 2 |
 | `accept` | director | accept while the task isn't `tested` | 2 |
 | `retire` | director | retire of a task that is in flight and not escalated | 2 |
-| `claims` | subagent | a spike's finish claim whose findings or claims don't validate (§14) | 2 |
+| `claims` | worker | a spike's finish claim whose findings or claims don't validate (§14) | 2 |
 
 Separately, `[limits] max_review_rounds` (default 2) caps legitimate
-send-backs, and `[limits] max_contest_rounds` (default 2) caps a subagent's
+send-backs, and `[limits] max_contest_rounds` (default 2) caps a worker's
 contests (§18).
 
 A task is **escalated** when any strike counter reaches its limit, a
 send-back would exceed `max_review_rounds`, a contest would exceed
-`max_contest_rounds`, or the subagent blocks. The
-player stops relaying to the subagent, and the dashboard shows the cause.
+`max_contest_rounds`, or the worker blocks. The
+player stops relaying to the worker, and the dashboard shows the cause.
 Counters never reset over a task's life. Rejections of director commits to
 `main` (not tied to a task) are shown but not counted.
 
@@ -354,7 +354,7 @@ the director as ordinary commits:
   on `main`), so the dead end informs future work.
 
 A new task may point its prompt at `refs/retired/<slug>` to salvage code or
-context from a dead end; the subagent copies what it needs into ordinary
+context from a dead end; the worker copies what it needs into ordinary
 commits.
 
 ## 11. Merges (player-only)
@@ -377,7 +377,7 @@ commits.
   2. It merges the branch into `main` with `--no-ff` and a `Task: <slug>`
      trailer, after running the project suite on the merge result. If the
      suite fails because of what the merge brought in (a semantic
-     conflict), `main` doesn't move: the task goes back to the subagent,
+     conflict), `main` doesn't move: the task goes back to the worker,
      `in_revision`, re-pinned at the sync, with the failure relayed as the
      evidence and no review round spent. Once it is `tested` again, the
      director reviews and accepts again. A failure with nothing merged in is
@@ -404,11 +404,11 @@ commits.
 | `pending` | branch has `task.toml` but no validated post |
 | `orphaned` | pending, and some `depends_on` is retired — needs a replan |
 | `ready` | pending, and every `depends_on` accepted — the director may post |
-| `posted` | validated post, no live subagent session yet |
-| `in_progress` | subagent session alive and working (runtime, not git) |
-| `tested` | latest subagent commit validated as passing, awaiting director |
+| `posted` | validated post, no live worker session yet |
+| `in_progress` | worker session alive and working (runtime, not git) |
+| `tested` | latest worker commit validated as passing, awaiting director |
 | `in_revision` | latest director commit is a send-back or a contest reply (§18), or landing an accept merged `main` in and the suite failed (§11); round N = count of `reviews/r*.md` |
-| `contested` | latest subagent commit is a `contest:` marker: the task agent (or director) must reply (§18) |
+| `contested` | latest worker commit is a `contest:` marker: the task agent (or director) must reply (§18) |
 | `conflicted` | landing an accept couldn't merge `main` in; the tip carries the conflict (the `main` commit and paths) for the director to resolve (§11) |
 | `escalated` | a strike limit reached, review rounds exceeded, or a `block:` marker; shown with its cause |
 | `accepted` | `Task: <slug>` merge commit on `main` |
@@ -436,13 +436,13 @@ spec's parking lot" for the detail behind each pointer):
 - **The director must not poll**: `dashboard wait` blocks on an
   append-only event log until the player has something director-relevant
   to say — CLAUDE.md's Decisions section.
-- **Auto-relaunch**: deferred. A dead subagent session is shown and emitted
+- **Auto-relaunch**: deferred. A dead worker session is shown and emitted
   as an event, never restarted automatically; `dashboard relaunch <slug>`
   is the manual trigger — CLAUDE.md's Decisions section.
 - **Parallel tasks**: allowed; the player merges `main` into a task when
   landing its accept, and the director resolves only recorded conflicts
   (§4, §11).
-- **How a subagent is launched**: `[player] agent_cmd` in `roadmap.toml`
+- **How a worker is launched**: `[player] agent_cmd` in `roadmap.toml`
   (default `claude --dangerously-skip-permissions`), run in a `tmux`
   session per task, prompt.md passed as its first message — CLAUDE.md's
   Decisions section.
@@ -452,10 +452,10 @@ spec's parking lot" for the detail behind each pointer):
 Still not decided:
 
 - Timeout/crash handling beyond manual relaunch: what the player does if
-  the subagent session hangs, crashes, or never commits, beyond leaving
+  the worker session hangs, crashes, or never commits, beyond leaving
   that to the operator via `dashboard relaunch`.
 - Scope enforcement beyond pins: whether the player restricts which
-  non-test paths a subagent commit may touch.
+  non-test paths a worker commit may touch.
 - Suite runtime: the full suite (including multi-run checks) runs at every
   finish and merge; may need caching or subsetting for large projects.
 - Whether the `dashboard` skill is rewritten as the director's playbook or
@@ -491,7 +491,7 @@ nothing to merge, it never conflicts.
 - *Player*: validates the post, pins the question files and the base commit,
   runs every claim against the right code version, requires `findings`, never
   merges the branch, never requires the project suite.
-- *Subagent*: explores with no path restrictions (nothing merges), then
+- *Worker*: explores with no path restrictions (nothing merges), then
   delivers the findings and the claims. It can't touch the pinned files, so
   it can't reword the question.
 
@@ -502,8 +502,8 @@ question and each send-back opens the next. Nothing is overwritten.
 tasks/<slug>/task.toml, prompt.md   director, pinned at launch
 tasks/<slug>/questions/<n>.toml     director, one per round, append-only
 tasks/<slug>/baseline/<n>.toml      director's baseline claims for round n
-tasks/<slug>/claims/<n>.toml        subagent: answer + claims for round n
-tasks/<slug>/findings/<n>.md        subagent: free-form findings, round n
+tasks/<slug>/claims/<n>.toml        worker: answer + claims for round n
+tasks/<slug>/findings/<n>.md        worker: free-form findings, round n
 ```
 
 `questions/<n>.toml` has `question`, `why` (prose), `answers` (the allowed
@@ -519,9 +519,9 @@ result. Two kinds:
 
 - *baseline*: describes the code as it is now. The director supplies them in
   `baseline/<n>.toml` (pinned, verified to pass at post/send-back time); the
-  subagent may add its own. Run against the **base commit** with
+  worker may add its own. Run against the **base commit** with
   `tasks/<slug>/` overlaid, they must pass.
-- *spike*: describes what the exploration achieved. Only the subagent writes
+- *spike*: describes what the exploration achieved. Only the worker writes
   them, with `supports = "<answer>"`. They must pass on the branch tip and
   **fail** on the base-with-overlay. A claim that passes without the spike
   (`cmd = "true"`) is rejected.
@@ -536,8 +536,8 @@ copies `tasks/<slug>/` from the candidate onto it, so claim scripts under
 | Transition | Commit | Player checks | Reason |
 |---|---|---|---|
 | **post** | director adds `prompt.md`, `questions/1.toml`, optional `baseline/1.toml` (+scripts); only under `tasks/<slug>/`, nothing in `claims/` or `findings/` | spike is `ready`, question valid, baseline claims pass | `post` |
-| **launch** | — | baseline claims still pass; pins only `tasks/<slug>/` (the project's tests are the subagent's to change); sets the base | — |
-| **finish** | subagent: code, `findings/<n>.md`, `claims/<n>.toml` | pins; only `claims/`/`findings/` of this round under `tasks/<slug>/`; findings non-empty; `answer` allowed; every claim runs and passes as above; a non-`inconclusive` answer has a passing spike claim with `supports` equal to it. Any failing claim rejects the whole finish | `pins`, `claims` |
+| **launch** | — | baseline claims still pass; pins only `tasks/<slug>/` (the project's tests are the worker's to change); sets the base | — |
+| **finish** | worker: code, `findings/<n>.md`, `claims/<n>.toml` | pins; only `claims/`/`findings/` of this round under `tasks/<slug>/`; findings non-empty; `answer` allowed; every claim runs and passes as above; a non-`inconclusive` answer has a passing spike claim with `supports` equal to it. Any failing claim rejects the whole finish | `pins`, `claims` |
 | **send back** | director adds `questions/<n+1>.toml` (+ optional baseline); operator approves | adds nothing else; `refines` in range; baseline claims pass on the base; within `max_review_rounds`. No failing test needed. Re-pins | `ownership`, `review` |
 | **conclude** | `conclude:` marker, spike is `tested` | moves the branch to `refs/explored/<slug>` (like retire), ends the session | `accept`, `ownership` |
 
@@ -554,7 +554,7 @@ claims: {name: {kind, passed, metrics}}}`; the `conclude:` commit gets the
 final `{concluded: true, round, answer}`. `status` reads these, so the answer
 shows next to the spike (`explored: yes (round 2)`) without parsing markdown.
 
-**Not in v1.** A sandbox for the subagent's paths; anything depending on a
+**Not in v1.** A sandbox for the worker's paths; anything depending on a
 spike or enforcing `derived_from`; operator authorization the player can check;
 verifying quotes in the findings; size caps and time budgets.
 
@@ -562,7 +562,7 @@ verifying quotes in the findings; size caps and time budgets.
 
 A task of `kind = "flaky-test-fix"` replaces a flaky test with a stable one,
 the one case with no honest failing check at post: the test is green most of
-the time, and the pinned tree stops the subagent editing it. Wrong or
+the time, and the pinned tree stops the worker editing it. Wrong or
 missing assertions are not this path; their fix is a new test in an ordinary
 task.
 
@@ -585,7 +585,7 @@ test per line.
   A flake whose cause is in the product code isn't this kind of task: it
   takes the regular path (an ordinary task with a deterministic failing
   test, or a spike first). Touching anything else is a `pins` strike, and
-  the subagent is told to `block:` instead so the director replans it.
+  the worker is told to `block:` instead so the director replans it.
 - *Finish*: the suite passes, the `[check]` passes on the branch, no test
   from the pinned base other than an `old` one is missing from the `list_cmd`
   inventory, and every `new` exists. Any miss is a `suite` strike.
@@ -602,7 +602,7 @@ matches is retried, so any other failure is a strike at once. Both fields are
 director-owned and pinned with the suite.
 
 Retries never apply to a task's own `[check]` (§6.3) or to evidence (§15),
-and the subagent's verdict stays plain: it is never told of them.
+and the worker's verdict stays plain: it is never told of them.
 
 Every attempt is in the cached result. A check that passed only on a retry
 goes in the *flake ledger* (`refs/flakes/<scope>/<n>`, notes under
@@ -617,7 +617,7 @@ The director holds the cross-task view; everything about one task (its
 prompt and failing test, reading its diff, its send-backs) belongs to that
 task's **task agent**, an LLM session acting as the director's delegate for
 that task alone. Task agents are launched and mediated by the player, like
-subagents, so the operator can watch one at work (`tmux attach`), every
+workers, so the operator can watch one at work (`tmux attach`), every
 commit it makes is validated and attributed to it, and its verdicts are
 recorded in the hub instead of living only in the director's context.
 
@@ -633,7 +633,7 @@ with the operator.
 - *Launch*: automatic. When an agent-managed task becomes `ready` the player
   creates the task agent's clone and starts its session with the post step;
   a task found `tested` with no task agent gets one with the review step.
-  Launched once, recorded in `refs/dashboard/agent/<slug>`; like a subagent,
+  Launched once, recorded in `refs/dashboard/agent/<slug>`; like a worker,
   a dead task agent is reported (`agent_died`), never restarted
   automatically: `dashboard relaunch <slug> --agent` restarts it in the same
   clone, with a fresh prompt for where the task is now.
@@ -646,9 +646,9 @@ with the operator.
   accepted, retired or auto-retired. An escalated task keeps its task agent,
   so the director can ask it what went wrong.
 
-**Clone.** Another worktree of the subagents' shared workspace (CLAUDE.md),
+**Clone.** Another worktree of the workers' shared workspace (CLAUDE.md),
 at `<director>/.dashboard/agents/<slug>/`, on the local branch
-`agent/<slug>` (the subagent's worktree has `task/<slug>`). The player
+`agent/<slug>` (the worker's worktree has `task/<slug>`). The player
 fetches `agent/<slug>` into `refs/incoming/agent/<slug>`; provenance by fetch
 source (§4) makes its commits the task agent's (`actor: task_agent`).
 
@@ -656,16 +656,16 @@ source (§4) makes its commits the task agent's (`actor: task_agent`).
 as planned (`task.toml`, the phase goal, and the director's `brief`, a free
 text field of `task.toml` that is the director's channel to it), the report
 format, and the current step. The rules: never write a throwaway
-implementation (implementing is the subagent's; it may run any test it
+implementation (implementing is the worker's; it may run any test it
 writes against the code as it is, to see it fail for the right reason, but
 never against code it wrote); test observable behaviour, not one
 implementation (§18); every test it writes is pure, and its `prompt.md`
 passes that on; it writes no product code; it never commits a marker. It
-is also told its tests are worked out with the subagent, not handed over
+is also told its tests are worked out with the worker, not handed over
 once: contests (§18) and send-backs bounce them back and forth through the
 hub, and it treats each exchange as collaboration, conceding when the
-subagent is right. The
-review step also asks it to run a send-back's new test on the subagent's
+worker is right. The
+review step also asks it to run a send-back's new test on the worker's
 code first, so a send-back the suite still passes doesn't cost a `review`
 strike.
 
@@ -717,10 +717,10 @@ instead.
 
 | Transition | Commit (author) | Player checks | Rejection reason |
 |---|---|---|---|
-| **contest** | `contest:` marker naming the test, body = why it's wrong (subagent) | a clean marker on the hub tip (as `block:`); not a spike; within `max_contest_rounds`, else the task escalates and the marker isn't imported | `history`, `suite` |
-| **reply** | adds `tasks/<slug>/contests/c<N>.md` and optionally fixed tests (task agent; the director when task agents are off) | task is `contested`; only the reply, `tests.toml`, `tests.d/`, `test_paths` and `tasks/<slug>/`; re-pins; relays the reply to the subagent | `ownership` |
+| **contest** | `contest:` marker naming the test, body = why it's wrong (worker) | a clean marker on the hub tip (as `block:`); not a spike; within `max_contest_rounds`, else the task escalates and the marker isn't imported | `history`, `suite` |
+| **reply** | adds `tasks/<slug>/contests/c<N>.md` and optionally fixed tests (task agent; the director when task agents are off) | task is `contested`; only the reply, `tests.toml`, `tests.d/`, `test_paths` and `tasks/<slug>/`; re-pins; relays the reply to the worker | `ownership` |
 
-- While `contested` (§12) the subagent waits; the player fetches nothing from
+- While `contested` (§12) the worker waits; the player fetches nothing from
   it. The task agent is asked to reply (once per contest), still without
   writing any implementation. Without task agents, the director gets a
   `contested` event.
@@ -729,7 +729,7 @@ instead.
   `in_revision`.
 - `[limits] max_contest_rounds` (default 2) caps contests per task, counted
   as the `contests/c*.md` replies at the tip plus the new one. One more
-  escalates, with the subagent's reason in the cause.
+  escalates, with the worker's reason in the cause.
 - A contested task may be retired (§9).
 - `block:` stays the escape for everything else: a missing prerequisite, a
   wrong approach, a stale test (§6.4), a decision only a human can make.
@@ -737,14 +737,14 @@ instead.
 ## 19. Prompts
 
 Every text the player gives an agent comes from `prompts.kdl` on `main`:
-the subagent's and spike subagent's preambles, the flaky-test-fix
+the worker's and spike worker's preambles, the flaky-test-fix
 paragraph, the task agent's preamble and steps, and every message it pastes
 into a session (relayed reviews and contest replies, rejections and their
 recovery hints, finish acknowledgements, rebase requests, the director's
 questions). The rejection reasons themselves stay the player's own
 diagnostics; only the text around them is a template.
 
-- Each template is a named string under its section (`subagent`, `spike`,
+- Each template is a named string under its section (`worker`, `spike`,
   `task-agent`) with `{name}` placeholders, each template allowing only its
   own set. What fills them is the hub's: the slug, the pinned files,
   prompt.md, a review, a check summary.

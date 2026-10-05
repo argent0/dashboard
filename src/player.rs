@@ -6,18 +6,18 @@
 // the rest of the director-side transitions on an existing branch: post,
 // send-back, accept and retire, plus the marker-commit dispatch
 // (`accept:`/`retire:`, and rejecting any other empty commit as `ownership`
-// since only the subagent may write `block:`). Every validation is against
+// since only the worker may write `block:`). Every validation is against
 // the *cumulative* diff from the hub's current tip to the candidate, exactly
 // as in 5a, so a fixing commit on top of a rejected one still has a chance.
-// Step 6 (this step) adds the subagent side (spec §7, §8.3, §9's launch row):
-// launching a subagent clone + tmux session right after a task is posted,
+// Step 6 (this step) adds the worker side (spec §7, §8.3, §9's launch row):
+// launching a worker clone + tmux session right after a task is posted,
 // importing and validating its finish/block claims (only the newest commit
 // in the fetched range is ever validated — each one is a whole finish claim,
-// spec's "Import semantics"), and relaying subagent rejections and
+// spec's "Import semantics"), and relaying worker rejections and
 // send-backs into its tmux session. Step 7 adds events and `dashboard wait`.
 
 use crate::checks;
-use crate::config::{self, RoadmapConfig, Reason, TaskConfig, TaskKind};
+use crate::config::{self, Reason, RoadmapConfig, TaskConfig, TaskKind};
 use crate::events::{self, EventKind};
 use crate::flaky;
 use crate::git::Git;
@@ -40,9 +40,15 @@ use std::process::{Command, Stdio};
 
 pub trait Sessions {
     fn alive(&self, slug: &str) -> bool;
-    /// Starts the subagent's session: `agent_cmd` run in `clone_dir` with
+    /// Starts the worker's session: `agent_cmd` run in `clone_dir` with
     /// `prompt_file`'s contents as its first message (spec §9's launch row).
-    fn launch(&mut self, slug: &str, clone_dir: &Path, agent_cmd: &str, prompt_file: &Path) -> Result<(), String>;
+    fn launch(
+        &mut self,
+        slug: &str,
+        clone_dir: &Path,
+        agent_cmd: &str,
+        prompt_file: &Path,
+    ) -> Result<(), String>;
     fn send(&mut self, slug: &str, message: &str);
     fn kill(&mut self, slug: &str);
 }
@@ -74,8 +80,19 @@ impl Sessions for NullSessions {
         self.alive.contains(slug)
     }
 
-    fn launch(&mut self, slug: &str, clone_dir: &Path, agent_cmd: &str, prompt_file: &Path) -> Result<(), String> {
-        self.launched.push(LaunchCall { slug: slug.to_string(), clone_dir: clone_dir.to_path_buf(), agent_cmd: agent_cmd.to_string(), prompt_file: prompt_file.to_path_buf() });
+    fn launch(
+        &mut self,
+        slug: &str,
+        clone_dir: &Path,
+        agent_cmd: &str,
+        prompt_file: &Path,
+    ) -> Result<(), String> {
+        self.launched.push(LaunchCall {
+            slug: slug.to_string(),
+            clone_dir: clone_dir.to_path_buf(),
+            agent_cmd: agent_cmd.to_string(),
+            prompt_file: prompt_file.to_path_buf(),
+        });
         self.alive.insert(slug.to_string());
         Ok(())
     }
@@ -100,7 +117,9 @@ pub struct TmuxSessions {
 
 impl TmuxSessions {
     pub fn new(project: impl Into<String>) -> Self {
-        Self { project: project.into() }
+        Self {
+            project: project.into(),
+        }
     }
 }
 
@@ -114,17 +133,40 @@ impl Sessions for TmuxSessions {
     /// plain argv elements (no shell involved for the outer `tmux` call), but
     /// `prompt_file` is interpolated into the inner `sh -c` string, so it's
     /// the one path that needs shell quoting.
-    fn launch(&mut self, slug: &str, clone_dir: &Path, agent_cmd: &str, prompt_file: &Path) -> Result<(), String> {
+    fn launch(
+        &mut self,
+        slug: &str,
+        clone_dir: &Path,
+        agent_cmd: &str,
+        prompt_file: &Path,
+    ) -> Result<(), String> {
         let name = state::tmux_session_name(&self.project, slug);
-        let clone_str = clone_dir.to_str().ok_or_else(|| format!("{} is not valid UTF-8", clone_dir.display()))?;
-        let prompt_str = prompt_file.to_str().ok_or_else(|| format!("{} is not valid UTF-8", prompt_file.display()))?;
+        let clone_str = clone_dir
+            .to_str()
+            .ok_or_else(|| format!("{} is not valid UTF-8", clone_dir.display()))?;
+        let prompt_str = prompt_file
+            .to_str()
+            .ok_or_else(|| format!("{} is not valid UTF-8", prompt_file.display()))?;
         let inner = format!("{agent_cmd} \"$(cat {})\"", shell_quote(prompt_str));
         let status = Command::new("tmux")
-            .args(["new-session", "-d", "-s", &name, "-c", clone_str, "sh", "-c", &inner])
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &name,
+                "-c",
+                clone_str,
+                "sh",
+                "-c",
+                &inner,
+            ])
             .status()
             .map_err(|e| format!("tmux new-session for {name}: {e}"))?;
         if !status.success() {
-            return Err(format!("tmux new-session for {name} failed (exit {:?})", status.code()));
+            return Err(format!(
+                "tmux new-session for {name} failed (exit {:?})",
+                status.code()
+            ));
         }
         Ok(())
     }
@@ -138,7 +180,10 @@ impl Sessions for TmuxSessions {
         let name = state::tmux_session_name(&self.project, slug);
         let buf = format!("dash-{name}");
 
-        let child = Command::new("tmux").args(["load-buffer", "-b", &buf, "-"]).stdin(Stdio::piped()).spawn();
+        let child = Command::new("tmux")
+            .args(["load-buffer", "-b", &buf, "-"])
+            .stdin(Stdio::piped())
+            .spawn();
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
@@ -154,7 +199,10 @@ impl Sessions for TmuxSessions {
         match child.wait() {
             Ok(status) if status.success() => {}
             Ok(status) => {
-                eprintln!("dashboard: tmux load-buffer for {name} failed (exit {:?})", status.code());
+                eprintln!(
+                    "dashboard: tmux load-buffer for {name} failed (exit {:?})",
+                    status.code()
+                );
                 return;
             }
             Err(e) => {
@@ -169,11 +217,17 @@ impl Sessions for TmuxSessions {
         // keys to it without a window/pane component — `=<name>:` (session's
         // current window's active pane) is the minimal target that resolves.
         let target = format!("={name}:");
-        if let Err(e) = Command::new("tmux").args(["paste-buffer", "-d", "-p", "-b", &buf, "-t", &target]).status() {
+        if let Err(e) = Command::new("tmux")
+            .args(["paste-buffer", "-d", "-p", "-b", &buf, "-t", &target])
+            .status()
+        {
             eprintln!("dashboard: tmux paste-buffer for {name} failed: {e}");
             return;
         }
-        if let Err(e) = Command::new("tmux").args(["send-keys", "-t", &target, "Enter"]).status() {
+        if let Err(e) = Command::new("tmux")
+            .args(["send-keys", "-t", &target, "Enter"])
+            .status()
+        {
             eprintln!("dashboard: tmux send-keys for {name} failed: {e}");
         }
     }
@@ -183,7 +237,9 @@ impl Sessions for TmuxSessions {
     /// on its own, are both fine outcomes here).
     fn kill(&mut self, slug: &str) {
         let name = state::tmux_session_name(&self.project, slug);
-        let _ = Command::new("tmux").args(["kill-session", "-t", &format!("={name}")]).output();
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &format!("={name}")])
+            .output();
     }
 }
 
@@ -193,7 +249,6 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-
 // --------------------------------------------------------------------------
 // TickReport
 // --------------------------------------------------------------------------
@@ -202,13 +257,13 @@ fn shell_quote(s: &str) -> String {
 /// for every commit the player advanced a hub ref to (director docs commits
 /// on main, plans, replans, and the player's own unblock/accept merges land
 /// here too via their `Transition::MergeUnblock`/`MergeAccept` notes, as do
-/// subagent finish/block commits via `Transition::Finish`/`Block`). `merges`
+/// worker finish/block commits via `Transition::Finish`/`Block`). `merges`
 /// carries a short human line per unblock-merge attempt, success or failure
 /// (spec §11) — there's no reason to model it more richly than the CLI's
 /// report needs. `escalated` is `(slug, cause)` for a send-back that would
 /// exceed `max_review_rounds` (spec §10): the offending commit is
 /// deliberately not imported and not recorded as a rejection, so it needs
-/// its own place in the report. `launched` is every slug a subagent session
+/// its own place in the report. `launched` is every slug a worker session
 /// was started for this tick (spec §9's launch row); `errors` is everything
 /// that went wrong outside the reject/relay machinery — a launch attempt
 /// whose task check now unexpectedly passes, a leftover clone directory, or
@@ -257,7 +312,12 @@ impl fmt::Display for TickReport {
             lines.push(format!("imported {} -> {} ({})", short(sha), r, t.as_str()));
         }
         for rej in &self.rejected {
-            lines.push(format!("rejected {} [{}]: {}", rej.scope, rej.reason.as_str(), rej.message));
+            lines.push(format!(
+                "rejected {} [{}]: {}",
+                rej.scope,
+                rej.reason.as_str(),
+                rej.message
+            ));
         }
         for (slug, cause) in &self.escalated {
             lines.push(format!("escalated {slug}: {cause}"));
@@ -320,11 +380,25 @@ impl<S: Sessions> Player<S> {
     /// `dashboard.director` and `dashboard.project` from the hub's config.
     pub fn open(home: Home, sessions: S) -> Result<Self, String> {
         let hub = Git::new(home.hub());
-        let director = hub.config_get("dashboard.director").ok_or_else(|| "hub is missing dashboard.director — run `dashboard init`".to_string())?;
-        let project = hub.config_get("dashboard.project").ok_or_else(|| "hub is missing dashboard.project — run `dashboard init`".to_string())?;
+        let director = hub.config_get("dashboard.director").ok_or_else(|| {
+            "hub is missing dashboard.director — run `dashboard init`".to_string()
+        })?;
+        let project = hub
+            .config_get("dashboard.project")
+            .ok_or_else(|| "hub is missing dashboard.project — run `dashboard init`".to_string())?;
         let runner = checks::Runner::new(&home);
         let (last, first_run) = load_player_state(&home);
-        Ok(Self { home, hub, director: PathBuf::from(director), project, runner, sessions, last, first_run, agent_rebase_told: BTreeMap::new() })
+        Ok(Self {
+            home,
+            hub,
+            director: PathBuf::from(director),
+            project,
+            runner,
+            sessions,
+            last,
+            first_run,
+            agent_rebase_told: BTreeMap::new(),
+        })
     }
 
     /// Read access to the sessions backend, so tests using `NullSessions`
@@ -354,8 +428,8 @@ impl<S: Sessions> Player<S> {
         self.import_main(&mut report)?;
         self.import_task_branches(&mut report)?;
         self.import_task_agents(&mut report)?;
-        self.launch_subagents(&mut report)?;
-        self.import_subagents(&mut report)?;
+        self.launch_workers(&mut report)?;
+        self.import_workers(&mut report)?;
         self.unblock_merges(&mut report)?;
         self.run_task_agents(&mut report)?;
         self.emit_events(&report)?;
@@ -374,7 +448,11 @@ impl<S: Sessions> Player<S> {
 
         for rej in &report.rejected {
             if rej.actor == Actor::Director {
-                let slug = if rej.scope == "_main" { None } else { Some(rej.scope.as_str()) };
+                let slug = if rej.scope == "_main" {
+                    None
+                } else {
+                    Some(rej.scope.as_str())
+                };
                 events::append(&self.home, EventKind::DirectorRejected, slug, &rej.message)?;
             }
         }
@@ -391,7 +469,12 @@ impl<S: Sessions> Player<S> {
         }
         for slug in &report.agents_launched {
             let session = state::tmux_session_name(&self.project, &state::agent_key(slug));
-            events::append(&self.home, EventKind::AgentLaunched, Some(slug), &format!("task agent launched; watch it: tmux attach -t {session}"))?;
+            events::append(
+                &self.home,
+                EventKind::AgentLaunched,
+                Some(slug),
+                &format!("task agent launched; watch it: tmux attach -t {session}"),
+            )?;
         }
         for (slug, r) in &report.agent_reports {
             events::append(&self.home, EventKind::AgentReport, Some(slug), &r.text)?;
@@ -405,13 +488,21 @@ impl<S: Sessions> Player<S> {
             next.insert(task.slug.clone(), (task.status, alive));
 
             // A task agent's liveness is tracked under its own key.
-            let finished = matches!(task.status, Status::Accepted | Status::Retired | Status::Explored);
+            let finished = matches!(
+                task.status,
+                Status::Accepted | Status::Retired | Status::Explored
+            );
             if let Some(agent) = &task.agent {
                 let key = state::agent_key(&task.slug);
                 let agent_was_alive = matches!(self.last.get(&key), Some((_, true)));
                 next.insert(key, (task.status, agent.alive));
                 if !self.first_run && agent_was_alive && !agent.alive && !finished {
-                    events::append(&self.home, EventKind::AgentDied, Some(&task.slug), &format!("task/{}'s task agent session died", task.slug))?;
+                    events::append(
+                        &self.home,
+                        EventKind::AgentDied,
+                        Some(&task.slug),
+                        &format!("task/{}'s task agent session died", task.slug),
+                    )?;
                 }
             }
 
@@ -427,9 +518,17 @@ impl<S: Sessions> Player<S> {
             }
 
             let session_just_died = matches!(prev, Some((_, true))) && !alive;
-            let still_in_flight = matches!(task.status, Status::Posted | Status::InProgress | Status::InRevision | Status::Contested);
+            let still_in_flight = matches!(
+                task.status,
+                Status::Posted | Status::InProgress | Status::InRevision | Status::Contested
+            );
             if session_just_died && still_in_flight {
-                events::append(&self.home, EventKind::SessionDied, Some(&task.slug), &format!("task/{}'s subagent session died", task.slug))?;
+                events::append(
+                    &self.home,
+                    EventKind::SessionDied,
+                    Some(&task.slug),
+                    &format!("task/{}'s worker session died", task.slug),
+                )?;
             }
         }
 
@@ -449,9 +548,19 @@ impl<S: Sessions> Player<S> {
     /// so a stale incoming ref never lingers and there is nothing else to
     /// clean up by hand here.
     fn fetch(&self) -> Result<(), String> {
-        let director = self.director.to_str().ok_or_else(|| format!("{} is not valid UTF-8", self.director.display()))?;
+        let director = self
+            .director
+            .to_str()
+            .ok_or_else(|| format!("{} is not valid UTF-8", self.director.display()))?;
         self.hub
-            .run(&["fetch", "--no-tags", "--prune", director, "+refs/heads/main:refs/incoming/director/main", "+refs/heads/task/*:refs/incoming/director/task/*"])
+            .run(&[
+                "fetch",
+                "--no-tags",
+                "--prune",
+                director,
+                "+refs/heads/main:refs/incoming/director/main",
+                "+refs/heads/task/*:refs/incoming/director/task/*",
+            ])
             .map(|_| ())
             .map_err(|e| format!("fetching director clone: {e}"))
     }
@@ -464,7 +573,10 @@ impl<S: Sessions> Player<S> {
             None => return Ok(()),
         };
         let hub_ref = "refs/heads/main";
-        let mut hub_tip = self.hub.rev_parse(hub_ref).ok_or_else(|| "hub has no main".to_string())?;
+        let mut hub_tip = self
+            .hub
+            .rev_parse(hub_ref)
+            .ok_or_else(|| "hub has no main".to_string())?;
 
         if self.hub.is_ancestor(&incoming, &hub_tip) {
             return Ok(()); // director is behind (or exactly caught up); nothing to do
@@ -472,21 +584,44 @@ impl<S: Sessions> Player<S> {
         if !self.hub.is_ancestor(&hub_tip, &incoming) {
             if !records::is_rejected(&self.hub, &incoming) {
                 let msg = "history: main diverged from hub; run `git reset --hard hub/main` and redo your commit".to_string();
-                let rec = records::record_rejection(&self.hub, "_main", &incoming, Reason::History, Actor::Director, &msg)?;
+                let rec = records::record_rejection(
+                    &self.hub,
+                    "_main",
+                    &incoming,
+                    Reason::History,
+                    Actor::Director,
+                    &msg,
+                )?;
                 report.rejected.push(rec);
             }
             return Ok(());
         }
 
-        let commits = self.hub.rev_list(&[&format!("{hub_tip}..{incoming}"), "--reverse"]);
+        let commits = self
+            .hub
+            .rev_list(&[&format!("{hub_tip}..{incoming}"), "--reverse"]);
         let mut rejected_ancestors: Vec<String> = Vec::new();
         for c in commits {
             if records::is_rejected(&self.hub, &c) {
                 continue;
             }
-            if self.hub.parents(&c).len() > 1 || rejected_ancestors.iter().any(|r| self.hub.is_ancestor(r, &c)) {
-                let msg = format!("history: {} is a merge commit; only the player creates merges", short(&c));
-                let rec = records::record_rejection(&self.hub, "_main", &c, Reason::History, Actor::Director, &msg)?;
+            if self.hub.parents(&c).len() > 1
+                || rejected_ancestors
+                    .iter()
+                    .any(|r| self.hub.is_ancestor(r, &c))
+            {
+                let msg = format!(
+                    "history: {} is a merge commit; only the player creates merges",
+                    short(&c)
+                );
+                let rec = records::record_rejection(
+                    &self.hub,
+                    "_main",
+                    &c,
+                    Reason::History,
+                    Actor::Director,
+                    &msg,
+                )?;
                 report.rejected.push(rec);
                 rejected_ancestors.push(c);
                 continue;
@@ -494,13 +629,24 @@ impl<S: Sessions> Player<S> {
 
             match self.validate_main_commit(&hub_tip, &c) {
                 Ok(()) => {
-                    self.hub.update_ref_cas(hub_ref, &c, &hub_tip).map_err(|e| e.to_string())?;
+                    self.hub
+                        .update_ref_cas(hub_ref, &c, &hub_tip)
+                        .map_err(|e| e.to_string())?;
                     records::record_import(&self.hub, &c, Actor::Director, Transition::Docs, None)?;
-                    report.imported.push((hub_ref.to_string(), c.clone(), Transition::Docs));
+                    report
+                        .imported
+                        .push((hub_ref.to_string(), c.clone(), Transition::Docs));
                     hub_tip = c;
                 }
                 Err((reason, msg)) => {
-                    let rec = records::record_rejection(&self.hub, "_main", &c, reason, Actor::Director, &msg)?;
+                    let rec = records::record_rejection(
+                        &self.hub,
+                        "_main",
+                        &c,
+                        reason,
+                        Actor::Director,
+                        &msg,
+                    )?;
                     report.rejected.push(rec);
                 }
             }
@@ -512,23 +658,45 @@ impl<S: Sessions> Player<S> {
     /// (it advances with every successfully-imported commit): docs_paths is
     /// read from it, per spec.
     fn validate_main_commit(&self, base: &str, candidate: &str) -> Result<(), (Reason, String)> {
-        let roadmap = self.roadmap_at(base).map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
+        let roadmap = self
+            .roadmap_at(base)
+            .map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
         for (_, path) in self.hub.diff_names(base, candidate) {
             if !path_allowed(&path, &roadmap.docs_paths) {
-                return Err((Reason::Ownership, format!("ownership: main commit touches {path:?}, which is neither roadmap.toml, prompts.kdl nor a docs_paths entry")));
+                return Err((
+                    Reason::Ownership,
+                    format!(
+                        "ownership: main commit touches {path:?}, which is neither roadmap.toml, prompts.kdl nor a docs_paths entry"
+                    ),
+                ));
             }
         }
         match self.hub.show_file(candidate, "roadmap.toml") {
             Some(text) => {
-                config::roadmap_config_from_str(&text).map_err(|e| (Reason::Ownership, format!("ownership: roadmap.toml: {e}")))?;
+                config::roadmap_config_from_str(&text)
+                    .map_err(|e| (Reason::Ownership, format!("ownership: roadmap.toml: {e}")))?;
             }
-            None => return Err((Reason::Ownership, "ownership: roadmap.toml missing".to_string())),
+            None => {
+                return Err((
+                    Reason::Ownership,
+                    "ownership: roadmap.toml missing".to_string(),
+                ));
+            }
         }
         match self.hub.show_file(candidate, prompts::FILE) {
             Some(text) => {
-                Prompts::parse(&text).map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
+                Prompts::parse(&text)
+                    .map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
             }
-            None => return Err((Reason::Ownership, format!("ownership: {} missing: it holds every prompt the player sends (spec §19)", prompts::FILE))),
+            None => {
+                return Err((
+                    Reason::Ownership,
+                    format!(
+                        "ownership: {} missing: it holds every prompt the player sends (spec §19)",
+                        prompts::FILE
+                    ),
+                ));
+            }
         }
         let suite = self.runner.run_suite(candidate);
         self.note_flakes("_main", candidate, &suite);
@@ -547,7 +715,11 @@ impl<S: Sessions> Player<S> {
             .into_iter()
             .filter_map(|(refname, sha)| {
                 let slug = refname.strip_prefix("refs/incoming/director/task/")?;
-                if slug.is_empty() { None } else { Some((slug.to_string(), sha)) }
+                if slug.is_empty() {
+                    None
+                } else {
+                    Some((slug.to_string(), sha))
+                }
             })
             .collect();
 
@@ -571,7 +743,10 @@ impl<S: Sessions> Player<S> {
     /// whose dependency truly doesn't exist (in this batch or the hub), or
     /// that's genuinely part of a cycle, is still rejected exactly as
     /// before by the real validator — just no longer position-dependent.
-    fn order_incoming_task_branches(&self, incoming: Vec<(String, String)>) -> Vec<(String, String)> {
+    fn order_incoming_task_branches(
+        &self,
+        incoming: Vec<(String, String)>,
+    ) -> Vec<(String, String)> {
         let slugs_in_batch: BTreeSet<String> = incoming.iter().map(|(s, _)| s.clone()).collect();
         let deps: BTreeMap<String, BTreeSet<String>> = incoming
             .iter()
@@ -581,7 +756,12 @@ impl<S: Sessions> Player<S> {
                     .hub
                     .show_file(sha, &path)
                     .and_then(|text| config::task_config_from_str(&text).ok())
-                    .map(|cfg| cfg.depends_on.into_iter().filter(|d| d != slug && slugs_in_batch.contains(d)).collect())
+                    .map(|cfg| {
+                        cfg.depends_on
+                            .into_iter()
+                            .filter(|d| d != slug && slugs_in_batch.contains(d))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 (slug.clone(), within_batch)
             })
@@ -591,7 +771,10 @@ impl<S: Sessions> Player<S> {
         let mut remaining = incoming;
         while !remaining.is_empty() {
             let placed: BTreeSet<&str> = ordered.iter().map(|(s, _)| s.as_str()).collect();
-            let ready = remaining.iter().position(|(slug, _)| deps.get(slug.as_str()).is_none_or(|d| d.iter().all(|dep| placed.contains(dep.as_str()))));
+            let ready = remaining.iter().position(|(slug, _)| {
+                deps.get(slug.as_str())
+                    .is_none_or(|d| d.iter().all(|dep| placed.contains(dep.as_str())))
+            });
             match ready {
                 Some(i) => ordered.push(remaining.remove(i)),
                 // A dependency cycle within the batch (or an unreadable
@@ -607,7 +790,12 @@ impl<S: Sessions> Player<S> {
         ordered
     }
 
-    fn import_task_branch(&mut self, slug: &str, incoming: &str, report: &mut TickReport) -> Result<(), String> {
+    fn import_task_branch(
+        &mut self,
+        slug: &str,
+        incoming: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         // A retired slug: the director's local branch is stale (they haven't
         // deleted it in their own clone yet). Ignore it entirely — not even
         // a rejection, since there's nothing to say.
@@ -623,15 +811,29 @@ impl<S: Sessions> Player<S> {
                 }
                 if !self.hub.is_ancestor(&hub_tip, incoming) {
                     if !records::is_rejected(&self.hub, incoming) {
-                        let msg = format!("history: task/{slug} diverged from hub; run `git reset --hard hub/task/{slug}` and redo your commit");
-                        let rec = records::record_rejection(&self.hub, slug, incoming, Reason::History, Actor::Director, &msg)?;
+                        let msg = format!(
+                            "history: task/{slug} diverged from hub; run `git reset --hard hub/task/{slug}` and redo your commit"
+                        );
+                        let rec = records::record_rejection(
+                            &self.hub,
+                            slug,
+                            incoming,
+                            Reason::History,
+                            Actor::Director,
+                            &msg,
+                        )?;
                         report.rejected.push(rec);
                     }
                     return Ok(());
                 }
                 // `--not main`: a conflict resolution brings in `main`'s own commits,
                 // which were validated when they landed there.
-                self.hub.rev_list(&[&format!("{hub_tip}..{incoming}"), "--reverse", "--not", "refs/heads/main"])
+                self.hub.rev_list(&[
+                    &format!("{hub_tip}..{incoming}"),
+                    "--reverse",
+                    "--not",
+                    "refs/heads/main",
+                ])
             }
             None => {
                 // Not planned yet: the range is main..incoming, and the
@@ -639,19 +841,36 @@ impl<S: Sessions> Player<S> {
                 // in the hub, else the director built it on some history the
                 // hub never had (spec §5's fast-forward rule, applied at
                 // creation time).
-                let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
+                let main_tip = self
+                    .hub
+                    .rev_parse("refs/heads/main")
+                    .ok_or_else(|| "hub has no main".to_string())?;
                 if self.hub.is_ancestor(incoming, &main_tip) {
                     return Ok(()); // nothing new relative to main
                 }
-                let commits = self.hub.rev_list(&[&format!("{main_tip}..{incoming}"), "--reverse"]);
-                let base_ok = match commits.first().and_then(|oldest| self.hub.parents(oldest).into_iter().next()) {
+                let commits = self
+                    .hub
+                    .rev_list(&[&format!("{main_tip}..{incoming}"), "--reverse"]);
+                let base_ok = match commits
+                    .first()
+                    .and_then(|oldest| self.hub.parents(oldest).into_iter().next())
+                {
                     Some(parent) => parent == main_tip || self.hub.is_ancestor(&parent, &main_tip),
                     None => false,
                 };
                 if !base_ok {
                     if !records::is_rejected(&self.hub, incoming) {
-                        let msg = format!("history: task/{slug} diverged from hub; run `git reset --hard hub/main` and redo your commit");
-                        let rec = records::record_rejection(&self.hub, slug, incoming, Reason::History, Actor::Director, &msg)?;
+                        let msg = format!(
+                            "history: task/{slug} diverged from hub; run `git reset --hard hub/main` and redo your commit"
+                        );
+                        let rec = records::record_rejection(
+                            &self.hub,
+                            slug,
+                            incoming,
+                            Reason::History,
+                            Actor::Director,
+                            &msg,
+                        )?;
                         report.rejected.push(rec);
                     }
                     return Ok(());
@@ -669,7 +888,12 @@ impl<S: Sessions> Player<S> {
     /// earlier in this same walk flip the mode for the commits after it,
     /// matching spec's "the remaining commits in the range are then
     /// processed as for an existing branch."
-    fn process_task_commits(&mut self, slug: &str, commits: Vec<String>, report: &mut TickReport) -> Result<(), String> {
+    fn process_task_commits(
+        &mut self,
+        slug: &str,
+        commits: Vec<String>,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let hub_ref = format!("refs/heads/task/{slug}");
         let mut rejected_ancestors: Vec<String> = Vec::new();
 
@@ -682,17 +906,36 @@ impl<S: Sessions> Player<S> {
             // A merge whose first parent is the hub tip may be a conflict
             // resolution (spec §11): validated as one rather than refused
             // outright.
-            if parents.len() == 2 && tip.as_deref() == Some(parents[0].as_str()) && !rejected_ancestors.iter().any(|r| self.hub.is_ancestor(r, &c)) {
+            if parents.len() == 2
+                && tip.as_deref() == Some(parents[0].as_str())
+                && !rejected_ancestors
+                    .iter()
+                    .any(|r| self.hub.is_ancestor(r, &c))
+            {
                 self.try_resolve(slug, &parents[0], &parents[1], &c, report)?;
                 continue;
             }
-            if parents.len() > 1 || rejected_ancestors.iter().any(|r| self.hub.is_ancestor(r, &c)) {
+            if parents.len() > 1
+                || rejected_ancestors
+                    .iter()
+                    .any(|r| self.hub.is_ancestor(r, &c))
+            {
                 // Rejection scope is the slug even before the branch exists
                 // (a plan attempt that used a merge commit): these are
                 // strikes on the slug the moment it's later planned, since
                 // strikes are just rejection records keyed by scope string.
-                let msg = format!("history: task/{slug} commit {} is a merge commit; the only director merge is a conflict resolution, on the hub's task tip", short(&c));
-                let rec = records::record_rejection(&self.hub, slug, &c, Reason::History, Actor::Director, &msg)?;
+                let msg = format!(
+                    "history: task/{slug} commit {} is a merge commit; the only director merge is a conflict resolution, on the hub's task tip",
+                    short(&c)
+                );
+                let rec = records::record_rejection(
+                    &self.hub,
+                    slug,
+                    &c,
+                    Reason::History,
+                    Actor::Director,
+                    &msg,
+                )?;
                 report.rejected.push(rec);
                 rejected_ancestors.push(c);
                 continue;
@@ -706,17 +949,42 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
-    fn try_plan(&mut self, slug: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
-        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
+    fn try_plan(
+        &mut self,
+        slug: &str,
+        candidate: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
+        let main_tip = self
+            .hub
+            .rev_parse("refs/heads/main")
+            .ok_or_else(|| "hub has no main".to_string())?;
         match self.validate_plan(slug, &main_tip, candidate) {
             Ok(()) => {
                 let hub_ref = format!("refs/heads/task/{slug}");
-                self.hub.update_ref_cas(&hub_ref, candidate, "").map_err(|e| e.to_string())?;
-                records::record_import(&self.hub, candidate, Actor::Director, Transition::Plan, Some(slug))?;
-                report.imported.push((hub_ref, candidate.to_string(), Transition::Plan));
+                self.hub
+                    .update_ref_cas(&hub_ref, candidate, "")
+                    .map_err(|e| e.to_string())?;
+                records::record_import(
+                    &self.hub,
+                    candidate,
+                    Actor::Director,
+                    Transition::Plan,
+                    Some(slug),
+                )?;
+                report
+                    .imported
+                    .push((hub_ref, candidate.to_string(), Transition::Plan));
             }
             Err(msg) => {
-                let rec = records::record_rejection(&self.hub, slug, candidate, Reason::Plan, Actor::Director, &msg)?;
+                let rec = records::record_rejection(
+                    &self.hub,
+                    slug,
+                    candidate,
+                    Reason::Plan,
+                    Actor::Director,
+                    &msg,
+                )?;
                 report.rejected.push(rec);
             }
         }
@@ -727,27 +995,41 @@ impl<S: Sessions> Player<S> {
     /// only `tasks/<slug>/task.toml`; then the shared task.toml validation.
     fn validate_plan(&self, slug: &str, main_tip: &str, candidate: &str) -> Result<(), String> {
         if !valid_slug(slug) {
-            return Err(format!("plan: {slug:?} is not a valid slug (must match [a-z0-9][a-z0-9-]*)"));
+            return Err(format!(
+                "plan: {slug:?} is not a valid slug (must match [a-z0-9][a-z0-9-]*)"
+            ));
         }
         if self.hub.ref_exists(&format!("refs/retired/{slug}")) {
-            return Err(format!("plan: task/{slug} is retired; slugs are never reused"));
+            return Err(format!(
+                "plan: task/{slug} is retired; slugs are never reused"
+            ));
         }
         let accepted = records::accepted_tasks(&self.hub, main_tip);
         if accepted.contains_key(slug) {
-            return Err(format!("plan: task/{slug} is already accepted; slugs are never reused"));
+            return Err(format!(
+                "plan: task/{slug} is already accepted; slugs are never reused"
+            ));
         }
         if records::is_explored(&self.hub, slug) {
-            return Err(format!("plan: task/{slug} is an explored spike; slugs are never reused"));
+            return Err(format!(
+                "plan: task/{slug} is an explored spike; slugs are never reused"
+            ));
         }
 
         let expected_path = format!("tasks/{slug}/task.toml");
         let diffs = self.hub.diff_names(main_tip, candidate);
         if diffs.len() != 1 || diffs[0].0 != 'A' || diffs[0].1 != expected_path {
-            return Err(format!("plan: task/{slug}'s commits may only add {expected_path}"));
+            return Err(format!(
+                "plan: task/{slug}'s commits may only add {expected_path}"
+            ));
         }
 
-        let text = self.hub.show_file(candidate, &expected_path).ok_or_else(|| format!("plan: {expected_path} missing at {candidate}"))?;
-        let cfg = config::task_config_from_str(&text).map_err(|e| format!("plan: {expected_path}: {e}"))?;
+        let text = self
+            .hub
+            .show_file(candidate, &expected_path)
+            .ok_or_else(|| format!("plan: {expected_path} missing at {candidate}"))?;
+        let cfg = config::task_config_from_str(&text)
+            .map_err(|e| format!("plan: {expected_path}: {e}"))?;
         self.validate_task_config(slug, main_tip, &cfg)
     }
 
@@ -760,9 +1042,19 @@ impl<S: Sessions> Player<S> {
     /// posted branch), a `send-back` (the task is `tested`), or `ownership`
     /// (anything else, including any commit while the task is in a status
     /// the director may not touch).
-    fn try_existing(&mut self, slug: &str, tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+    fn try_existing(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        let status = hub_state.tasks.iter().find(|t| t.slug == slug).map(|t| t.status);
+        let status = hub_state
+            .tasks
+            .iter()
+            .find(|t| t.slug == slug)
+            .map(|t| t.status);
 
         let diffs = self.hub.diff_names(tip, candidate);
         let cumulative_empty = diffs.is_empty();
@@ -771,17 +1063,31 @@ impl<S: Sessions> Player<S> {
             return self.try_marker(slug, tip, candidate, cumulative_empty, status, report);
         }
 
-        let managed = hub_state.tasks.iter().find(|t| t.slug == slug).is_some_and(|t| state::task_agent_managed(&hub_state.roadmap, &t.config));
+        let managed = hub_state
+            .tasks
+            .iter()
+            .find(|t| t.slug == slug)
+            .is_some_and(|t| state::task_agent_managed(&hub_state.roadmap, &t.config));
         match status {
             Some(Status::Pending | Status::Ready | Status::Orphaned) => {
                 let prompt_path = format!("tasks/{slug}/prompt.md");
                 let has_prompt = self.hub.blob_hash(candidate, &prompt_path).is_some();
                 if has_prompt && managed {
-                    let msg = format!("task/{slug}'s post is its task agent's (spec §17), not the director's; with `[player] task_agent_cmd = \"\"` the director posts itself");
+                    let msg = format!(
+                        "task/{slug}'s post is its task agent's (spec §17), not the director's; with `[player] task_agent_cmd = \"\"` the director posts itself"
+                    );
                     return self.reject(slug, candidate, Reason::Ownership, msg, report);
                 }
                 if has_prompt {
-                    return self.try_post(slug, tip, candidate, status.unwrap(), &hub_state, Actor::Director, report);
+                    return self.try_post(
+                        slug,
+                        tip,
+                        candidate,
+                        status.unwrap(),
+                        &hub_state,
+                        Actor::Director,
+                        report,
+                    );
                 }
                 let task_toml_path = format!("tasks/{slug}/task.toml");
                 if diffs.len() == 1 && diffs[0].1 == task_toml_path {
@@ -793,28 +1099,62 @@ impl<S: Sessions> Player<S> {
                 );
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
-            Some(Status::Tested) if records::is_spike_at(&self.hub, tip, slug) => self.try_spike_send_back(slug, tip, candidate, &diffs, &hub_state, report),
+            Some(Status::Tested) if records::is_spike_at(&self.hub, tip, slug) => {
+                self.try_spike_send_back(slug, tip, candidate, &diffs, &hub_state, report)
+            }
             Some(Status::Tested) if managed => {
-                let msg = format!("task/{slug}'s send-backs are its task agent's (spec §17), not the director's: accept, or ask it (`dashboard ask {slug}`)");
+                let msg = format!(
+                    "task/{slug}'s send-backs are its task agent's (spec §17), not the director's: accept, or ask it (`dashboard ask {slug}`)"
+                );
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
-            Some(Status::Tested) => self.try_send_back(slug, tip, candidate, &diffs, &hub_state, Actor::Director, report),
+            Some(Status::Tested) => self.try_send_back(
+                slug,
+                tip,
+                candidate,
+                &diffs,
+                &hub_state,
+                Actor::Director,
+                report,
+            ),
             Some(Status::Contested) if managed => {
-                let msg = format!("task/{slug}'s contest is its task agent's to answer (spec §18), not the director's: ask it (`dashboard ask {slug}`)");
+                let msg = format!(
+                    "task/{slug}'s contest is its task agent's to answer (spec §18), not the director's: ask it (`dashboard ask {slug}`)"
+                );
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
-            Some(Status::Contested) => self.try_contest_reply(slug, tip, candidate, &diffs, &hub_state, Actor::Director, report),
+            Some(Status::Contested) => self.try_contest_reply(
+                slug,
+                tip,
+                candidate,
+                &diffs,
+                &hub_state,
+                Actor::Director,
+                report,
+            ),
             Some(Status::Conflicted) => {
-                let main = hub_state.tasks.iter().find(|t| t.slug == slug).and_then(|t| t.conflict.as_ref()).map(|c| c.main.clone()).unwrap_or_default();
-                let msg = format!("task/{slug} is conflicted: resolve it with a merge of main {main} on the hub's task tip (or retire it)");
+                let main = hub_state
+                    .tasks
+                    .iter()
+                    .find(|t| t.slug == slug)
+                    .and_then(|t| t.conflict.as_ref())
+                    .map(|c| c.main.clone())
+                    .unwrap_or_default();
+                let msg = format!(
+                    "task/{slug} is conflicted: resolve it with a merge of main {main} on the hub's task tip (or retire it)"
+                );
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
             Some(other) => {
-                let msg = format!("task/{slug} is {} — the director may not commit until the subagent finishes", other.as_str());
+                let msg = format!(
+                    "task/{slug} is {} — the director may not commit until the worker finishes",
+                    other.as_str()
+                );
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
             None => {
-                let msg = format!("task/{slug} has no derivable status; refusing to guess a transition");
+                let msg =
+                    format!("task/{slug} has no derivable status; refusing to guess a transition");
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
         }
@@ -822,14 +1162,29 @@ impl<S: Sessions> Player<S> {
 
     /// Records a rejection under `reason` for `candidate` and pushes it onto
     /// the report. Shared by every `try_existing` sub-handler's error path.
-    fn reject(&mut self, slug: &str, candidate: &str, reason: Reason, msg: String, report: &mut TickReport) -> Result<(), String> {
+    fn reject(
+        &mut self,
+        slug: &str,
+        candidate: &str,
+        reason: Reason,
+        msg: String,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         self.reject_by(Actor::Director, slug, candidate, reason, msg, report)
     }
 
     /// `reject` for a commit by `actor`: a task agent's rejection is also
-    /// relayed to its session (spec §17), like a subagent's; a director's
+    /// relayed to its session (spec §17), like a worker's; a director's
     /// never is.
-    fn reject_by(&mut self, actor: Actor, slug: &str, candidate: &str, reason: Reason, msg: String, report: &mut TickReport) -> Result<(), String> {
+    fn reject_by(
+        &mut self,
+        actor: Actor,
+        slug: &str,
+        candidate: &str,
+        reason: Reason,
+        msg: String,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let rec = records::record_rejection(&self.hub, slug, candidate, reason, actor, &msg)?;
         report.rejected.push(rec);
         if actor == Actor::TaskAgent {
@@ -839,7 +1194,13 @@ impl<S: Sessions> Player<S> {
                 _ => "task-agent.recovery-other",
             };
             let recovery = prompts.render(recovery, &[("slug", slug)]);
-            self.sessions.send(&state::agent_key(slug), &prompts.render("task-agent.rejected", &[("message", &msg), ("recovery", &recovery)]));
+            self.sessions.send(
+                &state::agent_key(slug),
+                &prompts.render(
+                    "task-agent.rejected",
+                    &[("message", &msg), ("recovery", &recovery)],
+                ),
+            );
         }
         Ok(())
     }
@@ -850,7 +1211,15 @@ impl<S: Sessions> Player<S> {
     /// `candidate` (this empty commit is just the tip of that same broken
     /// stack), so it's rejected as `ownership` rather than silently treated
     /// as a marker on old, already-rejected content.
-    fn try_marker(&mut self, slug: &str, tip: &str, candidate: &str, cumulative_empty: bool, status: Option<Status>, report: &mut TickReport) -> Result<(), String> {
+    fn try_marker(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        cumulative_empty: bool,
+        status: Option<Status>,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         if !cumulative_empty {
             let msg = format!(
                 "task/{slug} commit {} is an empty marker, but its content since {} isn't (a rejected non-empty commit sits between): fix that commit instead",
@@ -870,13 +1239,25 @@ impl<S: Sessions> Player<S> {
         if subject.starts_with("conclude:") {
             return self.try_conclude(slug, tip, candidate, status, report);
         }
-        let msg = format!("task/{slug} commit {} is an empty marker with subject {subject:?} — only `accept:`/`retire:`/`conclude:` are the director's to make here", short(candidate));
+        let msg = format!(
+            "task/{slug} commit {} is an empty marker with subject {subject:?} — only `accept:`/`retire:`/`conclude:` are the director's to make here",
+            short(candidate)
+        );
         self.reject(slug, candidate, Reason::Ownership, msg, report)
     }
 
     // ---- post (spec §9, §6.3) ----
 
-    fn try_post(&mut self, slug: &str, tip: &str, candidate: &str, status: Status, hub_state: &state::HubState, actor: Actor, report: &mut TickReport) -> Result<(), String> {
+    fn try_post(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        status: Status,
+        hub_state: &state::HubState,
+        actor: Actor,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         // A flake that doesn't reproduce is `evidence`, not `post`: the
         // director made no structural mistake (it has its own strike limit,
         // 1 by default, and the player retires the task itself).
@@ -884,21 +1265,26 @@ impl<S: Sessions> Player<S> {
         let validated = if records::is_spike_at(&self.hub, candidate, slug) {
             self.validate_spike_post(slug, tip, candidate, status)
         } else {
-            self.validate_post(slug, candidate, status, hub_state).and_then(|()| {
-                self.evidence_miss(slug, candidate).map_or(Ok(()), |miss| {
-                    reason = Reason::Evidence;
-                    Err(miss)
+            self.validate_post(slug, candidate, status, hub_state)
+                .and_then(|()| {
+                    self.evidence_miss(slug, candidate).map_or(Ok(()), |miss| {
+                        reason = Reason::Evidence;
+                        Err(miss)
+                    })
                 })
-            })
         };
         match validated {
             Ok(()) => {
                 let hub_ref = format!("refs/heads/task/{slug}");
-                self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
+                self.hub
+                    .update_ref_cas(&hub_ref, candidate, tip)
+                    .map_err(|e| e.to_string())?;
                 records::record_import(&self.hub, candidate, actor, Transition::Post, Some(slug))?;
-                report.imported.push((hub_ref, candidate.to_string(), Transition::Post));
-                // Launching the subagent clone + tmux session happens in
-                // `launch_subagents`, later in the same tick (spec §8.3): it
+                report
+                    .imported
+                    .push((hub_ref, candidate.to_string(), Transition::Post));
+                // Launching the worker clone + tmux session happens in
+                // `launch_workers`, later in the same tick (spec §8.3): it
                 // scans every `Posted` task without pins yet, which this one
                 // now is.
             }
@@ -906,7 +1292,12 @@ impl<S: Sessions> Player<S> {
                 self.reject_by(actor, slug, candidate, reason, msg.clone(), report)?;
                 if reason == Reason::Evidence {
                     let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-                    let strikes = hub_state.tasks.iter().find(|t| t.slug == slug).and_then(|t| t.strikes.get(&Reason::Evidence).copied()).unwrap_or(0);
+                    let strikes = hub_state
+                        .tasks
+                        .iter()
+                        .find(|t| t.slug == slug)
+                        .and_then(|t| t.strikes.get(&Reason::Evidence).copied())
+                        .unwrap_or(0);
                     if strikes >= hub_state.roadmap.limits.strikes.limit(Reason::Evidence) {
                         self.auto_retire(slug, tip, &msg, report)?;
                     }
@@ -921,24 +1312,55 @@ impl<S: Sessions> Player<S> {
     /// task's own files, cached by commit). `None` for any other task or
     /// when every evidence reproduces.
     fn evidence_miss(&self, slug: &str, commit: &str) -> Option<String> {
-        let cfg = records::task_config_at(&self.hub, commit, slug).filter(|c| c.kind == TaskKind::FlakyTestFix)?;
-        cfg.evidence.iter().find_map(|e| flaky::miss(e, &self.runner.run_evidence(commit, e)))
+        let cfg = records::task_config_at(&self.hub, commit, slug)
+            .filter(|c| c.kind == TaskKind::FlakyTestFix)?;
+        cfg.evidence
+            .iter()
+            .find_map(|e| flaky::miss(e, &self.runner.run_evidence(commit, e)))
     }
 
     /// The player's own retire, for a dead end that needs no director
     /// judgement (a flake that doesn't reproduce): the branch moves to
     /// `refs/retired/<slug>` under a player-made marker commit on top of
-    /// `tip` whose body is the post-mortem. There is no subagent work to
+    /// `tip` whose body is the post-mortem. There is no worker work to
     /// review, so no `retire:` commit is needed.
-    fn auto_retire(&mut self, slug: &str, tip: &str, post_mortem: &str, report: &mut TickReport) -> Result<(), String> {
-        let tree = self.hub.rev_parse(&format!("{tip}^{{tree}}")).ok_or_else(|| format!("no tree at {tip}"))?;
+    fn auto_retire(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        post_mortem: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
+        let tree = self
+            .hub
+            .rev_parse(&format!("{tip}^{{tree}}"))
+            .ok_or_else(|| format!("no tree at {tip}"))?;
         let subject = post_mortem.split(" (").next().unwrap_or(post_mortem);
-        let marker = self.hub.commit_tree(&tree, &[tip], &format!("retire: {subject}\n\n{post_mortem}")).map_err(|e| e.to_string())?;
+        let marker = self
+            .hub
+            .commit_tree(
+                &tree,
+                &[tip],
+                &format!("retire: {subject}\n\n{post_mortem}"),
+            )
+            .map_err(|e| e.to_string())?;
 
-        self.hub.update_ref(&format!("refs/retired/{slug}"), &marker).map_err(|e| e.to_string())?;
-        self.hub.delete_ref_cas(&format!("refs/heads/task/{slug}"), tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, &marker, Actor::Player, Transition::Retire, Some(slug))?;
-        report.imported.push((format!("refs/retired/{slug}"), marker, Transition::Retire));
+        self.hub
+            .update_ref(&format!("refs/retired/{slug}"), &marker)
+            .map_err(|e| e.to_string())?;
+        self.hub
+            .delete_ref_cas(&format!("refs/heads/task/{slug}"), tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(
+            &self.hub,
+            &marker,
+            Actor::Player,
+            Transition::Retire,
+            Some(slug),
+        )?;
+        report
+            .imported
+            .push((format!("refs/retired/{slug}"), marker, Transition::Retire));
 
         self.end_task_sessions(slug);
         Ok(())
@@ -951,58 +1373,118 @@ impl<S: Sessions> Player<S> {
     /// `tests.d/<slug>.toml` must carry a matching entry and the whole suite
     /// must load (spec §6.3); and that check must currently
     /// *fail* (spec §3.1's evidence requirement).
-    fn validate_post(&self, slug: &str, candidate: &str, status: Status, hub_state: &state::HubState) -> Result<(), String> {
-        let task = hub_state.tasks.iter().find(|t| t.slug == slug).ok_or_else(|| format!("post: task/{slug}: no task state"))?;
+    fn validate_post(
+        &self,
+        slug: &str,
+        candidate: &str,
+        status: Status,
+        hub_state: &state::HubState,
+    ) -> Result<(), String> {
+        let task = hub_state
+            .tasks
+            .iter()
+            .find(|t| t.slug == slug)
+            .ok_or_else(|| format!("post: task/{slug}: no task state"))?;
 
         if status != Status::Ready {
             if status == Status::Orphaned {
                 let retired = records::retired_slugs(&self.hub);
-                let retired_deps: Vec<&str> = task.config.depends_on.iter().filter(|d| retired.iter().any(|r| r == *d)).map(|s| s.as_str()).collect();
-                return Err(format!("post: task/{slug} is orphaned: depends on retired {}", retired_deps.join(", ")));
+                let retired_deps: Vec<&str> = task
+                    .config
+                    .depends_on
+                    .iter()
+                    .filter(|d| retired.iter().any(|r| r == *d))
+                    .map(|s| s.as_str())
+                    .collect();
+                return Err(format!(
+                    "post: task/{slug} is orphaned: depends on retired {}",
+                    retired_deps.join(", ")
+                ));
             }
             let accepted = records::accepted_tasks(&self.hub, &hub_state.main_tip);
-            let unmet: Vec<&str> = task.config.depends_on.iter().filter(|d| !accepted.contains_key(*d)).map(|s| s.as_str()).collect();
-            return Err(format!("post: task/{slug}: dependencies not accepted: {}", unmet.join(", ")));
+            let unmet: Vec<&str> = task
+                .config
+                .depends_on
+                .iter()
+                .filter(|d| !accepted.contains_key(*d))
+                .map(|s| s.as_str())
+                .collect();
+            return Err(format!(
+                "post: task/{slug}: dependencies not accepted: {}",
+                unmet.join(", ")
+            ));
         }
 
         let accepted = records::accepted_tasks(&self.hub, &hub_state.main_tip);
         for dep in &task.config.depends_on {
             if let Some(merge_sha) = accepted.get(dep) {
                 if !self.hub.is_ancestor(merge_sha, candidate) {
-                    return Err(format!("post: task/{slug}: wait for the player to merge main into the branch, then fetch (missing {dep}'s acceptance merge)"));
+                    return Err(format!(
+                        "post: task/{slug}: wait for the player to merge main into the branch, then fetch (missing {dep}'s acceptance merge)"
+                    ));
                 }
             }
         }
 
         let task_toml_path = format!("tasks/{slug}/task.toml");
-        let text = self.hub.show_file(candidate, &task_toml_path).ok_or_else(|| format!("post: task/{slug}: {task_toml_path} missing"))?;
-        let cfg = config::task_config_from_str(&text).map_err(|e| format!("post: task/{slug}: {task_toml_path}: {e}"))?;
-        let check = cfg.check.ok_or_else(|| format!("post: task/{slug}: {task_toml_path} has no [check] section"))?;
+        let text = self
+            .hub
+            .show_file(candidate, &task_toml_path)
+            .ok_or_else(|| format!("post: task/{slug}: {task_toml_path} missing"))?;
+        let cfg = config::task_config_from_str(&text)
+            .map_err(|e| format!("post: task/{slug}: {task_toml_path}: {e}"))?;
+        let check = cfg
+            .check
+            .ok_or_else(|| format!("post: task/{slug}: {task_toml_path} has no [check] section"))?;
 
-        let suite = config::suite_at(&self.hub, candidate).map_err(|e| format!("post: task/{slug}: {e}"))?;
+        let suite = config::suite_at(&self.hub, candidate)
+            .map_err(|e| format!("post: task/{slug}: {e}"))?;
         let fragment_path = config::suite_fragment_path(slug);
         let fragment = self.hub.blob_hash(candidate, &fragment_path).is_some();
         if cfg.kind == TaskKind::FlakyTestFix {
             // The stress check is a one-off proof for this task, an exception
             // to spec §6.3: it must not slow every future suite.
             if fragment || suite.check.iter().any(|c| c.name == check.name) {
-                return Err(format!("post: task/{slug}: a flaky-test-fix's check {:?} must not be added to the suite (tests.toml or {fragment_path})", check.name));
+                return Err(format!(
+                    "post: task/{slug}: a flaky-test-fix's check {:?} must not be added to the suite (tests.toml or {fragment_path})",
+                    check.name
+                ));
             }
             if suite.list_cmd.is_none() {
-                return Err(format!("post: task/{slug}: a flaky-test-fix needs `list_cmd` in tests.toml (the player compares test inventories with it)"));
+                return Err(format!(
+                    "post: task/{slug}: a flaky-test-fix needs `list_cmd` in tests.toml (the player compares test inventories with it)"
+                ));
             }
         } else {
             // Read the fragment on its own: the check must live there, not in
             // tests.toml, so parallel posts never edit the same file.
-            let own = self.hub.show_file(candidate, &fragment_path).and_then(|t| config::suite_from_parts("", &[(fragment_path.clone(), t)]).ok()).map(|c| c.check).unwrap_or_default();
-            if !own.iter().any(|c| c.name == check.name && c.cmd == check.cmd && c.runs == check.runs && c.min_pass == check.min_pass) {
-                return Err(format!("post: task/{slug}: {fragment_path} has no [[check]] entry matching the task check {:?} (same name, cmd, runs, min_pass)", check.name));
+            let own = self
+                .hub
+                .show_file(candidate, &fragment_path)
+                .and_then(|t| config::suite_from_parts("", &[(fragment_path.clone(), t)]).ok())
+                .map(|c| c.check)
+                .unwrap_or_default();
+            if !own.iter().any(|c| {
+                c.name == check.name
+                    && c.cmd == check.cmd
+                    && c.runs == check.runs
+                    && c.min_pass == check.min_pass
+            }) {
+                return Err(format!(
+                    "post: task/{slug}: {fragment_path} has no [[check]] entry matching the task check {:?} (same name, cmd, runs, min_pass)",
+                    check.name
+                ));
             }
         }
 
-        let result = self.runner.run_task_check(candidate, slug).map_err(|e| format!("post: task/{slug}: {e}"))?;
+        let result = self
+            .runner
+            .run_task_check(candidate, slug)
+            .map_err(|e| format!("post: task/{slug}: {e}"))?;
         if result.pass {
-            return Err(format!("post: task/{slug}: task check already passes — it must fail at post"));
+            return Err(format!(
+                "post: task/{slug}: task check already passes — it must fail at post"
+            ));
         }
 
         Ok(())
@@ -1016,38 +1498,74 @@ impl<S: Sessions> Player<S> {
     /// `tests.toml` itself, or a suite fragment under `tests.d/`; a round beyond `max_review_rounds` escalates
     /// instead of importing; and the project suite must now *fail* (spec
     /// §3.1's evidence requirement for a send-back). On success, re-pins and
-    /// relays the review note to the subagent's session (spec §8.3).
-    fn try_send_back(&mut self, slug: &str, tip: &str, candidate: &str, diffs: &[(char, String)], hub_state: &state::HubState, actor: Actor, report: &mut TickReport) -> Result<(), String> {
-        let task = hub_state.tasks.iter().find(|t| t.slug == slug).ok_or_else(|| format!("send-back: task/{slug}: no task state"))?;
+    /// relays the review note to the worker's session (spec §8.3).
+    fn try_send_back(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        diffs: &[(char, String)],
+        hub_state: &state::HubState,
+        actor: Actor,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
+        let task = hub_state
+            .tasks
+            .iter()
+            .find(|t| t.slug == slug)
+            .ok_or_else(|| format!("send-back: task/{slug}: no task state"))?;
         let n = task.review_round;
         let expected_path = format!("tasks/{slug}/reviews/r{}.md", n + 1);
         let review_prefix = format!("tasks/{slug}/reviews/");
 
-        let added_a_review_file = diffs.iter().any(|(status, path)| *status == 'A' && path.starts_with(&review_prefix) && is_review_filename(path));
-        let added_expected_file = diffs.iter().any(|(status, path)| *status == 'A' && *path == expected_path);
+        let added_a_review_file = diffs.iter().any(|(status, path)| {
+            *status == 'A' && path.starts_with(&review_prefix) && is_review_filename(path)
+        });
+        let added_expected_file = diffs
+            .iter()
+            .any(|(status, path)| *status == 'A' && *path == expected_path);
 
         if !added_expected_file {
             if !added_a_review_file {
-                let msg = format!("task/{slug}'s commit doesn't add a review file (expected {expected_path})");
+                let msg = format!(
+                    "task/{slug}'s commit doesn't add a review file (expected {expected_path})"
+                );
                 return self.reject_by(actor, slug, candidate, Reason::Ownership, msg, report);
             }
-            let msg = format!("send-back: task/{slug}: expected review round {} to add {expected_path}", n + 1);
+            let msg = format!(
+                "send-back: task/{slug}: expected review round {} to add {expected_path}",
+                n + 1
+            );
             return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
 
-        let test_paths = self.hub.show_file(candidate, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).map(|c| c.test_paths).unwrap_or_default();
+        let test_paths = self
+            .hub
+            .show_file(candidate, "tests.toml")
+            .and_then(|t| config::tests_config_from_str(&t).ok())
+            .map(|c| c.test_paths)
+            .unwrap_or_default();
         let task_prefix = format!("tasks/{slug}/");
         for (_, path) in diffs {
-            if path == "tests.toml" || config::is_suite_fragment(path) || path.starts_with(&task_prefix) || path_under_test_paths(path, &test_paths) {
+            if path == "tests.toml"
+                || config::is_suite_fragment(path)
+                || path.starts_with(&task_prefix)
+                || path_under_test_paths(path, &test_paths)
+            {
                 continue;
             }
-            let msg = format!("send-back: task/{slug}: a send-back may only add the review note and tests, not {path:?}");
+            let msg = format!(
+                "send-back: task/{slug}: a send-back may only add the review note and tests, not {path:?}"
+            );
             return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
 
         let round = n + 1;
         if round > hub_state.roadmap.limits.max_review_rounds {
-            let cause = format!("review rounds exceeded: {round} > {}", hub_state.roadmap.limits.max_review_rounds);
+            let cause = format!(
+                "review rounds exceeded: {round} > {}",
+                hub_state.roadmap.limits.max_review_rounds
+            );
             records::record_escalation(&self.hub, slug, candidate, &cause)?;
             report.escalated.push((slug.to_string(), cause));
             return Ok(());
@@ -1056,40 +1574,78 @@ impl<S: Sessions> Player<S> {
         let suite = self.runner.run_suite(candidate);
         self.note_flakes(slug, candidate, &suite);
         if suite.pass {
-            let msg = format!("send-back: task/{slug}: send-back without evidence: the project suite still passes");
+            let msg = format!(
+                "send-back: task/{slug}: send-back without evidence: the project suite still passes"
+            );
             return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
 
         let hub_ref = format!("refs/heads/task/{slug}");
-        self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, actor, Transition::SendBack, Some(slug))?;
-        report.imported.push((hub_ref, candidate.to_string(), Transition::SendBack));
+        self.hub
+            .update_ref_cas(&hub_ref, candidate, tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(
+            &self.hub,
+            candidate,
+            actor,
+            Transition::SendBack,
+            Some(slug),
+        )?;
+        report
+            .imported
+            .push((hub_ref, candidate.to_string(), Transition::SendBack));
 
         records::set_pins(&self.hub, slug, candidate)?;
-        let review_body = self.hub.show_file(candidate, &expected_path).unwrap_or_default();
-        let text = self.prompts()?.render("subagent.review", &[("round", &round.to_string()), ("slug", slug), ("review", &review_body)]);
+        let review_body = self
+            .hub
+            .show_file(candidate, &expected_path)
+            .unwrap_or_default();
+        let text = self.prompts()?.render(
+            "worker.review",
+            &[
+                ("round", &round.to_string()),
+                ("slug", slug),
+                ("review", &review_body),
+            ],
+        );
         self.sessions.send(slug, &text);
         Ok(())
     }
 
     // ---- contest (spec §18) ----
 
-    /// A subagent's `contest:` marker: a test it must pass is wrong. Like a
+    /// A worker's `contest:` marker: a test it must pass is wrong. Like a
     /// block it must be a clean marker on the hub tip, but it doesn't
     /// escalate: the task is `contested` until the task agent (or the
     /// director) replies. A contest beyond `max_contest_rounds` escalates
     /// instead of importing, as a send-back beyond `max_review_rounds` does.
-    fn try_contest(&mut self, slug: &str, hub_tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+    fn try_contest(
+        &mut self,
+        slug: &str,
+        hub_tip: &str,
+        candidate: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         if !self.hub.diff_names(hub_tip, candidate).is_empty() {
-            let msg = format!("history: task/{slug}'s contest: commit isn't a clean reset to the hub tip — reset to hub, then contest");
+            let msg = format!(
+                "history: task/{slug}'s contest: commit isn't a clean reset to the hub tip — reset to hub, then contest"
+            );
             return self.reject_and_relay(slug, candidate, Reason::History, msg, report);
         }
         if records::is_spike_at(&self.hub, hub_tip, slug) {
-            let msg = format!("suite: task/{slug} is a spike: it has no director's test to contest (block: instead)");
+            let msg = format!(
+                "suite: task/{slug} is a spike: it has no director's test to contest (block: instead)"
+            );
             return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
         }
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        let n = hub_state.tasks.iter().find(|t| t.slug == slug).map(|t| t.contest_round).unwrap_or(0) + 1;
+        let n = hub_state
+            .tasks
+            .iter()
+            .find(|t| t.slug == slug)
+            .map(|t| t.contest_round)
+            .unwrap_or(0)
+            + 1;
         let max = hub_state.roadmap.limits.max_contest_rounds;
         if n > max {
             let subject = self.hub.commit_subject(candidate).unwrap_or_default();
@@ -1100,10 +1656,22 @@ impl<S: Sessions> Player<S> {
         }
 
         let hub_ref = format!("refs/heads/task/{slug}");
-        self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Contest, Some(slug))?;
-        report.imported.push((hub_ref, candidate.to_string(), Transition::Contest));
-        let text = self.prompts()?.render("subagent.contest-recorded", &[("n", &n.to_string())]);
+        self.hub
+            .update_ref_cas(&hub_ref, candidate, hub_tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(
+            &self.hub,
+            candidate,
+            Actor::Worker,
+            Transition::Contest,
+            Some(slug),
+        )?;
+        report
+            .imported
+            .push((hub_ref, candidate.to_string(), Transition::Contest));
+        let text = self
+            .prompts()?
+            .render("worker.contest-recorded", &[("n", &n.to_string())]);
         self.sessions.send(slug, &text);
         Ok(())
     }
@@ -1112,30 +1680,68 @@ impl<S: Sessions> Player<S> {
     /// director: one commit adding `tasks/<slug>/contests/c<N>.md` and
     /// optionally fixed tests, nothing else. No suite requirement, and no
     /// review round spent: the reply may keep the test and explain it. The
-    /// player re-pins and relays the reply to the subagent.
-    fn try_contest_reply(&mut self, slug: &str, tip: &str, candidate: &str, diffs: &[(char, String)], hub_state: &state::HubState, actor: Actor, report: &mut TickReport) -> Result<(), String> {
-        let task = hub_state.tasks.iter().find(|t| t.slug == slug).ok_or_else(|| format!("contest: task/{slug}: no task state"))?;
+    /// player re-pins and relays the reply to the worker.
+    fn try_contest_reply(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        diffs: &[(char, String)],
+        hub_state: &state::HubState,
+        actor: Actor,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
+        let task = hub_state
+            .tasks
+            .iter()
+            .find(|t| t.slug == slug)
+            .ok_or_else(|| format!("contest: task/{slug}: no task state"))?;
         let n = task.contest_round + 1;
         let expected = format!("tasks/{slug}/contests/c{n}.md");
         if !diffs.iter().any(|(st, p)| *st == 'A' && *p == expected) {
             let msg = format!("ownership: task/{slug} is contested: the reply must add {expected}");
             return self.reject_by(actor, slug, candidate, Reason::Ownership, msg, report);
         }
-        let test_paths = self.hub.show_file(tip, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).map(|c| c.test_paths).unwrap_or_default();
+        let test_paths = self
+            .hub
+            .show_file(tip, "tests.toml")
+            .and_then(|t| config::tests_config_from_str(&t).ok())
+            .map(|c| c.test_paths)
+            .unwrap_or_default();
         let task_prefix = format!("tasks/{slug}/");
-        if let Some((_, path)) = diffs.iter().find(|(_, p)| !(p == "tests.toml" || config::is_suite_fragment(p) || p.starts_with(&task_prefix) || path_under_test_paths(p, &test_paths))) {
-            let msg = format!("ownership: task/{slug}: a contest reply may only add the reply and fix tests, not {path:?}");
+        if let Some((_, path)) = diffs.iter().find(|(_, p)| {
+            !(p == "tests.toml"
+                || config::is_suite_fragment(p)
+                || p.starts_with(&task_prefix)
+                || path_under_test_paths(p, &test_paths))
+        }) {
+            let msg = format!(
+                "ownership: task/{slug}: a contest reply may only add the reply and fix tests, not {path:?}"
+            );
             return self.reject_by(actor, slug, candidate, Reason::Ownership, msg, report);
         }
 
         let hub_ref = format!("refs/heads/task/{slug}");
-        self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, actor, Transition::ContestReply, Some(slug))?;
-        report.imported.push((hub_ref, candidate.to_string(), Transition::ContestReply));
+        self.hub
+            .update_ref_cas(&hub_ref, candidate, tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(
+            &self.hub,
+            candidate,
+            actor,
+            Transition::ContestReply,
+            Some(slug),
+        )?;
+        report
+            .imported
+            .push((hub_ref, candidate.to_string(), Transition::ContestReply));
 
         records::set_pins(&self.hub, slug, candidate)?;
         let reply = self.hub.show_file(candidate, &expected).unwrap_or_default();
-        let text = self.prompts()?.render("subagent.contest-reply", &[("n", &n.to_string()), ("slug", slug), ("reply", &reply)]);
+        let text = self.prompts()?.render(
+            "worker.contest-reply",
+            &[("n", &n.to_string()), ("slug", slug), ("reply", &reply)],
+        );
         self.sessions.send(slug, &text);
         Ok(())
     }
@@ -1145,14 +1751,26 @@ impl<S: Sessions> Player<S> {
     /// spec §9/§11's accept row: the task must be `tested` and not a spike.
     /// The player then lands it itself (`land`), merging `main` into the
     /// branch first if other tasks moved it.
-    fn try_accept(&mut self, slug: &str, tip: &str, candidate: &str, status: Option<Status>, report: &mut TickReport) -> Result<(), String> {
+    fn try_accept(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        status: Option<Status>,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         if status != Some(Status::Tested) {
-            let msg = format!("accept: task/{slug} is {} — it must be tested before it can be accepted", status.map(|s| s.as_str()).unwrap_or("unknown"));
+            let msg = format!(
+                "accept: task/{slug} is {} — it must be tested before it can be accepted",
+                status.map(|s| s.as_str()).unwrap_or("unknown")
+            );
             return self.reject(slug, candidate, Reason::Accept, msg, report);
         }
 
         if records::is_spike_at(&self.hub, tip, slug) {
-            let msg = format!("accept: task/{slug} is a spike: it never merges into main (finish it with `conclude:`)");
+            let msg = format!(
+                "accept: task/{slug} is a spike: it never merges into main (finish it with `conclude:`)"
+            );
             return self.reject(slug, candidate, Reason::Accept, msg, report);
         }
 
@@ -1167,32 +1785,79 @@ impl<S: Sessions> Player<S> {
     /// `candidate` for the director to resolve. Otherwise the branch merges
     /// into `main` (`--no-ff`, `Task: <slug>` trailer) once the suite passes
     /// on the result. A suite that fails only because of the merge sends the
-    /// task back to the subagent (`sync_revision`, no review round spent).
-    fn land(&mut self, slug: &str, tip: &str, candidate: &str, transition: Transition, report: &mut TickReport) -> Result<(), String> {
+    /// task back to the worker (`sync_revision`, no review round spent).
+    fn land(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        transition: Transition,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let hub_ref = format!("refs/heads/task/{slug}");
-        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
+        let main_tip = self
+            .hub
+            .rev_parse("refs/heads/main")
+            .ok_or_else(|| "hub has no main".to_string())?;
 
         let mut sync: Option<String> = None;
         if !self.hub.is_ancestor(&main_tip, candidate) {
-            let (tree, conflicts) = self.hub.merge_tree_conflicts(candidate, &main_tip).map_err(|e| e.to_string())?;
+            let (tree, conflicts) = self
+                .hub
+                .merge_tree_conflicts(candidate, &main_tip)
+                .map_err(|e| e.to_string())?;
             if !conflicts.is_empty() {
-                self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
-                records::record_import(&self.hub, candidate, Actor::Director, transition, Some(slug))?;
-                report.imported.push((hub_ref, candidate.to_string(), transition));
+                self.hub
+                    .update_ref_cas(&hub_ref, candidate, tip)
+                    .map_err(|e| e.to_string())?;
+                records::record_import(
+                    &self.hub,
+                    candidate,
+                    Actor::Director,
+                    transition,
+                    Some(slug),
+                )?;
+                report
+                    .imported
+                    .push((hub_ref, candidate.to_string(), transition));
                 records::record_conflict(&self.hub, candidate, &main_tip, &conflicts)?;
-                report.conflicts.push((slug.to_string(), format!("merging main {main_tip} into task/{slug} conflicts in {}", conflicts.join(", "))));
+                report.conflicts.push((
+                    slug.to_string(),
+                    format!(
+                        "merging main {main_tip} into task/{slug} conflicts in {}",
+                        conflicts.join(", ")
+                    ),
+                ));
                 return Ok(());
             }
-            sync = Some(self.hub.commit_tree(&tree, &[candidate, &main_tip], &format!("Merge main into task/{slug}")).map_err(|e| e.to_string())?);
+            sync = Some(
+                self.hub
+                    .commit_tree(
+                        &tree,
+                        &[candidate, &main_tip],
+                        &format!("Merge main into task/{slug}"),
+                    )
+                    .map_err(|e| e.to_string())?,
+            );
         }
         let head = sync.clone().unwrap_or_else(|| candidate.to_string());
 
         // The `Task: <slug>` trailer must be the merge commit's last
         // paragraph, so `records::accepted_tasks`'s line scan finds it.
         let marker_body = self.accept_marker_body(candidate);
-        let message = if marker_body.is_empty() { format!("Merge task/{slug}\n\nTask: {slug}") } else { format!("Merge task/{slug}\n\n{marker_body}\n\nTask: {slug}") };
-        let tree = self.hub.rev_parse(&format!("{head}^{{tree}}")).ok_or_else(|| format!("no tree at {head}"))?;
-        let merge_sha = self.hub.commit_tree(&tree, &[&main_tip, &head], &message).map_err(|e| e.to_string())?;
+        let message = if marker_body.is_empty() {
+            format!("Merge task/{slug}\n\nTask: {slug}")
+        } else {
+            format!("Merge task/{slug}\n\n{marker_body}\n\nTask: {slug}")
+        };
+        let tree = self
+            .hub
+            .rev_parse(&format!("{head}^{{tree}}"))
+            .ok_or_else(|| format!("no tree at {head}"))?;
+        let merge_sha = self
+            .hub
+            .commit_tree(&tree, &[&main_tip, &head], &message)
+            .map_err(|e| e.to_string())?;
 
         let suite = self.runner.run_suite(&merge_sha);
         self.note_flakes(slug, &merge_sha, &suite);
@@ -1203,39 +1868,100 @@ impl<S: Sessions> Player<S> {
                 let msg = format!("accept: task/{slug}: {}", suite.summary());
                 return self.reject(slug, candidate, Reason::Accept, msg, report);
             }
-            self.hub.update_ref_cas(&hub_ref, &head, tip).map_err(|e| e.to_string())?;
+            self.hub
+                .update_ref_cas(&hub_ref, &head, tip)
+                .map_err(|e| e.to_string())?;
             match &sync {
                 Some(sync) => {
-                    records::record_import(&self.hub, candidate, Actor::Director, transition, Some(slug))?;
-                    records::record_import(&self.hub, sync, Actor::Player, Transition::SyncRevision, Some(slug))?;
-                    report.imported.push((hub_ref.clone(), candidate.to_string(), transition));
-                    report.imported.push((hub_ref, sync.clone(), Transition::SyncRevision));
+                    records::record_import(
+                        &self.hub,
+                        candidate,
+                        Actor::Director,
+                        transition,
+                        Some(slug),
+                    )?;
+                    records::record_import(
+                        &self.hub,
+                        sync,
+                        Actor::Player,
+                        Transition::SyncRevision,
+                        Some(slug),
+                    )?;
+                    report
+                        .imported
+                        .push((hub_ref.clone(), candidate.to_string(), transition));
+                    report
+                        .imported
+                        .push((hub_ref, sync.clone(), Transition::SyncRevision));
                 }
                 None => {
-                    records::record_import(&self.hub, candidate, Actor::Director, Transition::SyncRevision, Some(slug))?;
-                    report.imported.push((hub_ref, candidate.to_string(), Transition::SyncRevision));
+                    records::record_import(
+                        &self.hub,
+                        candidate,
+                        Actor::Director,
+                        Transition::SyncRevision,
+                        Some(slug),
+                    )?;
+                    report.imported.push((
+                        hub_ref,
+                        candidate.to_string(),
+                        Transition::SyncRevision,
+                    ));
                 }
             }
             records::set_pins(&self.hub, slug, &head)?;
-            report.merge_failed.push((slug.to_string(), format!("the suite fails with main merged into task/{slug}; back to the subagent\n{}", suite.summary())));
-            let text = self.prompts()?.render("subagent.merge-failed", &[("slug", slug), ("summary", &suite.summary())]);
+            report.merge_failed.push((
+                slug.to_string(),
+                format!(
+                    "the suite fails with main merged into task/{slug}; back to the worker\n{}",
+                    suite.summary()
+                ),
+            ));
+            let text = self.prompts()?.render(
+                "worker.merge-failed",
+                &[("slug", slug), ("summary", &suite.summary())],
+            );
             self.sessions.send(slug, &text);
             return Ok(());
         }
 
-        self.hub.update_ref_cas(&hub_ref, &head, tip).map_err(|e| e.to_string())?;
-        self.hub.update_ref_cas("refs/heads/main", &merge_sha, &main_tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, Actor::Director, transition, Some(slug))?;
-        report.imported.push((hub_ref.clone(), candidate.to_string(), transition));
+        self.hub
+            .update_ref_cas(&hub_ref, &head, tip)
+            .map_err(|e| e.to_string())?;
+        self.hub
+            .update_ref_cas("refs/heads/main", &merge_sha, &main_tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(
+            &self.hub,
+            candidate,
+            Actor::Director,
+            transition,
+            Some(slug),
+        )?;
+        report
+            .imported
+            .push((hub_ref.clone(), candidate.to_string(), transition));
         if let Some(sync) = &sync {
             records::record_import(&self.hub, sync, Actor::Player, Transition::Sync, Some(slug))?;
-            report.imported.push((hub_ref, sync.clone(), Transition::Sync));
+            report
+                .imported
+                .push((hub_ref, sync.clone(), Transition::Sync));
         }
-        records::record_import(&self.hub, &merge_sha, Actor::Player, Transition::MergeAccept, Some(slug))?;
-        report.imported.push(("refs/heads/main".to_string(), merge_sha, Transition::MergeAccept));
+        records::record_import(
+            &self.hub,
+            &merge_sha,
+            Actor::Player,
+            Transition::MergeAccept,
+            Some(slug),
+        )?;
+        report.imported.push((
+            "refs/heads/main".to_string(),
+            merge_sha,
+            Transition::MergeAccept,
+        ));
 
         // The task branch itself stays in the hub as a permanent record
-        // (spec §9); only the subagent's live session and its now-unneeded
+        // (spec §9); only the worker's live session and its now-unneeded
         // worktree end.
         self.end_task_sessions(slug);
         Ok(())
@@ -1247,7 +1973,11 @@ impl<S: Sessions> Player<S> {
         self.hub
             .rev_list(&["--first-parent", head])
             .into_iter()
-            .find(|c| self.hub.commit_subject(c).is_some_and(|s| s.starts_with("accept:")))
+            .find(|c| {
+                self.hub
+                    .commit_subject(c)
+                    .is_some_and(|s| s.starts_with("accept:"))
+            })
             .and_then(|c| self.hub.commit_body(&c))
             .unwrap_or_default()
             .trim()
@@ -1264,7 +1994,14 @@ impl<S: Sessions> Player<S> {
     /// merge of the two only on the recorded conflicted paths: it resolves
     /// that conflict and writes no other code. Then the player re-pins and
     /// lands it like the accept it completes.
-    fn try_resolve(&mut self, slug: &str, tip: &str, theirs: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+    fn try_resolve(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        theirs: &str,
+        candidate: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
         let task = hub_state.tasks.iter().find(|t| t.slug == slug);
         let Some(conflict) = task.and_then(|t| t.conflict.clone()) else {
@@ -1275,14 +2012,31 @@ impl<S: Sessions> Player<S> {
             return self.reject(slug, candidate, Reason::History, msg, report);
         };
         if theirs != conflict.main {
-            let msg = format!("resolve: task/{slug}'s conflict is with main {}: merge exactly that commit, not {}", conflict.main, short(theirs));
+            let msg = format!(
+                "resolve: task/{slug}'s conflict is with main {}: merge exactly that commit, not {}",
+                conflict.main,
+                short(theirs)
+            );
             return self.reject(slug, candidate, Reason::Ownership, msg, report);
         }
 
-        let (merged, _) = self.hub.merge_tree_conflicts(tip, theirs).map_err(|e| e.to_string())?;
-        let stray: Vec<String> = self.hub.diff_names(&merged, candidate).into_iter().map(|(_, p)| p).filter(|p| !conflict.paths.contains(p)).collect();
+        let (merged, _) = self
+            .hub
+            .merge_tree_conflicts(tip, theirs)
+            .map_err(|e| e.to_string())?;
+        let stray: Vec<String> = self
+            .hub
+            .diff_names(&merged, candidate)
+            .into_iter()
+            .map(|(_, p)| p)
+            .filter(|p| !conflict.paths.contains(p))
+            .collect();
         if !stray.is_empty() {
-            let msg = format!("resolve: task/{slug}: a resolution may only change the conflicted paths ({}), not {}", conflict.paths.join(", "), stray.join(", "));
+            let msg = format!(
+                "resolve: task/{slug}: a resolution may only change the conflicted paths ({}), not {}",
+                conflict.paths.join(", "),
+                stray.join(", ")
+            );
             return self.reject(slug, candidate, Reason::Ownership, msg, report);
         }
 
@@ -1298,39 +2052,65 @@ impl<S: Sessions> Player<S> {
     /// `findings/`); the question is valid; and the director's baseline claims
     /// pass on the current code. There is no task check and no `tests.toml`
     /// entry: a spike never merges.
-    fn validate_spike_post(&self, slug: &str, tip: &str, candidate: &str, status: Status) -> Result<(), String> {
+    fn validate_spike_post(
+        &self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        status: Status,
+    ) -> Result<(), String> {
         if status != Status::Ready {
-            return Err(format!("post: task/{slug} is {} — a spike can only be posted while ready", status.as_str()));
+            return Err(format!(
+                "post: task/{slug} is {} — a spike can only be posted while ready",
+                status.as_str()
+            ));
         }
         // Only the director's own files, under tasks/<slug>/: nothing outside
         // it (the base must stay `main`'s code), and nothing in the
-        // subagent's `claims/` or `findings/`.
+        // worker's `claims/` or `findings/`.
         let prefix = format!("tasks/{slug}/");
         for (_, path) in self.hub.diff_names(tip, candidate) {
-            let ok = path.strip_prefix(&prefix).is_some_and(|rest| !rest.starts_with("claims/") && !rest.starts_with("findings/"));
+            let ok = path
+                .strip_prefix(&prefix)
+                .is_some_and(|rest| !rest.starts_with("claims/") && !rest.starts_with("findings/"));
             if !ok {
-                return Err(format!("post: task/{slug}: a spike's post may only add the director's files under {prefix} (prompt, questions/, baseline/), not {path:?}"));
+                return Err(format!(
+                    "post: task/{slug}: a spike's post may only add the director's files under {prefix} (prompt, questions/, baseline/), not {path:?}"
+                ));
             }
         }
 
         let rounds = records::question_rounds(&self.hub, candidate, slug);
         if rounds != vec![1] {
-            return Err(format!("post: task/{slug}: a spike's post must add exactly {} (found rounds {rounds:?})", spike::question_path(slug, 1)));
+            return Err(format!(
+                "post: task/{slug}: a spike's post must add exactly {} (found rounds {rounds:?})",
+                spike::question_path(slug, 1)
+            ));
         }
-        let question = spike::read_question(&self.hub, candidate, slug, 1).map_err(|e| format!("post: task/{slug}: {e}"))?;
+        let question = spike::read_question(&self.hub, candidate, slug, 1)
+            .map_err(|e| format!("post: task/{slug}: {e}"))?;
         if question.refines.is_some() {
-            return Err(format!("post: task/{slug}: the first question can't refine an earlier round"));
+            return Err(format!(
+                "post: task/{slug}: the first question can't refine an earlier round"
+            ));
         }
 
-        let baseline = spike::read_baseline(&self.hub, candidate, slug, 1).map_err(|e| format!("post: task/{slug}: {e}"))?;
+        let baseline = spike::read_baseline(&self.hub, candidate, slug, 1)
+            .map_err(|e| format!("post: task/{slug}: {e}"))?;
         for (i, c) in baseline.iter().enumerate() {
             if baseline[..i].iter().any(|o| o.name == c.name) {
-                return Err(format!("post: task/{slug}: baseline claim name {:?} is used twice", c.name));
+                return Err(format!(
+                    "post: task/{slug}: baseline claim name {:?} is used twice",
+                    c.name
+                ));
             }
         }
         let failures = spike::failing_at(&self.runner, candidate, &baseline, "on the current code");
         if !failures.is_empty() {
-            return Err(format!("post: task/{slug}: baseline claims must pass on the current code\n{}", failures.join("\n")));
+            return Err(format!(
+                "post: task/{slug}: baseline claims must pass on the current code\n{}",
+                failures.join("\n")
+            ));
         }
         Ok(())
     }
@@ -1340,16 +2120,28 @@ impl<S: Sessions> Player<S> {
     /// vouch for. Failures are `claims` strikes. A valid claim is imported,
     /// and the player's verified record of the round goes into the
     /// exploration note on that commit.
-    fn finish_spike(&mut self, slug: &str, hub_tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+    fn finish_spike(
+        &mut self,
+        slug: &str,
+        hub_tip: &str,
+        candidate: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let round = records::spike_round(&self.hub, hub_tip, slug);
-        let bad = spike::subagent_path_violations(&self.hub.diff_names(hub_tip, candidate), slug, round);
+        let bad =
+            spike::worker_path_violations(&self.hub.diff_names(hub_tip, candidate), slug, round);
         if !bad.is_empty() {
-            let msg = format!("pins: task/{slug}'s finish claim touches files under tasks/{slug}/ that aren't the subagent's to write: {}", bad.join(", "));
+            let msg = format!(
+                "pins: task/{slug}'s finish claim touches files under tasks/{slug}/ that aren't the worker's to write: {}",
+                bad.join(", ")
+            );
             return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
         }
 
         let Some(base) = records::base_commit(&self.hub, slug) else {
-            return Err(format!("task/{slug} is a spike with no recorded base commit"));
+            return Err(format!(
+                "task/{slug} is a spike with no recorded base commit"
+            ));
         };
         match spike::evaluate_finish(&self.hub, &self.runner, slug, &base, candidate) {
             Err(msg) => {
@@ -1358,15 +2150,35 @@ impl<S: Sessions> Player<S> {
             }
             Ok(ev) => {
                 let hub_ref = format!("refs/heads/task/{slug}");
-                self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
-                records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Finish, Some(slug))?;
+                self.hub
+                    .update_ref_cas(&hub_ref, candidate, hub_tip)
+                    .map_err(|e| e.to_string())?;
+                records::record_import(
+                    &self.hub,
+                    candidate,
+                    Actor::Worker,
+                    Transition::Finish,
+                    Some(slug),
+                )?;
                 records::record_exploration(
                     &self.hub,
                     candidate,
-                    records::ExplorationNote { slug: slug.to_string(), round: ev.round, question: ev.question.question.clone(), answer: ev.answer.clone(), claims: ev.claims, concluded: false, at: 0 },
+                    records::ExplorationNote {
+                        slug: slug.to_string(),
+                        round: ev.round,
+                        question: ev.question.question.clone(),
+                        answer: ev.answer.clone(),
+                        claims: ev.claims,
+                        concluded: false,
+                        at: 0,
+                    },
                 )?;
-                report.imported.push((hub_ref, candidate.to_string(), Transition::Finish));
-                let text = self.prompts()?.render("spike.finish-accepted", &[("answer", &ev.answer)]);
+                report
+                    .imported
+                    .push((hub_ref, candidate.to_string(), Transition::Finish));
+                let text = self
+                    .prompts()?
+                    .render("spike.finish-accepted", &[("answer", &ev.answer)]);
                 self.sessions.send(slug, &text);
                 Ok(())
             }
@@ -1378,50 +2190,97 @@ impl<S: Sessions> Player<S> {
     /// `max_review_rounds`; the new baseline claims must pass on the current
     /// code. It needs no failing test — the new question is the target. The
     /// operator's approval is a process rule the player can't see.
-    fn try_spike_send_back(&mut self, slug: &str, tip: &str, candidate: &str, diffs: &[(char, String)], hub_state: &state::HubState, report: &mut TickReport) -> Result<(), String> {
+    fn try_spike_send_back(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        diffs: &[(char, String)],
+        hub_state: &state::HubState,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let n = records::spike_round(&self.hub, tip, slug);
         let next = n + 1;
         let question_file = spike::question_path(slug, next);
         let q_prefix = format!("tasks/{slug}/questions/");
 
-        if !diffs.iter().any(|(st, p)| *st == 'A' && *p == question_file) {
-            if !diffs.iter().any(|(st, p)| *st == 'A' && p.starts_with(&q_prefix)) {
-                let msg = format!("task/{slug}'s commit doesn't add a question file (expected {question_file})");
+        if !diffs
+            .iter()
+            .any(|(st, p)| *st == 'A' && *p == question_file)
+        {
+            if !diffs
+                .iter()
+                .any(|(st, p)| *st == 'A' && p.starts_with(&q_prefix))
+            {
+                let msg = format!(
+                    "task/{slug}'s commit doesn't add a question file (expected {question_file})"
+                );
                 return self.reject(slug, candidate, Reason::Ownership, msg, report);
             }
-            let msg = format!("send-back: task/{slug}: expected round {next} to add {question_file}");
+            let msg =
+                format!("send-back: task/{slug}: expected round {next} to add {question_file}");
             return self.reject(slug, candidate, Reason::Review, msg, report);
         }
         for (st, path) in diffs {
             if *st != 'A' || !spike::send_back_path_ok(path, slug, next) {
-                let msg = format!("send-back: task/{slug}: a spike send-back may only add {question_file} and baseline claims for round {next}, not {path:?}");
+                let msg = format!(
+                    "send-back: task/{slug}: a spike send-back may only add {question_file} and baseline claims for round {next}, not {path:?}"
+                );
                 return self.reject(slug, candidate, Reason::Review, msg, report);
             }
         }
 
         let question = match spike::read_question(&self.hub, candidate, slug, next) {
             Ok(q) => q,
-            Err(e) => return self.reject(slug, candidate, Reason::Review, format!("send-back: task/{slug}: {e}"), report),
+            Err(e) => {
+                return self.reject(
+                    slug,
+                    candidate,
+                    Reason::Review,
+                    format!("send-back: task/{slug}: {e}"),
+                    report,
+                );
+            }
         };
         if let Some(r) = question.refines {
             if r < 1 || r > n {
-                let msg = format!("send-back: task/{slug}: {question_file}: refines = {r}, but only rounds 1..={n} exist");
+                let msg = format!(
+                    "send-back: task/{slug}: {question_file}: refines = {r}, but only rounds 1..={n} exist"
+                );
                 return self.reject(slug, candidate, Reason::Review, msg, report);
             }
         }
         let baseline = match spike::read_baseline(&self.hub, candidate, slug, next) {
             Ok(b) => b,
-            Err(e) => return self.reject(slug, candidate, Reason::Review, format!("send-back: task/{slug}: {e}"), report),
+            Err(e) => {
+                return self.reject(
+                    slug,
+                    candidate,
+                    Reason::Review,
+                    format!("send-back: task/{slug}: {e}"),
+                    report,
+                );
+            }
         };
-        if let Some(c) = baseline.iter().enumerate().find_map(|(i, c)| baseline[..i].iter().any(|o| o.name == c.name).then_some(c)) {
-            let msg = format!("send-back: task/{slug}: baseline claim name {:?} is used twice", c.name);
+        if let Some(c) = baseline
+            .iter()
+            .enumerate()
+            .find_map(|(i, c)| baseline[..i].iter().any(|o| o.name == c.name).then_some(c))
+        {
+            let msg = format!(
+                "send-back: task/{slug}: baseline claim name {:?} is used twice",
+                c.name
+            );
             return self.reject(slug, candidate, Reason::Review, msg, report);
         }
 
         // The Nth question is the (N-1)th send-back's; spec §10's cap counts
         // send-backs, so round `n` here is send-back number `n`.
         if n > hub_state.roadmap.limits.max_review_rounds {
-            let cause = format!("review rounds exceeded: {n} > {}", hub_state.roadmap.limits.max_review_rounds);
+            let cause = format!(
+                "review rounds exceeded: {n} > {}",
+                hub_state.roadmap.limits.max_review_rounds
+            );
             records::record_escalation(&self.hub, slug, candidate, &cause)?;
             report.escalated.push((slug.to_string(), cause));
             return Ok(());
@@ -1429,31 +2288,59 @@ impl<S: Sessions> Player<S> {
 
         if !baseline.is_empty() {
             let Some(base) = records::base_commit(&self.hub, slug) else {
-                return Err(format!("task/{slug} is a spike with no recorded base commit"));
+                return Err(format!(
+                    "task/{slug} is a spike with no recorded base commit"
+                ));
             };
             let overlay = spike::overlay_commit(&self.hub, &base, candidate, slug)?;
-            let failures = spike::failing_at(&self.runner, &overlay, &baseline, "on the current code");
+            let failures =
+                spike::failing_at(&self.runner, &overlay, &baseline, "on the current code");
             if !failures.is_empty() {
-                let msg = format!("send-back: task/{slug}: baseline claims must pass on the current code\n{}", failures.join("\n"));
+                let msg = format!(
+                    "send-back: task/{slug}: baseline claims must pass on the current code\n{}",
+                    failures.join("\n")
+                );
                 return self.reject(slug, candidate, Reason::Review, msg, report);
             }
         }
 
         let hub_ref = format!("refs/heads/task/{slug}");
-        self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, Actor::Director, Transition::SendBack, Some(slug))?;
-        report.imported.push((hub_ref, candidate.to_string(), Transition::SendBack));
+        self.hub
+            .update_ref_cas(&hub_ref, candidate, tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(
+            &self.hub,
+            candidate,
+            Actor::Director,
+            Transition::SendBack,
+            Some(slug),
+        )?;
+        report
+            .imported
+            .push((hub_ref, candidate.to_string(), Transition::SendBack));
 
         records::set_pins(&self.hub, slug, candidate)?;
-        let raw = self.hub.show_file(candidate, &question_file).unwrap_or_default();
+        let raw = self
+            .hub
+            .show_file(candidate, &question_file)
+            .unwrap_or_default();
         let prompts = self.prompts()?;
         let round = next.to_string();
         let header = prompts.render(
             "spike.next-round",
-            &[("round", &round), ("slug", slug), ("findings", &spike::findings_path(slug, next)), ("claims", &spike::claims_path(slug, next))],
+            &[
+                ("round", &round),
+                ("slug", slug),
+                ("findings", &spike::findings_path(slug, next)),
+                ("claims", &spike::claims_path(slug, next)),
+            ],
         );
-        let question = prompts.render("spike.question", &[("round", &round), ("question", raw.trim_end())]);
-        self.sessions.send(slug, &Prompts::with_block(&header, &question));
+        let question = prompts.render(
+            "spike.question",
+            &[("round", &round), ("question", raw.trim_end())],
+        );
+        self.sessions
+            .send(slug, &Prompts::with_block(&header, &question));
         Ok(())
     }
 
@@ -1462,13 +2349,25 @@ impl<S: Sessions> Player<S> {
     /// answer, and the session ends. The answer is the one the player
     /// verified at the finish; the director and operator agreeing with it is
     /// their conversation.
-    fn try_conclude(&mut self, slug: &str, tip: &str, candidate: &str, status: Option<Status>, report: &mut TickReport) -> Result<(), String> {
+    fn try_conclude(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        status: Option<Status>,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         if !records::is_spike_at(&self.hub, tip, slug) {
-            let msg = format!("conclude: task/{slug} is not a spike — an ordinary task is finished with `accept:`");
+            let msg = format!(
+                "conclude: task/{slug} is not a spike — an ordinary task is finished with `accept:`"
+            );
             return self.reject(slug, candidate, Reason::Ownership, msg, report);
         }
         if status != Some(Status::Tested) {
-            let msg = format!("conclude: task/{slug} is {} — a spike needs a validated finish before it can be concluded", status.map(|s| s.as_str()).unwrap_or("unknown"));
+            let msg = format!(
+                "conclude: task/{slug} is {} — a spike needs a validated finish before it can be concluded",
+                status.map(|s| s.as_str()).unwrap_or("unknown")
+            );
             return self.reject(slug, candidate, Reason::Accept, msg, report);
         }
         let Some(note) = records::exploration(&self.hub, tip) else {
@@ -1476,12 +2375,33 @@ impl<S: Sessions> Player<S> {
             return self.reject(slug, candidate, Reason::Accept, msg, report);
         };
 
-        self.hub.update_ref(&format!("refs/explored/{slug}"), candidate).map_err(|e| e.to_string())?;
+        self.hub
+            .update_ref(&format!("refs/explored/{slug}"), candidate)
+            .map_err(|e| e.to_string())?;
         let hub_ref = format!("refs/heads/task/{slug}");
-        self.hub.delete_ref_cas(&hub_ref, tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, Actor::Director, Transition::Conclude, Some(slug))?;
-        records::record_exploration(&self.hub, candidate, records::ExplorationNote { concluded: true, ..note })?;
-        report.imported.push((format!("refs/explored/{slug}"), candidate.to_string(), Transition::Conclude));
+        self.hub
+            .delete_ref_cas(&hub_ref, tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(
+            &self.hub,
+            candidate,
+            Actor::Director,
+            Transition::Conclude,
+            Some(slug),
+        )?;
+        records::record_exploration(
+            &self.hub,
+            candidate,
+            records::ExplorationNote {
+                concluded: true,
+                ..note
+            },
+        )?;
+        report.imported.push((
+            format!("refs/explored/{slug}"),
+            candidate.to_string(),
+            Transition::Conclude,
+        ));
 
         self.end_task_sessions(slug);
         Ok(())
@@ -1491,12 +2411,31 @@ impl<S: Sessions> Player<S> {
 
     /// spec §9's retire row: allowed only when the task isn't posted or in
     /// flight (pending/ready/orphaned), or is escalated. Moves the branch to
-    /// `refs/retired/<slug>` and ends the subagent session.
-    fn try_retire(&mut self, slug: &str, tip: &str, candidate: &str, status: Option<Status>, report: &mut TickReport) -> Result<(), String> {
+    /// `refs/retired/<slug>` and ends the worker session.
+    fn try_retire(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        status: Option<Status>,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         // A spike the operator gives up on may also be retired once its
         // finish is validated (spec §14); an ordinary tested task may not.
-        let tested_spike = status == Some(Status::Tested) && records::is_spike_at(&self.hub, tip, slug);
-        let allowed = tested_spike || matches!(status, Some(Status::Pending | Status::Ready | Status::Orphaned | Status::Conflicted | Status::Contested | Status::Escalated));
+        let tested_spike =
+            status == Some(Status::Tested) && records::is_spike_at(&self.hub, tip, slug);
+        let allowed = tested_spike
+            || matches!(
+                status,
+                Some(
+                    Status::Pending
+                        | Status::Ready
+                        | Status::Orphaned
+                        | Status::Conflicted
+                        | Status::Contested
+                        | Status::Escalated
+                )
+            );
         if !allowed {
             let msg = format!(
                 "retire: task/{slug} is {} — retire is only allowed while pending/ready/orphaned (not posted or in flight), conflicted, contested or escalated",
@@ -1505,23 +2444,53 @@ impl<S: Sessions> Player<S> {
             return self.reject(slug, candidate, Reason::Retire, msg, report);
         }
 
-        self.hub.update_ref(&format!("refs/retired/{slug}"), candidate).map_err(|e| e.to_string())?;
+        self.hub
+            .update_ref(&format!("refs/retired/{slug}"), candidate)
+            .map_err(|e| e.to_string())?;
         let hub_ref = format!("refs/heads/task/{slug}");
-        self.hub.delete_ref_cas(&hub_ref, tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, Actor::Director, Transition::Retire, Some(slug))?;
-        report.imported.push((format!("refs/retired/{slug}"), candidate.to_string(), Transition::Retire));
+        self.hub
+            .delete_ref_cas(&hub_ref, tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(
+            &self.hub,
+            candidate,
+            Actor::Director,
+            Transition::Retire,
+            Some(slug),
+        )?;
+        report.imported.push((
+            format!("refs/retired/{slug}"),
+            candidate.to_string(),
+            Transition::Retire,
+        ));
 
         self.end_task_sessions(slug);
         Ok(())
     }
 
-    fn try_replan(&mut self, slug: &str, tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+    fn try_replan(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         match self.validate_replan(slug, tip, candidate) {
             Ok(()) => {
                 let hub_ref = format!("refs/heads/task/{slug}");
-                self.hub.update_ref_cas(&hub_ref, candidate, tip).map_err(|e| e.to_string())?;
-                records::record_import(&self.hub, candidate, Actor::Director, Transition::Replan, Some(slug))?;
-                report.imported.push((hub_ref, candidate.to_string(), Transition::Replan));
+                self.hub
+                    .update_ref_cas(&hub_ref, candidate, tip)
+                    .map_err(|e| e.to_string())?;
+                records::record_import(
+                    &self.hub,
+                    candidate,
+                    Actor::Director,
+                    Transition::Replan,
+                    Some(slug),
+                )?;
+                report
+                    .imported
+                    .push((hub_ref, candidate.to_string(), Transition::Replan));
             }
             Err(msg) => self.reject(slug, candidate, Reason::Plan, msg, report)?,
         }
@@ -1535,18 +2504,32 @@ impl<S: Sessions> Player<S> {
         let expected_path = format!("tasks/{slug}/task.toml");
         let diffs = self.hub.diff_names(base, candidate);
         if diffs.len() != 1 || diffs[0].1 != expected_path {
-            return Err(format!("plan: task/{slug}'s replan commits may only change {expected_path}"));
+            return Err(format!(
+                "plan: task/{slug}'s replan commits may only change {expected_path}"
+            ));
         }
-        let text = self.hub.show_file(candidate, &expected_path).ok_or_else(|| format!("plan: {expected_path} missing at {candidate}"))?;
-        let cfg = config::task_config_from_str(&text).map_err(|e| format!("plan: {expected_path}: {e}"))?;
-        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
+        let text = self
+            .hub
+            .show_file(candidate, &expected_path)
+            .ok_or_else(|| format!("plan: {expected_path} missing at {candidate}"))?;
+        let cfg = config::task_config_from_str(&text)
+            .map_err(|e| format!("plan: {expected_path}: {e}"))?;
+        let main_tip = self
+            .hub
+            .rev_parse("refs/heads/main")
+            .ok_or_else(|| "hub has no main".to_string())?;
         self.validate_task_config(slug, &main_tip, &cfg)
     }
 
     /// Shared by plan and replan: phase, dependency existence/retirement/
     /// self-reference, and the no-cycles rule over the hub's task graph plus
     /// this candidate.
-    fn validate_task_config(&self, slug: &str, main_tip: &str, cfg: &TaskConfig) -> Result<(), String> {
+    fn validate_task_config(
+        &self,
+        slug: &str,
+        main_tip: &str,
+        cfg: &TaskConfig,
+    ) -> Result<(), String> {
         let roadmap = self.roadmap_at(main_tip)?;
         if !cfg.phase.is_empty() && !roadmap.phases.iter().any(|p| p.id == cfg.phase) {
             return Err(format!("plan: task/{slug}: unknown phase {:?}", cfg.phase));
@@ -1561,10 +2544,17 @@ impl<S: Sessions> Player<S> {
             if retired.iter().any(|r| r == dep) {
                 return Err(format!("plan: task/{slug} depends on retired task {dep:?}"));
             }
-            if records::is_explored(&self.hub, dep) || self.task_config_at(&accepted, dep).is_some_and(|c| c.kind == TaskKind::Spike) {
-                return Err(format!("plan: task/{slug} depends on spike {dep:?}: nothing may depend on a spike"));
+            if records::is_explored(&self.hub, dep)
+                || self
+                    .task_config_at(&accepted, dep)
+                    .is_some_and(|c| c.kind == TaskKind::Spike)
+            {
+                return Err(format!(
+                    "plan: task/{slug} depends on spike {dep:?}: nothing may depend on a spike"
+                ));
             }
-            let exists = self.hub.ref_exists(&format!("refs/heads/task/{dep}")) || accepted.contains_key(dep);
+            let exists = self.hub.ref_exists(&format!("refs/heads/task/{dep}"))
+                || accepted.contains_key(dep);
             if !exists {
                 return Err(format!("plan: task/{slug} depends on unknown task {dep:?}"));
             }
@@ -1579,7 +2569,12 @@ impl<S: Sessions> Player<S> {
     /// The dependency graph reachable from `deps` (as if they belonged to
     /// `slug`), read from each dependency's live branch tip or (once
     /// accepted) `main`. True if that graph reaches `slug` again.
-    fn creates_cycle(&self, accepted: &BTreeMap<String, String>, slug: &str, deps: &[String]) -> bool {
+    fn creates_cycle(
+        &self,
+        accepted: &BTreeMap<String, String>,
+        slug: &str,
+        deps: &[String],
+    ) -> bool {
         let mut stack: Vec<String> = deps.to_vec();
         let mut seen: BTreeSet<String> = BTreeSet::new();
         while let Some(d) = stack.pop() {
@@ -1596,14 +2591,26 @@ impl<S: Sessions> Player<S> {
         false
     }
 
-    fn task_config_at(&self, accepted: &BTreeMap<String, String>, slug: &str) -> Option<TaskConfig> {
-        let tip = self.hub.rev_parse(&format!("refs/heads/task/{slug}")).or_else(|| accepted.get(slug).cloned())?;
-        let text = self.hub.show_file(&tip, &format!("tasks/{slug}/task.toml"))?;
+    fn task_config_at(
+        &self,
+        accepted: &BTreeMap<String, String>,
+        slug: &str,
+    ) -> Option<TaskConfig> {
+        let tip = self
+            .hub
+            .rev_parse(&format!("refs/heads/task/{slug}"))
+            .or_else(|| accepted.get(slug).cloned())?;
+        let text = self
+            .hub
+            .show_file(&tip, &format!("tasks/{slug}/task.toml"))?;
         config::task_config_from_str(&text).ok()
     }
 
     fn roadmap_at(&self, commit: &str) -> Result<RoadmapConfig, String> {
-        let text = self.hub.show_file(commit, "roadmap.toml").ok_or_else(|| format!("roadmap.toml not found at {commit}"))?;
+        let text = self
+            .hub
+            .show_file(commit, "roadmap.toml")
+            .ok_or_else(|| format!("roadmap.toml not found at {commit}"))?;
         config::roadmap_config_from_str(&text)
     }
 
@@ -1612,15 +2619,19 @@ impl<S: Sessions> Player<S> {
     /// Every `Posted` task that has never been launched (no
     /// `refs/dashboard/pins/<slug>` yet — pins are only ever taken at launch
     /// or send-back, and a `Posted` task hasn't been sent back) gets a
-    /// subagent clone and a tmux session. A launch failure never retries
+    /// worker clone and a tmux session. A launch failure never retries
     /// itself: whatever went wrong, this method always records *some* trace
     /// of the attempt (pins, at least) before returning, so the task isn't
     /// silently re-attempted every tick forever (spec's deferred "not
     /// relaunched automatically").
-    fn launch_subagents(&mut self, report: &mut TickReport) -> Result<(), String> {
+    fn launch_workers(&mut self, report: &mut TickReport) -> Result<(), String> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        let candidates: Vec<(String, String)> =
-            hub_state.tasks.iter().filter(|t| t.status == Status::Posted && !records::has_pins(&self.hub, &t.slug)).map(|t| (t.slug.clone(), t.tip.clone())).collect();
+        let candidates: Vec<(String, String)> = hub_state
+            .tasks
+            .iter()
+            .filter(|t| t.status == Status::Posted && !records::has_pins(&self.hub, &t.slug))
+            .map(|t| (t.slug.clone(), t.tip.clone()))
+            .collect();
         for (slug, tip) in candidates {
             self.try_launch(&slug, &tip, report)?;
         }
@@ -1633,16 +2644,20 @@ impl<S: Sessions> Player<S> {
             // A spike has no task check; what must still hold at launch is
             // the director's baseline claims on the current code.
             let round = records::spike_round(&self.hub, tip, slug);
-            let baseline = spike::read_baseline(&self.hub, tip, slug, round).map_err(|e| format!("launch: task/{slug}: {e}"))?;
+            let baseline = spike::read_baseline(&self.hub, tip, slug, round)
+                .map_err(|e| format!("launch: task/{slug}: {e}"))?;
             let failures = spike::failing_at(&self.runner, tip, &baseline, "on the current code");
             if !failures.is_empty() {
                 report.errors.push(format!("launch: task/{slug}: the director's baseline claims no longer pass at the tip — not launching\n{}", failures.join("\n")));
                 return Ok(());
             }
         } else {
-            let result = self.runner.run_task_check(tip, slug).map_err(|e| format!("launch: task/{slug}: {e}"))?;
+            let result = self
+                .runner
+                .run_task_check(tip, slug)
+                .map_err(|e| format!("launch: task/{slug}: {e}"))?;
             if result.pass {
-                report.errors.push(format!("launch: task/{slug}: the task check now passes at the tip — not launching a subagent for work that's already done"));
+                report.errors.push(format!("launch: task/{slug}: the task check now passes at the tip — not launching a worker for work that's already done"));
                 return Ok(());
             }
             if let Some(miss) = self.evidence_miss(slug, tip) {
@@ -1657,12 +2672,12 @@ impl<S: Sessions> Player<S> {
             records::set_base(&self.hub, slug, tip)?;
         }
 
-        let clone_dir = paths::subagent_clone(&self.director, slug);
+        let clone_dir = paths::worker_clone(&self.director, slug);
         if clone_dir.exists() {
             report.errors.push(format!("launch: task/{slug}: {} already exists — refusing to touch a leftover agent clone (spec §5)", clone_dir.display()));
             return Ok(());
         }
-        if let Err(e) = self.create_subagent_clone(slug, &clone_dir) {
+        if let Err(e) = self.create_worker_clone(slug, &clone_dir) {
             report.errors.push(format!("launch: task/{slug}: {e}"));
             return Ok(());
         }
@@ -1680,7 +2695,10 @@ impl<S: Sessions> Player<S> {
         }
 
         match self.agent_cmd_at_main() {
-            Ok(agent_cmd) => match self.sessions.launch(slug, &clone_dir, &agent_cmd, &prompt_file) {
+            Ok(agent_cmd) => match self
+                .sessions
+                .launch(slug, &clone_dir, &agent_cmd, &prompt_file)
+            {
                 Ok(()) => report.launched.push(slug.to_string()),
                 Err(e) => report.errors.push(format!("launch: task/{slug}: {e}")),
             },
@@ -1691,18 +2709,27 @@ impl<S: Sessions> Player<S> {
 
     /// prompts.kdl at main's tip (spec §19), validated on its way onto main.
     fn prompts(&self) -> Result<Prompts, String> {
-        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
-        let text = self.hub.show_file(&main_tip, prompts::FILE).ok_or_else(|| format!("{} missing on main: commit one (spec §19)", prompts::FILE))?;
+        let main_tip = self
+            .hub
+            .rev_parse("refs/heads/main")
+            .ok_or_else(|| "hub has no main".to_string())?;
+        let text = self
+            .hub
+            .show_file(&main_tip, prompts::FILE)
+            .ok_or_else(|| format!("{} missing on main: commit one (spec §19)", prompts::FILE))?;
         Prompts::parse(&text)
     }
 
     fn agent_cmd_at_main(&self) -> Result<String, String> {
-        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
+        let main_tip = self
+            .hub
+            .rev_parse("refs/heads/main")
+            .ok_or_else(|| "hub has no main".to_string())?;
         Ok(self.roadmap_at(&main_tip)?.player.agent_cmd)
     }
 
-    /// Ensures the project's one, permanent subagent workspace exists (a
-    /// `git clone` of the hub — `paths::subagent_workspace` — created once
+    /// Ensures the project's one, permanent worker workspace exists (a
+    /// `git clone` of the hub — `paths::worker_workspace` — created once
     /// and trusted once by the operator), brings it up to date with the hub,
     /// then `git worktree add -B task/<slug> <clone_dir> origin/task/<slug>`:
     /// a fresh worktree on the task branch that shares the workspace's git
@@ -1713,34 +2740,47 @@ impl<S: Sessions> Player<S> {
     /// contend for the same branch name. Parallel tasks (spec §4) each get their own worktree and
     /// branch; the player is the only process touching the workspace, one
     /// git command at a time.
-    fn create_subagent_clone(&self, slug: &str, clone_dir: &Path) -> Result<(), String> {
+    fn create_worker_clone(&self, slug: &str, clone_dir: &Path) -> Result<(), String> {
         self.add_worktree(&format!("task/{slug}"), slug, clone_dir)
     }
 
-    /// `create_subagent_clone`'s mechanics for any agent: a worktree of the
+    /// `create_worker_clone`'s mechanics for any agent: a worktree of the
     /// shared workspace at `clone_dir`, on the local branch `branch`, started
     /// at the hub's `task/<slug>`.
     fn add_worktree(&self, branch: &str, slug: &str, clone_dir: &Path) -> Result<(), String> {
-        let workspace_dir = paths::subagent_workspace(&self.director);
+        let workspace_dir = paths::worker_workspace(&self.director);
         if !workspace_dir.join(".git").exists() {
             if let Some(parent) = workspace_dir.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("{}: {e}", parent.display()))?;
             }
             let hub_str = path_str(&self.hub.dir)?;
             let workspace_str = path_str(&workspace_dir)?;
             let cwd_git = Git::new(workspace_dir.parent().unwrap_or_else(|| Path::new(".")));
-            cwd_git.run(&["clone", "--quiet", hub_str, workspace_str]).map_err(|e| format!("git clone (subagent workspace): {e}"))?;
+            cwd_git
+                .run(&["clone", "--quiet", hub_str, workspace_str])
+                .map_err(|e| format!("git clone (worker workspace): {e}"))?;
         }
 
         let workspace = Git::new(&workspace_dir);
-        workspace.run(&["fetch", "--quiet", "origin"]).map_err(|e| format!("fetching hub into the subagent workspace: {e}"))?;
+        workspace
+            .run(&["fetch", "--quiet", "origin"])
+            .map_err(|e| format!("fetching hub into the worker workspace: {e}"))?;
 
         if let Some(parent) = clone_dir.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         let clone_str = path_str(clone_dir)?;
         workspace
-            .run(&["worktree", "add", "--quiet", "-B", branch, clone_str, &format!("origin/task/{slug}")])
+            .run(&[
+                "worktree",
+                "add",
+                "--quiet",
+                "-B",
+                branch,
+                clone_str,
+                &format!("origin/task/{slug}"),
+            ])
             .map_err(|e| format!("git worktree add: {e}"))?;
         Ok(())
     }
@@ -1751,17 +2791,23 @@ impl<S: Sessions> Player<S> {
     /// be joined into further like a directory — this asks git for the real
     /// path instead of assuming the plain-clone shape.
     fn git_dir(clone_dir: &Path) -> Result<PathBuf, String> {
-        let out = Git::new(clone_dir).run(&["rev-parse", "--git-dir"]).map_err(|e| e.to_string())?;
+        let out = Git::new(clone_dir)
+            .run(&["rev-parse", "--git-dir"])
+            .map_err(|e| e.to_string())?;
         let dir = PathBuf::from(out);
-        Ok(if dir.is_absolute() { dir } else { clone_dir.join(dir) })
+        Ok(if dir.is_absolute() {
+            dir
+        } else {
+            clone_dir.join(dir)
+        })
     }
 
-    /// Removes `slug`'s subagent worktree and its local branch in the
-    /// shared workspace repo (`paths::subagent_workspace`), once its task
+    /// Removes `slug`'s worker worktree and its local branch in the
+    /// shared workspace repo (`paths::worker_workspace`), once its task
     /// is finished (accepted or retired). The hub's own `refs/heads/
     /// task/<slug>` (or `refs/retired/<slug>`) stays forever as the
     /// permanent record (spec §8.1) — the worktree was only ever scratch
-    /// space for the subagent to work in, so nothing is lost by reclaiming
+    /// space for the worker to work in, so nothing is lost by reclaiming
     /// it. Unlike a plain clone (self-contained, harmless to leave forever),
     /// a worktree's administrative footprint lives *inside* the shared
     /// workspace repo, so leaving every finished task's worktree and branch
@@ -1773,35 +2819,44 @@ impl<S: Sessions> Player<S> {
     /// failure is only a warning; the task's own transition already
     /// succeeded by the time this runs, so it's too late for this to be a
     /// rejection.
-    fn cleanup_subagent_clone(&self, slug: &str) {
-        self.remove_worktree(&paths::subagent_clone(&self.director, slug), &format!("task/{slug}"));
+    fn cleanup_worker_clone(&self, slug: &str) {
+        self.remove_worktree(
+            &paths::worker_clone(&self.director, slug),
+            &format!("task/{slug}"),
+        );
     }
 
     /// Ends every session a finished task (accepted, retired, concluded) still
-    /// has, its subagent's and its task agent's (spec §17), and removes both
+    /// has, its worker's and its task agent's (spec §17), and removes both
     /// worktrees.
     fn end_task_sessions(&mut self, slug: &str) {
         self.sessions.kill(slug);
-        self.cleanup_subagent_clone(slug);
+        self.cleanup_worker_clone(slug);
         if records::agent_launched(&self.hub, slug) {
             self.sessions.kill(&state::agent_key(slug));
-            self.remove_worktree(&paths::agent_clone(&self.director, slug), &format!("agent/{slug}"));
+            self.remove_worktree(
+                &paths::agent_clone(&self.director, slug),
+                &format!("agent/{slug}"),
+            );
         }
     }
 
-    /// `cleanup_subagent_clone`'s mechanics for any agent's worktree and its
+    /// `cleanup_worker_clone`'s mechanics for any agent's worktree and its
     /// local branch.
     fn remove_worktree(&self, clone_dir: &Path, branch: &str) {
         if !clone_dir.exists() {
             return;
         }
-        let workspace_dir = paths::subagent_workspace(&self.director);
+        let workspace_dir = paths::worker_workspace(&self.director);
         if !workspace_dir.join(".git").exists() {
             return;
         }
         let workspace = Git::new(&workspace_dir);
         let Ok(clone_str) = path_str(clone_dir) else {
-            eprintln!("dashboard: worktree {} is not valid UTF-8, leaving it in place", clone_dir.display());
+            eprintln!(
+                "dashboard: worktree {} is not valid UTF-8, leaving it in place",
+                clone_dir.display()
+            );
             return;
         };
         if let Err(e) = workspace.run(&["worktree", "remove", "--force", clone_str]) {
@@ -1816,100 +2871,161 @@ impl<S: Sessions> Player<S> {
     /// Writes the player's preamble plus `tasks/<slug>/prompt.md` at `tip`
     /// into `prompt_file`, which lives under the clone's private git-admin
     /// directory (`git_dir`) so it's never part of the worktree and can't be
-    /// committed by the subagent.
+    /// committed by the worker.
     fn write_prompt_file(&self, slug: &str, tip: &str, prompt_file: &Path) -> Result<(), String> {
-        let prompt_body = self.hub.show_file(tip, &format!("tasks/{slug}/prompt.md")).ok_or_else(|| format!("tasks/{slug}/prompt.md missing at {tip}"))?;
+        let prompt_body = self
+            .hub
+            .show_file(tip, &format!("tasks/{slug}/prompt.md"))
+            .ok_or_else(|| format!("tasks/{slug}/prompt.md missing at {tip}"))?;
         let pinned = records::pinned_files(&self.hub, slug).unwrap_or_default();
         let pinned = pinned_block(pinned.keys().map(|s| s.as_str()));
         let prompts = self.prompts()?;
-        let vars = [("slug", slug), ("project", self.project.as_str()), ("pinned", pinned.as_str())];
+        let vars = [
+            ("slug", slug),
+            ("project", self.project.as_str()),
+            ("pinned", pinned.as_str()),
+        ];
         let content = if records::is_spike_at(&self.hub, tip, slug) {
             let round = records::spike_round(&self.hub, tip, slug);
-            let question = self.hub.show_file(tip, &spike::question_path(slug, round)).unwrap_or_default();
-            let question = prompts.render("spike.question", &[("round", &round.to_string()), ("question", question.trim_end())]);
-            prompts.spike_launch(&prompts.render("spike.launch", &vars), &prompt_body, &question)
+            let question = self
+                .hub
+                .show_file(tip, &spike::question_path(slug, round))
+                .unwrap_or_default();
+            let question = prompts.render(
+                "spike.question",
+                &[
+                    ("round", &round.to_string()),
+                    ("question", question.trim_end()),
+                ],
+            );
+            prompts.spike_launch(
+                &prompts.render("spike.launch", &vars),
+                &prompt_body,
+                &question,
+            )
         } else {
-            let flaky = records::task_config_at(&self.hub, tip, slug).filter(|c| c.kind == TaskKind::FlakyTestFix).map(|cfg| {
-                let (fix_paths, replacements) = flaky::prompt_lists(&cfg.fix_paths, &cfg.replace);
-                prompts.render("subagent.flaky", &[("fix_paths", &fix_paths), ("replacements", &replacements)])
-            });
-            prompts.subagent_launch(&prompts.render("subagent.launch", &vars), flaky.as_deref(), &prompt_body)
+            let flaky = records::task_config_at(&self.hub, tip, slug)
+                .filter(|c| c.kind == TaskKind::FlakyTestFix)
+                .map(|cfg| {
+                    let (fix_paths, replacements) =
+                        flaky::prompt_lists(&cfg.fix_paths, &cfg.replace);
+                    prompts.render(
+                        "worker.flaky",
+                        &[("fix_paths", &fix_paths), ("replacements", &replacements)],
+                    )
+                });
+            prompts.worker_launch(
+                &prompts.render("worker.launch", &vars),
+                flaky.as_deref(),
+                &prompt_body,
+            )
         };
         std::fs::write(prompt_file, content).map_err(|e| format!("{}: {e}", prompt_file.display()))
     }
 
-    /// Relaunches `slug`'s subagent session with the same clone and prompt
+    /// Relaunches `slug`'s worker session with the same clone and prompt
     /// file it already has (spec's deferred "not relaunched automatically" —
     /// this is the manual trigger, exposed as `dashboard relaunch <slug>`).
     /// Only valid once pins exist (the task was actually launched before),
     /// the session isn't already alive, and the task is still in a state the
-    /// subagent may work on.
+    /// worker may work on.
     pub fn relaunch(&mut self, slug: &str) -> Result<(), String> {
         if !records::has_pins(&self.hub, slug) {
-            return Err(format!("relaunch: task/{slug} has no pins — it was never launched"));
+            return Err(format!(
+                "relaunch: task/{slug} has no pins — it was never launched"
+            ));
         }
         if self.sessions.alive(slug) {
             return Err(format!("relaunch: task/{slug}'s session is already alive"));
         }
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        let status = hub_state.tasks.iter().find(|t| t.slug == slug).map(|t| t.status);
-        if !matches!(status, Some(Status::Posted | Status::InProgress | Status::InRevision | Status::Contested)) {
+        let status = hub_state
+            .tasks
+            .iter()
+            .find(|t| t.slug == slug)
+            .map(|t| t.status);
+        if !matches!(
+            status,
+            Some(Status::Posted | Status::InProgress | Status::InRevision | Status::Contested)
+        ) {
             return Err(format!(
                 "relaunch: task/{slug} is {} — relaunch only applies while posted, in progress, or in revision",
                 status.map(|s| s.as_str()).unwrap_or("unknown")
             ));
         }
 
-        let clone_dir = paths::subagent_clone(&self.director, slug);
+        let clone_dir = paths::worker_clone(&self.director, slug);
         if !clone_dir.exists() {
-            return Err(format!("relaunch: task/{slug}'s clone {} is missing", clone_dir.display()));
+            return Err(format!(
+                "relaunch: task/{slug}'s clone {} is missing",
+                clone_dir.display()
+            ));
         }
         let prompt_file = Self::git_dir(&clone_dir)?.join("dashboard-prompt.md");
         if !prompt_file.exists() {
-            return Err(format!("relaunch: task/{slug}'s prompt file {} is missing", prompt_file.display()));
+            return Err(format!(
+                "relaunch: task/{slug}'s prompt file {} is missing",
+                prompt_file.display()
+            ));
         }
 
         let agent_cmd = self.agent_cmd_at_main()?;
-        self.sessions.launch(slug, &clone_dir, &agent_cmd, &prompt_file)
+        self.sessions
+            .launch(slug, &clone_dir, &agent_cmd, &prompt_file)
     }
 
-    // ---- subagent import (spec §5, §7, §9) ----
+    // ---- worker import (spec §5, §7, §9) ----
 
     /// Every task with pins whose status is `Posted`/`InProgress`/
     /// `InRevision` and whose clone dir exists gets a fetch-and-validate
     /// pass. A missing clone (never launched, or a relaunch pending) is
     /// simply skipped — there's nothing to fetch from.
-    fn import_subagents(&mut self, report: &mut TickReport) -> Result<(), String> {
+    fn import_workers(&mut self, report: &mut TickReport) -> Result<(), String> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
         let candidates: Vec<(String, String)> = hub_state
             .tasks
             .iter()
-            .filter(|t| matches!(t.status, Status::Posted | Status::InProgress | Status::InRevision) && records::has_pins(&self.hub, &t.slug))
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    Status::Posted | Status::InProgress | Status::InRevision
+                ) && records::has_pins(&self.hub, &t.slug)
+            })
             .map(|t| (t.slug.clone(), t.tip.clone()))
             .collect();
 
         for (slug, hub_tip) in candidates {
-            let clone_dir = paths::subagent_clone(&self.director, &slug);
+            let clone_dir = paths::worker_clone(&self.director, &slug);
             if !clone_dir.exists() {
                 continue;
             }
-            self.import_subagent(&slug, &hub_tip, &clone_dir, report)?;
+            self.import_worker(&slug, &hub_tip, &clone_dir, report)?;
         }
         Ok(())
     }
 
-    /// `git fetch --no-tags <clone> +refs/heads/task/<slug>:refs/incoming/subagent/<slug>`,
+    /// `git fetch --no-tags <clone> +refs/heads/task/<slug>:refs/incoming/worker/<slug>`,
     /// then classifies the result exactly as spec's "Import semantics"
     /// describes: behind/caught-up is a no-op, diverged is a `history`
     /// rejection, a merge commit anywhere in the new range is a `history`
     /// rejection, and otherwise only the newest commit (the finish claim) is
     /// validated as a cumulative change from `hub_tip`.
-    fn import_subagent(&mut self, slug: &str, hub_tip: &str, clone_dir: &Path, report: &mut TickReport) -> Result<(), String> {
+    fn import_worker(
+        &mut self,
+        slug: &str,
+        hub_tip: &str,
+        clone_dir: &Path,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let clone_str = path_str(clone_dir)?;
-        let incoming_ref = format!("refs/incoming/subagent/{slug}");
+        let incoming_ref = format!("refs/incoming/worker/{slug}");
         let refspec = format!("+refs/heads/task/{slug}:{incoming_ref}");
-        if self.hub.run(&["fetch", "--no-tags", clone_str, &refspec]).is_err() {
-            return Ok(()); // the subagent hasn't pushed a commit yet, or the branch is missing
+        if self
+            .hub
+            .run(&["fetch", "--no-tags", clone_str, &refspec])
+            .is_err()
+        {
+            return Ok(()); // the worker hasn't pushed a commit yet, or the branch is missing
         }
         let incoming = match self.hub.rev_parse(&incoming_ref) {
             Some(sha) => sha,
@@ -1927,9 +3043,13 @@ impl<S: Sessions> Player<S> {
             return Ok(());
         }
 
-        let commits = self.hub.rev_list(&[&format!("{hub_tip}..{incoming}"), "--reverse"]);
+        let commits = self
+            .hub
+            .rev_list(&[&format!("{hub_tip}..{incoming}"), "--reverse"]);
         if commits.iter().any(|c| self.hub.parents(c).len() > 1) {
-            let msg = format!("history: task/{slug}'s clone contains a merge commit; only the player creates merges");
+            let msg = format!(
+                "history: task/{slug}'s clone contains a merge commit; only the player creates merges"
+            );
             self.reject_and_relay(slug, &incoming, Reason::History, msg, report)?;
             return Ok(());
         }
@@ -1943,31 +3063,53 @@ impl<S: Sessions> Player<S> {
 
     /// `candidate` (the newest commit fetched, `C` in spec's notation) is
     /// either a block marker, a stray empty commit, or a finish claim —
-    /// dispatched exactly as spec's subagent-import bullets describe.
-    fn validate_finish_claim(&mut self, slug: &str, hub_tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+    /// dispatched exactly as spec's worker-import bullets describe.
+    fn validate_finish_claim(
+        &mut self,
+        slug: &str,
+        hub_tip: &str,
+        candidate: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         if self.hub.is_empty_commit(candidate) {
             let subject = self.hub.commit_subject(candidate).unwrap_or_default();
             if subject.starts_with("block:") {
                 if !self.hub.diff_names(hub_tip, candidate).is_empty() {
-                    let msg = format!("history: task/{slug}'s block: commit isn't a clean reset to the hub tip — reset to hub, then block");
+                    let msg = format!(
+                        "history: task/{slug}'s block: commit isn't a clean reset to the hub tip — reset to hub, then block"
+                    );
                     return self.reject_and_relay(slug, candidate, Reason::History, msg, report);
                 }
                 let hub_ref = format!("refs/heads/task/{slug}");
-                self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
-                records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Block, Some(slug))?;
-                report.imported.push((hub_ref, candidate.to_string(), Transition::Block));
+                self.hub
+                    .update_ref_cas(&hub_ref, candidate, hub_tip)
+                    .map_err(|e| e.to_string())?;
+                records::record_import(
+                    &self.hub,
+                    candidate,
+                    Actor::Worker,
+                    Transition::Block,
+                    Some(slug),
+                )?;
+                report
+                    .imported
+                    .push((hub_ref, candidate.to_string(), Transition::Block));
                 return Ok(());
             }
             if subject.starts_with("contest:") {
                 return self.try_contest(slug, hub_tip, candidate, report);
             }
-            let msg = "suite: empty commit is neither a finish claim nor a block:/contest: marker".to_string();
+            let msg = "suite: empty commit is neither a finish claim nor a block:/contest: marker"
+                .to_string();
             return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
         }
 
         let pins_violations = records::check_pins(&self.hub, slug, candidate);
         if !pins_violations.is_empty() {
-            let msg = format!("pins: task/{slug}'s finish claim changed or removed pinned files (or added a tests.d/ suite fragment): {}", pins_violations.join(", "));
+            let msg = format!(
+                "pins: task/{slug}'s finish claim changed or removed pinned files (or added a tests.d/ suite fragment): {}",
+                pins_violations.join(", ")
+            );
             return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
         }
 
@@ -1996,10 +3138,20 @@ impl<S: Sessions> Player<S> {
         }
 
         let hub_ref = format!("refs/heads/task/{slug}");
-        self.hub.update_ref_cas(&hub_ref, candidate, hub_tip).map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, Actor::Subagent, Transition::Finish, Some(slug))?;
-        report.imported.push((hub_ref, candidate.to_string(), Transition::Finish));
-        let text = self.prompts()?.render("subagent.finish-accepted", &[]);
+        self.hub
+            .update_ref_cas(&hub_ref, candidate, hub_tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(
+            &self.hub,
+            candidate,
+            Actor::Worker,
+            Transition::Finish,
+            Some(slug),
+        )?;
+        report
+            .imported
+            .push((hub_ref, candidate.to_string(), Transition::Finish));
+        let text = self.prompts()?.render("worker.finish-accepted", &[]);
         self.sessions.send(slug, &text);
         Ok(())
     }
@@ -2018,35 +3170,73 @@ impl<S: Sessions> Player<S> {
     /// whose cause is in the product code isn't this kind of task (it takes
     /// the regular path), so touching anything else is refused. `None` for
     /// any other task, or when nothing strays.
-    fn flaky_scope_violations(&self, slug: &str, hub_tip: &str, candidate: &str) -> Option<Vec<String>> {
-        let cfg = records::task_config_at(&self.hub, hub_tip, slug).filter(|c| c.kind == TaskKind::FlakyTestFix)?;
-        let test_paths = self.hub.show_file(hub_tip, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).map(|c| c.test_paths).unwrap_or_default();
+    fn flaky_scope_violations(
+        &self,
+        slug: &str,
+        hub_tip: &str,
+        candidate: &str,
+    ) -> Option<Vec<String>> {
+        let cfg = records::task_config_at(&self.hub, hub_tip, slug)
+            .filter(|c| c.kind == TaskKind::FlakyTestFix)?;
+        let test_paths = self
+            .hub
+            .show_file(hub_tip, "tests.toml")
+            .and_then(|t| config::tests_config_from_str(&t).ok())
+            .map(|c| c.test_paths)
+            .unwrap_or_default();
         let stray: Vec<String> = self
             .hub
             .diff_names(hub_tip, candidate)
             .into_iter()
-            .filter(|(status, path)| !cfg.fix_paths.contains(path) && !(*status == 'A' && path_under_test_paths(path, &test_paths)))
+            .filter(|(status, path)| {
+                !cfg.fix_paths.contains(path)
+                    && !(*status == 'A' && path_under_test_paths(path, &test_paths))
+            })
             .map(|(_, path)| path)
             .collect();
         (!stray.is_empty()).then_some(stray)
     }
 
     /// A flaky-test-fix's finish, on top of the passing suite: the director's
-    /// task check passes (the player, not the subagent, decides the new test
+    /// task check passes (the player, not the worker, decides the new test
     /// is stable), no test but the replaced ones vanished since the pinned
     /// base, and every replacement exists. Always `Ok` for other tasks.
-    fn validate_flaky_finish(&self, slug: &str, hub_tip: &str, candidate: &str) -> Result<(), String> {
-        let Some(cfg) = records::task_config_at(&self.hub, hub_tip, slug).filter(|c| c.kind == TaskKind::FlakyTestFix) else { return Ok(()) };
+    fn validate_flaky_finish(
+        &self,
+        slug: &str,
+        hub_tip: &str,
+        candidate: &str,
+    ) -> Result<(), String> {
+        let Some(cfg) = records::task_config_at(&self.hub, hub_tip, slug)
+            .filter(|c| c.kind == TaskKind::FlakyTestFix)
+        else {
+            return Ok(());
+        };
 
         let check = self.runner.run_task_check(candidate, slug)?;
         if !check.pass {
             let passed = check.exits.iter().filter(|&&e| e == 0).count();
-            let tail = check.output_tail.as_deref().map(|t| format!("\n{t}")).unwrap_or_default();
-            return Err(format!("the stability check {:?} fails ({passed}/{} runs passed){tail}", check.name, check.runs));
+            let tail = check
+                .output_tail
+                .as_deref()
+                .map(|t| format!("\n{t}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "the stability check {:?} fails ({passed}/{} runs passed){tail}",
+                check.name, check.runs
+            ));
         }
 
-        let list_cmd = self.hub.show_file(candidate, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).and_then(|c| c.list_cmd).ok_or("tests.toml has no list_cmd")?;
-        let base = self.hub.rev_parse(&format!("refs/dashboard/pins/{slug}")).ok_or("no pins recorded")?;
+        let list_cmd = self
+            .hub
+            .show_file(candidate, "tests.toml")
+            .and_then(|t| config::tests_config_from_str(&t).ok())
+            .and_then(|c| c.list_cmd)
+            .ok_or("tests.toml has no list_cmd")?;
+        let base = self
+            .hub
+            .rev_parse(&format!("refs/dashboard/pins/{slug}"))
+            .ok_or("no pins recorded")?;
         let before = self.runner.run_list(&base, &list_cmd)?;
         let after = self.runner.run_list(candidate, &list_cmd)?;
         let problems = flaky::inventory_problems(&before, &after, &cfg.replace);
@@ -2057,28 +3247,45 @@ impl<S: Sessions> Player<S> {
         }
     }
 
-    /// Shared by every subagent-side rejection: records it, then re-derives
-    /// state and relays a recovery message to the subagent's session unless
+    /// Shared by every worker-side rejection: records it, then re-derives
+    /// state and relays a recovery message to the worker's session unless
     /// this very rejection just escalated the task (spec §10: "the player
     /// stops relaying"). Director rejections never go through here — only
     /// `reject` (no relay), per spec.
-    fn reject_and_relay(&mut self, slug: &str, candidate: &str, reason: Reason, msg: String, report: &mut TickReport) -> Result<(), String> {
-        let rec = records::record_rejection(&self.hub, slug, candidate, reason, Actor::Subagent, &msg)?;
+    fn reject_and_relay(
+        &mut self,
+        slug: &str,
+        candidate: &str,
+        reason: Reason,
+        msg: String,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
+        let rec =
+            records::record_rejection(&self.hub, slug, candidate, reason, Actor::Worker, &msg)?;
         report.rejected.push(rec);
 
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        let escalated = hub_state.tasks.iter().any(|t| t.slug == slug && t.status == Status::Escalated);
+        let escalated = hub_state
+            .tasks
+            .iter()
+            .any(|t| t.slug == slug && t.status == Status::Escalated);
         if escalated {
             return Ok(());
         }
 
         let prompts = self.prompts()?;
         let recovery = match reason {
-            Reason::History => "subagent.recovery-history",
-            _ => "subagent.recovery-other",
+            Reason::History => "worker.recovery-history",
+            _ => "worker.recovery-other",
         };
         let recovery = prompts.render(recovery, &[("slug", slug)]);
-        self.sessions.send(slug, &prompts.render("subagent.rejected", &[("message", &msg), ("recovery", &recovery)]));
+        self.sessions.send(
+            slug,
+            &prompts.render(
+                "worker.rejected",
+                &[("message", &msg), ("recovery", &recovery)],
+            ),
+        );
         Ok(())
     }
 
@@ -2091,7 +3298,13 @@ impl<S: Sessions> Player<S> {
         let candidates: Vec<(String, String)> = hub_state
             .tasks
             .iter()
-            .filter(|t| t.agent.is_some() && !matches!(t.status, Status::Accepted | Status::Retired | Status::Explored))
+            .filter(|t| {
+                t.agent.is_some()
+                    && !matches!(
+                        t.status,
+                        Status::Accepted | Status::Retired | Status::Explored
+                    )
+            })
             .map(|t| (t.slug.clone(), t.tip.clone()))
             .collect();
         for (slug, hub_tip) in candidates {
@@ -2103,40 +3316,92 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
-    /// `import_subagent`'s shape for a task agent's clone. One difference: the
+    /// `import_worker`'s shape for a task agent's clone. One difference: the
     /// hub's task branch can move under a commit the player hasn't imported
     /// yet (`main` merged into a ready task, a replan). That isn't the
     /// agent's doing, so it's asked to rebase, once per commit, with no
     /// strike. Rewriting a commit the player already imported from it is
     /// `history`, as for anyone.
-    fn import_task_agent(&mut self, slug: &str, hub_tip: &str, clone_dir: &Path, report: &mut TickReport) -> Result<(), String> {
+    fn import_task_agent(
+        &mut self,
+        slug: &str,
+        hub_tip: &str,
+        clone_dir: &Path,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let clone_str = path_str(clone_dir)?;
         let incoming_ref = format!("refs/incoming/agent/{slug}");
-        if self.hub.run(&["fetch", "--no-tags", clone_str, &format!("+refs/heads/agent/{slug}:{incoming_ref}")]).is_err() {
+        if self
+            .hub
+            .run(&[
+                "fetch",
+                "--no-tags",
+                clone_str,
+                &format!("+refs/heads/agent/{slug}:{incoming_ref}"),
+            ])
+            .is_err()
+        {
             return Ok(());
         }
-        let Some(incoming) = self.hub.rev_parse(&incoming_ref) else { return Ok(()) };
+        let Some(incoming) = self.hub.rev_parse(&incoming_ref) else {
+            return Ok(());
+        };
         if self.hub.is_ancestor(&incoming, hub_tip) || records::is_rejected(&self.hub, &incoming) {
             return Ok(());
         }
         if !self.hub.is_ancestor(hub_tip, &incoming) {
-            let base = self.hub.run(&["merge-base", hub_tip, &incoming]).unwrap_or_default();
+            let base = self
+                .hub
+                .run(&["merge-base", hub_tip, &incoming])
+                .unwrap_or_default();
             let rewrote_imported = base.is_empty()
-                || self.hub.rev_list(&[&format!("{base}..{hub_tip}")]).iter().any(|c| records::import_note(&self.hub, c).is_some_and(|n| n.actor == Actor::TaskAgent));
+                || self
+                    .hub
+                    .rev_list(&[&format!("{base}..{hub_tip}")])
+                    .iter()
+                    .any(|c| {
+                        records::import_note(&self.hub, c)
+                            .is_some_and(|n| n.actor == Actor::TaskAgent)
+                    });
             if rewrote_imported {
-                let msg = format!("history: agent/{slug} diverged from the hub: a commit the player imported from you was rewritten");
-                return self.reject_by(Actor::TaskAgent, slug, &incoming, Reason::History, msg, report);
+                let msg = format!(
+                    "history: agent/{slug} diverged from the hub: a commit the player imported from you was rewritten"
+                );
+                return self.reject_by(
+                    Actor::TaskAgent,
+                    slug,
+                    &incoming,
+                    Reason::History,
+                    msg,
+                    report,
+                );
             }
             if self.agent_rebase_told.get(slug) != Some(&incoming) {
-                let text = self.prompts()?.render("task-agent.rebase", &[("slug", slug)]);
+                let text = self
+                    .prompts()?
+                    .render("task-agent.rebase", &[("slug", slug)]);
                 self.sessions.send(&state::agent_key(slug), &text);
                 self.agent_rebase_told.insert(slug.to_string(), incoming);
             }
             return Ok(());
         }
-        if self.hub.rev_list(&[&format!("{hub_tip}..{incoming}")]).iter().any(|c| self.hub.parents(c).len() > 1) {
-            let msg = format!("history: agent/{slug} contains a merge commit; only the player creates merges");
-            return self.reject_by(Actor::TaskAgent, slug, &incoming, Reason::History, msg, report);
+        if self
+            .hub
+            .rev_list(&[&format!("{hub_tip}..{incoming}")])
+            .iter()
+            .any(|c| self.hub.parents(c).len() > 1)
+        {
+            let msg = format!(
+                "history: agent/{slug} contains a merge commit; only the player creates merges"
+            );
+            return self.reject_by(
+                Actor::TaskAgent,
+                slug,
+                &incoming,
+                Reason::History,
+                msg,
+                report,
+            );
         }
         self.try_agent_commit(slug, hub_tip, &incoming, report)
     }
@@ -2146,40 +3411,111 @@ impl<S: Sessions> Player<S> {
     /// send-back while it's tested. Either may touch only tests, the suite
     /// files and `tasks/<slug>/` (with `[check]` the only part of `task.toml`
     /// it may change), and it never commits a marker (spec §17).
-    fn try_agent_commit(&mut self, slug: &str, tip: &str, candidate: &str, report: &mut TickReport) -> Result<(), String> {
+    fn try_agent_commit(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        let Some(task) = hub_state.tasks.iter().find(|t| t.slug == slug) else { return Ok(()) };
+        let Some(task) = hub_state.tasks.iter().find(|t| t.slug == slug) else {
+            return Ok(());
+        };
         let status = task.status;
 
         if self.hub.is_empty_commit(candidate) {
-            let msg = format!("ownership: task/{slug}: a task agent never commits a marker; accept:/retire: are the director's, so recommend in your report instead");
-            return self.reject_by(Actor::TaskAgent, slug, candidate, Reason::Ownership, msg, report);
+            let msg = format!(
+                "ownership: task/{slug}: a task agent never commits a marker; accept:/retire: are the director's, so recommend in your report instead"
+            );
+            return self.reject_by(
+                Actor::TaskAgent,
+                slug,
+                candidate,
+                Reason::Ownership,
+                msg,
+                report,
+            );
         }
         let diffs = self.hub.diff_names(tip, candidate);
         if let Err(msg) = self.agent_paths_ok(slug, tip, candidate, &diffs) {
-            return self.reject_by(Actor::TaskAgent, slug, candidate, Reason::Ownership, msg, report);
+            return self.reject_by(
+                Actor::TaskAgent,
+                slug,
+                candidate,
+                Reason::Ownership,
+                msg,
+                report,
+            );
         }
 
         let step = match status {
             Status::Pending | Status::Ready | Status::Orphaned => {
-                if self.hub.blob_hash(candidate, &format!("tasks/{slug}/prompt.md")).is_none() {
-                    let msg = format!("ownership: task/{slug} isn't posted yet and this commit adds no tasks/{slug}/prompt.md: your only commit now is the post");
-                    return self.reject_by(Actor::TaskAgent, slug, candidate, Reason::Ownership, msg, report);
+                if self
+                    .hub
+                    .blob_hash(candidate, &format!("tasks/{slug}/prompt.md"))
+                    .is_none()
+                {
+                    let msg = format!(
+                        "ownership: task/{slug} isn't posted yet and this commit adds no tasks/{slug}/prompt.md: your only commit now is the post"
+                    );
+                    return self.reject_by(
+                        Actor::TaskAgent,
+                        slug,
+                        candidate,
+                        Reason::Ownership,
+                        msg,
+                        report,
+                    );
                 }
-                self.try_post(slug, tip, candidate, status, &hub_state, Actor::TaskAgent, report)?;
+                self.try_post(
+                    slug,
+                    tip,
+                    candidate,
+                    status,
+                    &hub_state,
+                    Actor::TaskAgent,
+                    report,
+                )?;
                 "post"
             }
             Status::Tested if task.spike.is_none() => {
-                self.try_send_back(slug, tip, candidate, &diffs, &hub_state, Actor::TaskAgent, report)?;
+                self.try_send_back(
+                    slug,
+                    tip,
+                    candidate,
+                    &diffs,
+                    &hub_state,
+                    Actor::TaskAgent,
+                    report,
+                )?;
                 "send-back"
             }
             Status::Contested => {
-                self.try_contest_reply(slug, tip, candidate, &diffs, &hub_state, Actor::TaskAgent, report)?;
+                self.try_contest_reply(
+                    slug,
+                    tip,
+                    candidate,
+                    &diffs,
+                    &hub_state,
+                    Actor::TaskAgent,
+                    report,
+                )?;
                 "contest reply"
             }
             other => {
-                let msg = format!("ownership: task/{slug} is {}: there is nothing for its task agent to commit now", other.as_str());
-                return self.reject_by(Actor::TaskAgent, slug, candidate, Reason::Ownership, msg, report);
+                let msg = format!(
+                    "ownership: task/{slug} is {}: there is nothing for its task agent to commit now",
+                    other.as_str()
+                );
+                return self.reject_by(
+                    Actor::TaskAgent,
+                    slug,
+                    candidate,
+                    Reason::Ownership,
+                    msg,
+                    report,
+                );
             }
         };
 
@@ -2190,10 +3526,14 @@ impl<S: Sessions> Player<S> {
                 "send-back" => "task-agent.imported-send-back",
                 _ => "task-agent.imported-reply",
             };
-            let text = self.prompts()?.render(template, &[("commit", short(candidate))]);
+            let text = self
+                .prompts()?
+                .render(template, &[("commit", short(candidate))]);
             self.sessions.send(&key, &text);
         } else if let Some((_, cause)) = report.escalated.iter().find(|(s, _)| s == slug) {
-            let text = self.prompts()?.render("task-agent.escalated", &[("slug", slug), ("cause", cause)]);
+            let text = self
+                .prompts()?
+                .render("task-agent.escalated", &[("slug", slug), ("cause", cause)]);
             self.sessions.send(&key, &text);
         }
         Ok(())
@@ -2203,24 +3543,46 @@ impl<S: Sessions> Player<S> {
     /// `test_paths` (read at `tip`, so a commit can't widen them for itself)
     /// and `tasks/<slug>/`; and in `task.toml` only `[check]`, the rest
     /// being the director's plan.
-    fn agent_paths_ok(&self, slug: &str, tip: &str, candidate: &str, diffs: &[(char, String)]) -> Result<(), String> {
-        let test_paths = self.hub.show_file(tip, "tests.toml").and_then(|t| config::tests_config_from_str(&t).ok()).map(|c| c.test_paths).unwrap_or_default();
+    fn agent_paths_ok(
+        &self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        diffs: &[(char, String)],
+    ) -> Result<(), String> {
+        let test_paths = self
+            .hub
+            .show_file(tip, "tests.toml")
+            .and_then(|t| config::tests_config_from_str(&t).ok())
+            .map(|c| c.test_paths)
+            .unwrap_or_default();
         let task_prefix = format!("tasks/{slug}/");
         for (_, path) in diffs {
-            if !(path == "tests.toml" || config::is_suite_fragment(path) || path.starts_with(&task_prefix) || path_under_test_paths(path, &test_paths)) {
-                return Err(format!("ownership: task/{slug}: a task agent writes tests, the prompt and reviews, never {path:?}: the code is the subagent's"));
+            if !(path == "tests.toml"
+                || config::is_suite_fragment(path)
+                || path.starts_with(&task_prefix)
+                || path_under_test_paths(path, &test_paths))
+            {
+                return Err(format!(
+                    "ownership: task/{slug}: a task agent writes tests, the prompt and reviews, never {path:?}: the code is the worker's"
+                ));
             }
         }
         let toml_path = format!("tasks/{slug}/task.toml");
         if diffs.iter().any(|(_, p)| *p == toml_path) {
             let plan = |c: &str| {
-                self.hub.show_file(c, &toml_path).and_then(|t| toml::from_str::<toml::Table>(&t).ok()).map(|mut t| {
-                    t.remove("check");
-                    t
-                })
+                self.hub
+                    .show_file(c, &toml_path)
+                    .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+                    .map(|mut t| {
+                        t.remove("check");
+                        t
+                    })
             };
             if plan(tip) != plan(candidate) {
-                return Err(format!("ownership: task/{slug}: in task.toml a task agent may only set [check]; the rest is the director's plan"));
+                return Err(format!(
+                    "ownership: task/{slug}: in task.toml a task agent may only set [check]; the rest is the director's plan"
+                ));
             }
         }
         Ok(())
@@ -2239,26 +3601,41 @@ impl<S: Sessions> Player<S> {
                 Status::Contested => Some(AgentStep::Contest),
                 _ => None,
             };
-            if let Some(step) = step.filter(|_| state::task_agent_managed(&hub_state.roadmap, &task.config)) {
+            if let Some(step) =
+                step.filter(|_| state::task_agent_managed(&hub_state.roadmap, &task.config))
+            {
                 if task.agent.is_none() {
                     self.launch_task_agent(task, step, &hub_state.roadmap, report)?;
-                } else if step != AgentStep::Post && records::agent_asked(&self.hub, &task.slug).as_deref() != Some(task.tip.as_str()) {
+                } else if step != AgentStep::Post
+                    && records::agent_asked(&self.hub, &task.slug).as_deref()
+                        != Some(task.tip.as_str())
+                {
                     records::set_agent_asked(&self.hub, &task.slug, &task.tip)?;
-                    let text = self.agent_step_text(&self.prompts()?, task, step, &hub_state.roadmap);
+                    let text =
+                        self.agent_step_text(&self.prompts()?, task, step, &hub_state.roadmap);
                     self.sessions.send(&state::agent_key(&task.slug), &text);
                 }
             }
-            if !matches!(task.status, Status::Accepted | Status::Retired | Status::Explored) {
+            if !matches!(
+                task.status,
+                Status::Accepted | Status::Retired | Status::Explored
+            ) {
                 self.collect_agent_report(&task.slug, &task.tip, report)?;
             }
         }
         Ok(())
     }
 
-    fn launch_task_agent(&mut self, task: &state::TaskState, step: AgentStep, roadmap: &RoadmapConfig, report: &mut TickReport) -> Result<(), String> {
+    fn launch_task_agent(
+        &mut self,
+        task: &state::TaskState,
+        step: AgentStep,
+        roadmap: &RoadmapConfig,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let slug = &task.slug;
         // Recorded first, so a launch that fails below is never retried
-        // every tick (as for subagents; `dashboard relaunch --agent`).
+        // every tick (as for workers; `dashboard relaunch --agent`).
         records::set_agent_launched(&self.hub, slug, &task.tip)?;
         if step != AgentStep::Post {
             records::set_agent_asked(&self.hub, slug, &task.tip)?;
@@ -2284,7 +3661,12 @@ impl<S: Sessions> Player<S> {
             report.errors.push(format!("task agent: task/{slug}: {e}"));
             return Ok(());
         }
-        match self.sessions.launch(&state::agent_key(slug), &dir, &roadmap.player.task_agent_cmd, &prompt_file) {
+        match self.sessions.launch(
+            &state::agent_key(slug),
+            &dir,
+            &roadmap.player.task_agent_cmd,
+            &prompt_file,
+        ) {
             Ok(()) => report.agents_launched.push(slug.clone()),
             Err(e) => report.errors.push(format!("task agent: task/{slug}: {e}")),
         }
@@ -2293,26 +3675,71 @@ impl<S: Sessions> Player<S> {
 
     /// The task agent's prompt: the player's preamble (its role and rules,
     /// the task, the report format), then the step it starts on.
-    fn write_agent_prompt(&self, task: &state::TaskState, step: AgentStep, roadmap: &RoadmapConfig, dir: &Path, prompt_file: &Path, relaunched: bool) -> Result<(), String> {
+    fn write_agent_prompt(
+        &self,
+        task: &state::TaskState,
+        step: AgentStep,
+        roadmap: &RoadmapConfig,
+        dir: &Path,
+        prompt_file: &Path,
+        relaunched: bool,
+    ) -> Result<(), String> {
         let prompts = self.prompts()?;
-        let report_file = Self::git_dir(dir)?.join("dashboard-report.md").display().to_string();
+        let report_file = Self::git_dir(dir)?
+            .join("dashboard-report.md")
+            .display()
+            .to_string();
         let slug = task.slug.as_str();
-        let toml = self.hub.show_file(&task.tip, &format!("tasks/{slug}/task.toml")).unwrap_or_default();
-        let goal = roadmap.phases.iter().find(|p| p.id == task.config.phase).and_then(|p| p.goal.clone()).unwrap_or_default();
-        let phase = if goal.is_empty() { task.config.phase.clone() } else { format!("{}: {goal}", task.config.phase) };
-        let brief = if task.config.brief.trim().is_empty() { "(none)" } else { task.config.brief.trim() };
+        let toml = self
+            .hub
+            .show_file(&task.tip, &format!("tasks/{slug}/task.toml"))
+            .unwrap_or_default();
+        let goal = roadmap
+            .phases
+            .iter()
+            .find(|p| p.id == task.config.phase)
+            .and_then(|p| p.goal.clone())
+            .unwrap_or_default();
+        let phase = if goal.is_empty() {
+            task.config.phase.clone()
+        } else {
+            format!("{}: {goal}", task.config.phase)
+        };
+        let brief = if task.config.brief.trim().is_empty() {
+            "(none)"
+        } else {
+            task.config.brief.trim()
+        };
         let preamble = prompts.render(
             "task-agent.preamble",
-            &[("slug", slug), ("project", &self.project), ("phase", &phase), ("task_toml", toml.trim()), ("brief", brief), ("report_file", &report_file)],
+            &[
+                ("slug", slug),
+                ("project", &self.project),
+                ("phase", &phase),
+                ("task_toml", toml.trim()),
+                ("brief", brief),
+                ("report_file", &report_file),
+            ],
         );
-        let relaunched = relaunched.then(|| prompts.render("task-agent.relaunched", &[("slug", slug)]));
-        let text = prompts.agent_launch(&preamble, relaunched.as_deref(), &self.agent_step_text(&prompts, task, step, roadmap));
+        let relaunched =
+            relaunched.then(|| prompts.render("task-agent.relaunched", &[("slug", slug)]));
+        let text = prompts.agent_launch(
+            &preamble,
+            relaunched.as_deref(),
+            &self.agent_step_text(&prompts, task, step, roadmap),
+        );
         std::fs::write(prompt_file, text).map_err(|e| format!("{}: {e}", prompt_file.display()))
     }
 
     /// What the task agent is asked to do now: the post, a review round, a
     /// contest reply, or nothing until the player pastes a step.
-    fn agent_step_text(&self, prompts: &Prompts, task: &state::TaskState, step: AgentStep, roadmap: &RoadmapConfig) -> String {
+    fn agent_step_text(
+        &self,
+        prompts: &Prompts,
+        task: &state::TaskState,
+        step: AgentStep,
+        roadmap: &RoadmapConfig,
+    ) -> String {
         let slug = task.slug.as_str();
         match step {
             AgentStep::Post => {
@@ -2326,7 +3753,10 @@ impl<S: Sessions> Player<S> {
             AgentStep::Review => {
                 let round = task.review_round + 1;
                 let max = roadmap.limits.max_review_rounds;
-                let base = self.hub.rev_parse(&format!("refs/dashboard/pins/{slug}")).unwrap_or_else(|| format!("origin/task/{slug}~1"));
+                let base = self
+                    .hub
+                    .rev_parse(&format!("refs/dashboard/pins/{slug}"))
+                    .unwrap_or_else(|| format!("origin/task/{slug}~1"));
                 let cap = if round > max {
                     prompts.render("task-agent.review-cap-over", &[("max", &max.to_string())])
                 } else if round == max {
@@ -2334,29 +3764,70 @@ impl<S: Sessions> Player<S> {
                 } else {
                     String::new()
                 };
-                prompts.render("task-agent.review", &[("round", &round.to_string()), ("slug", slug), ("tip", &task.tip), ("base", &base), ("cap", &cap)])
+                prompts.render(
+                    "task-agent.review",
+                    &[
+                        ("round", &round.to_string()),
+                        ("slug", slug),
+                        ("tip", &task.tip),
+                        ("base", &base),
+                        ("cap", &cap),
+                    ],
+                )
             }
             AgentStep::Contest => {
                 let n = task.contest_round + 1;
                 let reason = task.contest.clone().unwrap_or_default();
-                let remaining = roadmap.limits.max_contest_rounds.saturating_sub(n).to_string();
-                prompts.render("task-agent.contest", &[("n", &n.to_string()), ("slug", slug), ("reason", &reason), ("remaining", &remaining)])
+                let remaining = roadmap
+                    .limits
+                    .max_contest_rounds
+                    .saturating_sub(n)
+                    .to_string();
+                prompts.render(
+                    "task-agent.contest",
+                    &[
+                        ("n", &n.to_string()),
+                        ("slug", slug),
+                        ("reason", &reason),
+                        ("remaining", &remaining),
+                    ],
+                )
             }
-            AgentStep::Wait => prompts.render("task-agent.wait", &[("slug", slug), ("status", task.status.as_str())]),
+            AgentStep::Wait => prompts.render(
+                "task-agent.wait",
+                &[("slug", slug), ("status", task.status.as_str())],
+            ),
         }
     }
 
     /// Reads and removes the report a task agent left in its clone's git
     /// directory, noting it on the task tip (spec §17) and reporting it.
-    fn collect_agent_report(&mut self, slug: &str, tip: &str, report: &mut TickReport) -> Result<(), String> {
+    fn collect_agent_report(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
         let dir = paths::agent_clone(&self.director, slug);
         if !dir.exists() {
             return Ok(());
         }
-        let Ok(file) = Self::git_dir(&dir).map(|d| d.join("dashboard-report.md")) else { return Ok(()) };
-        let Ok(text) = std::fs::read_to_string(&file) else { return Ok(()) };
+        let Ok(file) = Self::git_dir(&dir).map(|d| d.join("dashboard-report.md")) else {
+            return Ok(());
+        };
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            return Ok(());
+        };
         let _ = std::fs::remove_file(&file);
-        let rec = records::record_agent_report(&self.hub, tip, records::AgentReport { verdict: report_verdict(&text), text: text.trim().to_string(), at: 0 })?;
+        let rec = records::record_agent_report(
+            &self.hub,
+            tip,
+            records::AgentReport {
+                verdict: report_verdict(&text),
+                text: text.trim().to_string(),
+                at: 0,
+            },
+        )?;
         report.agent_reports.push((slug.to_string(), rec));
         Ok(())
     }
@@ -2365,23 +3836,42 @@ impl<S: Sessions> Player<S> {
     /// existing clone, with a fresh prompt for where the task is now.
     pub fn relaunch_agent(&mut self, slug: &str) -> Result<(), String> {
         if !records::agent_launched(&self.hub, slug) {
-            return Err(format!("relaunch: task/{slug} has no task agent — one is launched automatically once the task is ready"));
+            return Err(format!(
+                "relaunch: task/{slug} has no task agent — one is launched automatically once the task is ready"
+            ));
         }
         let key = state::agent_key(slug);
         if self.sessions.alive(&key) {
-            return Err(format!("relaunch: task/{slug}'s task agent is already alive"));
+            return Err(format!(
+                "relaunch: task/{slug}'s task agent is already alive"
+            ));
         }
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        let task = hub_state.tasks.iter().find(|t| t.slug == slug).ok_or_else(|| format!("relaunch: no task {slug}"))?;
-        if matches!(task.status, Status::Accepted | Status::Retired | Status::Explored) {
-            return Err(format!("relaunch: task/{slug} is {} — its task agent is done", task.status.as_str()));
+        let task = hub_state
+            .tasks
+            .iter()
+            .find(|t| t.slug == slug)
+            .ok_or_else(|| format!("relaunch: no task {slug}"))?;
+        if matches!(
+            task.status,
+            Status::Accepted | Status::Retired | Status::Explored
+        ) {
+            return Err(format!(
+                "relaunch: task/{slug} is {} — its task agent is done",
+                task.status.as_str()
+            ));
         }
         if !hub_state.roadmap.player.task_agents_enabled() {
-            return Err("relaunch: task agents are off (`[player] task_agent_cmd` is empty)".to_string());
+            return Err(
+                "relaunch: task agents are off (`[player] task_agent_cmd` is empty)".to_string(),
+            );
         }
         let dir = paths::agent_clone(&self.director, slug);
         if !dir.exists() {
-            return Err(format!("relaunch: task/{slug}'s task agent clone {} is missing", dir.display()));
+            return Err(format!(
+                "relaunch: task/{slug}'s task agent clone {} is missing",
+                dir.display()
+            ));
         }
         let step = match task.status {
             Status::Pending | Status::Ready | Status::Orphaned => AgentStep::Post,
@@ -2394,7 +3884,12 @@ impl<S: Sessions> Player<S> {
         if step != AgentStep::Post && step != AgentStep::Wait {
             records::set_agent_asked(&self.hub, slug, &task.tip)?;
         }
-        self.sessions.launch(&key, &dir, &hub_state.roadmap.player.task_agent_cmd, &prompt_file)
+        self.sessions.launch(
+            &key,
+            &dir,
+            &hub_state.roadmap.player.task_agent_cmd,
+            &prompt_file,
+        )
     }
 
     /// Pastes the director's `question` into `slug`'s task agent session
@@ -2405,11 +3900,17 @@ impl<S: Sessions> Player<S> {
         }
         let key = state::agent_key(slug);
         if !self.sessions.alive(&key) {
-            return Err(format!("ask: task/{slug}'s task agent is dead — `dashboard relaunch {slug} --agent` first"));
+            return Err(format!(
+                "ask: task/{slug}'s task agent is dead — `dashboard relaunch {slug} --agent` first"
+            ));
         }
-        let report_file = Self::git_dir(&paths::agent_clone(&self.director, slug))?.join("dashboard-report.md");
+        let report_file =
+            Self::git_dir(&paths::agent_clone(&self.director, slug))?.join("dashboard-report.md");
         let file = report_file.display().to_string();
-        let text = self.prompts()?.render("task-agent.question", &[("question", question), ("report_file", &file)]);
+        let text = self.prompts()?.render(
+            "task-agent.question",
+            &[("question", question), ("report_file", &file)],
+        );
         self.sessions.send(&key, &text);
         Ok(())
     }
@@ -2424,20 +3925,32 @@ impl<S: Sessions> Player<S> {
     /// lands on `main` afterwards, or the director's post commit can't
     /// update pinned tests that only exist on the newer `main`.
     fn unblock_merges(&mut self, report: &mut TickReport) -> Result<(), String> {
-        let main_tip = self.hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
+        let main_tip = self
+            .hub
+            .rev_parse("refs/heads/main")
+            .ok_or_else(|| "hub has no main".to_string())?;
         let accepted = records::accepted_tasks(&self.hub, &main_tip);
 
         for (refname, tip) in self.hub.for_each_ref("refs/heads/task/*") {
-            let Some(slug) = refname.strip_prefix("refs/heads/task/") else { continue };
+            let Some(slug) = refname.strip_prefix("refs/heads/task/") else {
+                continue;
+            };
 
-            if !matches!(records::import_note(&self.hub, &tip).map(|n| n.transition), None | Some(Transition::Plan) | Some(Transition::Replan) | Some(Transition::MergeUnblock)) {
+            if !matches!(
+                records::import_note(&self.hub, &tip).map(|n| n.transition),
+                None | Some(Transition::Plan)
+                    | Some(Transition::Replan)
+                    | Some(Transition::MergeUnblock)
+            ) {
                 continue;
             }
 
             if accepted.contains_key(slug) {
                 continue;
             }
-            let Some(cfg) = self.task_config_at(&accepted, slug) else { continue };
+            let Some(cfg) = self.task_config_at(&accepted, slug) else {
+                continue;
+            };
             if !cfg.depends_on.iter().all(|d| accepted.contains_key(d)) {
                 continue;
             }
@@ -2446,19 +3959,41 @@ impl<S: Sessions> Player<S> {
             }
 
             match self.hub.merge_tree_write(&tip, &main_tip) {
-                Ok(Some(tree)) => match self.hub.commit_tree(&tree, &[&tip, &main_tip], &format!("Merge main into task/{slug}")) {
+                Ok(Some(tree)) => match self.hub.commit_tree(
+                    &tree,
+                    &[&tip, &main_tip],
+                    &format!("Merge main into task/{slug}"),
+                ) {
                     Ok(merge_sha) => match self.hub.update_ref_cas(&refname, &merge_sha, &tip) {
                         Ok(()) => {
-                            records::record_import(&self.hub, &merge_sha, Actor::Player, Transition::MergeUnblock, Some(slug))?;
-                            report.imported.push((refname.clone(), merge_sha, Transition::MergeUnblock));
+                            records::record_import(
+                                &self.hub,
+                                &merge_sha,
+                                Actor::Player,
+                                Transition::MergeUnblock,
+                                Some(slug),
+                            )?;
+                            report.imported.push((
+                                refname.clone(),
+                                merge_sha,
+                                Transition::MergeUnblock,
+                            ));
                             report.merges.push(format!("task/{slug}: merged main"));
                         }
-                        Err(e) => report.merges.push(format!("task/{slug}: ref moved during merge, skipped this tick ({e})")),
+                        Err(e) => report.merges.push(format!(
+                            "task/{slug}: ref moved during merge, skipped this tick ({e})"
+                        )),
                     },
-                    Err(e) => report.merges.push(format!("task/{slug}: commit-tree failed: {e}")),
+                    Err(e) => report
+                        .merges
+                        .push(format!("task/{slug}: commit-tree failed: {e}")),
                 },
-                Ok(None) => report.merges.push(format!("task/{slug}: merge conflict with main, skipped")),
-                Err(e) => report.merges.push(format!("task/{slug}: merge-tree failed: {e}")),
+                Ok(None) => report
+                    .merges
+                    .push(format!("task/{slug}: merge conflict with main, skipped")),
+                Err(e) => report
+                    .merges
+                    .push(format!("task/{slug}: merge-tree failed: {e}")),
             }
         }
         Ok(())
@@ -2563,14 +4098,23 @@ fn is_review_filename(path: &str) -> bool {
 }
 
 fn path_str(p: &Path) -> Result<&str, String> {
-    p.to_str().ok_or_else(|| format!("{} is not valid UTF-8", p.display()))
+    p.to_str()
+        .ok_or_else(|| format!("{} is not valid UTF-8", p.display()))
 }
 
-/// The pinned files as a list for a subagent's prompt.
+/// The pinned files as a list for a worker's prompt.
 fn pinned_block<'a>(paths: impl Iterator<Item = &'a str>) -> String {
     let mut sorted: Vec<&str> = paths.collect();
     sorted.sort_unstable();
-    if sorted.is_empty() { "  (no pinned files recorded)".to_string() } else { sorted.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n") }
+    if sorted.is_empty() {
+        "  (no pinned files recorded)".to_string()
+    } else {
+        sorted
+            .iter()
+            .map(|p| format!("  - {p}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// What a task agent is asked to do (spec §17).
@@ -2578,19 +4122,29 @@ fn pinned_block<'a>(paths: impl Iterator<Item = &'a str>) -> String {
 enum AgentStep {
     Post,
     Review,
-    /// Reply to the subagent's contest (spec §18).
+    /// Reply to the worker's contest (spec §18).
     Contest,
-    /// Nothing pending (a relaunch while the subagent works).
+    /// Nothing pending (a relaunch while the worker works).
     Wait,
 }
 
 /// The `verdict:` of a task agent's report, or `unknown`.
 fn report_verdict(text: &str) -> String {
-    const KNOWN: [&str; 6] = ["posted", "accept", "sent-back", "replied", "unsure", "answer"];
+    const KNOWN: [&str; 6] = [
+        "posted",
+        "accept",
+        "sent-back",
+        "replied",
+        "unsure",
+        "answer",
+    ];
     text.lines()
         .find_map(|l| l.trim().strip_prefix("verdict:"))
         .and_then(|v| v.split_whitespace().next())
-        .map(|v| v.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-').to_ascii_lowercase())
+        .map(|v| {
+            v.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .to_ascii_lowercase()
+        })
         .filter(|v| KNOWN.contains(&v.as_str()))
         .unwrap_or_else(|| "unknown".to_string())
 }
@@ -2639,7 +4193,10 @@ mod tests {
 
     #[test]
     fn report_verdict_reads_the_verdict_line() {
-        assert_eq!(report_verdict("slug: s\nverdict: accept\nwhy: ok"), "accept");
+        assert_eq!(
+            report_verdict("slug: s\nverdict: accept\nwhy: ok"),
+            "accept"
+        );
         assert_eq!(report_verdict("verdict: Sent-Back (r1)"), "sent-back");
         assert_eq!(report_verdict("  verdict: `unsure`"), "unsure");
         assert_eq!(report_verdict("verdict: maybe"), "unknown");

@@ -14,7 +14,10 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // --------------------------------------------------------------------------
@@ -29,9 +32,9 @@ pub enum EventKind {
     Escalated,
     /// An accept the player couldn't land: merging `main` conflicts.
     Conflict,
-    /// An accept whose merge with `main` failed the suite: back to the subagent.
+    /// An accept whose merge with `main` failed the suite: back to the worker.
     MergeFailed,
-    /// A subagent contested a test and task agents are off: the director replies.
+    /// A worker contested a test and task agents are off: the director replies.
     Contested,
     Ready,
     Accepted,
@@ -86,7 +89,13 @@ impl Event {
     /// multi-line rejection message).
     pub fn human(&self) -> String {
         let slug = self.slug.as_deref().unwrap_or("_main");
-        let header = format!("#{} {}  {} — {}", self.seq, self.kind.as_str(), slug, self.message);
+        let header = format!(
+            "#{} {}  {} — {}",
+            self.seq,
+            self.kind.as_str(),
+            slug,
+            self.message
+        );
         match self.hint() {
             Some(hint) if header.contains('\n') => format!("{header}\n{hint}"),
             Some(hint) => format!("{header}; {hint}"),
@@ -97,20 +106,32 @@ impl Event {
     fn hint(&self) -> Option<String> {
         let slug = self.slug.as_deref().unwrap_or("<slug>");
         match self.kind {
-            EventKind::Tested => Some(format!("review it: git fetch hub && git log hub/task/{slug}, then send back or accept")),
-            EventKind::Escalated => Some("discuss with the operator, then retire and replan".to_string()),
+            EventKind::Tested => Some(format!(
+                "review it: git fetch hub && git log hub/task/{slug}, then send back or accept"
+            )),
+            EventKind::Escalated => {
+                Some("discuss with the operator, then retire and replan".to_string())
+            }
             EventKind::Conflict => Some(format!(
                 "git fetch hub && git checkout task/{slug} && git merge --ff-only hub/task/{slug}, then git merge <that main commit>, resolve only those paths, commit"
             )),
-            EventKind::MergeFailed => Some("the subagent fixes it; wait for tested, then review and accept again".to_string()),
+            EventKind::MergeFailed => Some(
+                "the worker fixes it; wait for tested, then review and accept again".to_string(),
+            ),
             EventKind::Contested => Some(format!(
                 "reply on task/{slug} in one commit adding tasks/{slug}/contests/c<N>.md (plus fixed tests if it's right), or retire"
             )),
-            EventKind::Ready => Some(format!("git fetch hub && git merge (or checkout) hub/task/{slug} before posting")),
-            EventKind::DirectorRejected => Some("fetch hub and fix with a new commit / reset".to_string()),
-            EventKind::Accepted => Some("on main: git fetch hub; git merge --ff-only hub/main".to_string()),
+            EventKind::Ready => Some(format!(
+                "git fetch hub && git merge (or checkout) hub/task/{slug} before posting"
+            )),
+            EventKind::DirectorRejected => {
+                Some("fetch hub and fix with a new commit / reset".to_string())
+            }
+            EventKind::Accepted => {
+                Some("on main: git fetch hub; git merge --ff-only hub/main".to_string())
+            }
             EventKind::Explored => None, // informational: the spike is concluded
-            EventKind::Retired => None, // informational
+            EventKind::Retired => None,  // informational
             EventKind::SessionDied => Some(format!("dashboard relaunch {slug} or retire")),
             EventKind::AgentLaunched => None, // informational: the task agent posts or reviews it
             EventKind::AgentReport => Some(format!(
@@ -130,17 +151,33 @@ impl Event {
 /// 1), as a single write in append mode. `read_all` (which tolerates
 /// malformed lines) is used to find the last seq, so a corrupt earlier line
 /// never wedges numbering — it's simply skipped, same as any other reader.
-pub fn append(home: &Home, kind: EventKind, slug: Option<&str>, message: &str) -> Result<Event, String> {
+pub fn append(
+    home: &Home,
+    kind: EventKind,
+    slug: Option<&str>,
+    message: &str,
+) -> Result<Event, String> {
     let seq = read_all(home).last().map(|e| e.seq).unwrap_or(0) + 1;
-    let event = Event { seq, at: now_unix(), kind, slug: slug.map(|s| s.to_string()), message: message.to_string() };
+    let event = Event {
+        seq,
+        at: now_unix(),
+        kind,
+        slug: slug.map(|s| s.to_string()),
+        message: message.to_string(),
+    };
     let json = serde_json::to_string(&event).map_err(|e| e.to_string())?;
 
     let path = home.events();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    file.write_all(format!("{json}\n").as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    file.write_all(format!("{json}\n").as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(event)
 }
 
@@ -152,7 +189,9 @@ pub fn read_all(home: &Home) -> Vec<Event> {
         Ok(t) => t,
         Err(_) => return Vec::new(),
     };
-    text.lines().filter_map(|line| serde_json::from_str::<Event>(line).ok()).collect()
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Event>(line).ok())
+        .collect()
 }
 
 // --------------------------------------------------------------------------
@@ -162,7 +201,10 @@ pub fn read_all(home: &Home) -> Vec<Event> {
 /// The director's last-read seq, defaulting to 0 (nothing read yet) when the
 /// cursor file is missing or unparsable.
 pub fn read_cursor(home: &Home) -> u64 {
-    fs::read_to_string(home.director_cursor()).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+    fs::read_to_string(home.director_cursor())
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 pub fn write_cursor(home: &Home, seq: u64) -> Result<(), String> {
@@ -188,7 +230,11 @@ pub fn write_heartbeat(home: &Home) -> Result<(), String> {
 }
 
 fn read_heartbeat(home: &Home) -> Option<u64> {
-    fs::read_to_string(home.heartbeat()).ok()?.trim().parse().ok()
+    fs::read_to_string(home.heartbeat())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// True when the heartbeat is missing or older than 30s — `dashboard wait`'s
@@ -245,7 +291,10 @@ mod tests {
         file.write_all(b"not json at all\n").unwrap();
         drop(file);
         let e3 = append(&home, EventKind::Retired, Some("a"), "good two").unwrap();
-        assert_eq!(e3.seq, 2, "seq numbering skips the malformed line, continuing from the last valid event");
+        assert_eq!(
+            e3.seq, 2,
+            "seq numbering skips the malformed line, continuing from the last valid event"
+        );
 
         let all = read_all(&home);
         assert_eq!(all.len(), 2);
@@ -271,12 +320,27 @@ mod tests {
 
     #[test]
     fn human_form_includes_seq_kind_slug_message_and_hint() {
-        let e = Event { seq: 12, at: 1, kind: EventKind::Tested, slug: Some("add-login".to_string()), message: "finish accepted".to_string() };
+        let e = Event {
+            seq: 12,
+            at: 1,
+            kind: EventKind::Tested,
+            slug: Some("add-login".to_string()),
+            message: "finish accepted".to_string(),
+        };
         let human = e.human();
-        assert!(human.starts_with("#12 tested  add-login — finish accepted"), "{human}");
+        assert!(
+            human.starts_with("#12 tested  add-login — finish accepted"),
+            "{human}"
+        );
         assert!(human.contains("git fetch hub"), "{human}");
 
-        let retired = Event { seq: 1, at: 1, kind: EventKind::Retired, slug: Some("dead".to_string()), message: "didn't pan out".to_string() };
+        let retired = Event {
+            seq: 1,
+            at: 1,
+            kind: EventKind::Retired,
+            slug: Some("dead".to_string()),
+            message: "didn't pan out".to_string(),
+        };
         assert_eq!(retired.human(), "#1 retired  dead — didn't pan out");
     }
 }

@@ -61,7 +61,11 @@ pub(crate) fn center(s: &str, width: usize) -> String {
         return s.to_string();
     }
     let marg = width - len;
-    let extra = if marg % 2 == 1 && width % 2 == 1 { 1 } else { 0 };
+    let extra = if marg % 2 == 1 && width % 2 == 1 {
+        1
+    } else {
+        0
+    };
     let left = marg / 2 + extra;
     let right = marg - left;
     format!("{}{}{}", " ".repeat(left), s, " ".repeat(right))
@@ -90,7 +94,12 @@ pub(crate) mod term {
     }
 
     fn winsize() -> Option<Winsize> {
-        let mut ws = Winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        let mut ws = Winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         let fd = std::io::stdout().as_raw_fd();
         let ret = unsafe { ioctl(fd, TIOCGWINSZ, &mut ws) };
         (ret == 0).then_some(ws)
@@ -118,7 +127,12 @@ pub(crate) mod term {
 
 pub fn detect_width(explicit: Option<u32>) -> usize {
     let width = explicit
-        .or_else(|| std::env::var("COLUMNS").ok().and_then(|v| v.parse::<u32>().ok()).filter(|&v| v > 0))
+        .or_else(|| {
+            std::env::var("COLUMNS")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+        })
         .or_else(term::columns)
         .unwrap_or(96);
     width.clamp(60, 140) as usize
@@ -128,6 +142,11 @@ pub fn detect_width(explicit: Option<u32>) -> usize {
 /// `dashboard watch` tracks resizes even when a stale `LINES` is exported.
 pub fn detect_height() -> Option<usize> {
     term::rows()
-        .or_else(|| std::env::var("LINES").ok().and_then(|v| v.parse::<u32>().ok()).filter(|&v| v > 0))
+        .or_else(|| {
+            std::env::var("LINES")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+        })
         .map(|r| r as usize)
 }

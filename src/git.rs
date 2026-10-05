@@ -17,7 +17,13 @@ pub struct GitError {
 
 impl std::fmt::Display for GitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "git {} failed (exit {:?}): {}", self.args.join(" "), self.code, self.stderr.trim())
+        write!(
+            f,
+            "git {} failed (exit {:?}): {}",
+            self.args.join(" "),
+            self.code,
+            self.stderr.trim()
+        )
     }
 }
 
@@ -33,12 +39,20 @@ impl Git {
     }
 
     fn err(args: &[&str], code: Option<i32>, stderr: impl Into<String>) -> GitError {
-        GitError { args: args.iter().map(|s| s.to_string()).collect(), code, stderr: stderr.into() }
+        GitError {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            code,
+            stderr: stderr.into(),
+        }
     }
 
     /// Runs `git <args>` and returns stdout with the trailing newline trimmed.
     pub fn run(&self, args: &[&str]) -> Result<String, GitError> {
-        let output = Command::new("git").args(args).current_dir(&self.dir).output().map_err(|e| Self::err(args, None, e.to_string()))?;
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&self.dir)
+            .output()
+            .map_err(|e| Self::err(args, None, e.to_string()))?;
         if output.status.success() {
             let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
             if s.ends_with('\n') {
@@ -46,13 +60,22 @@ impl Git {
             }
             Ok(s)
         } else {
-            Err(Self::err(args, output.status.code(), String::from_utf8_lossy(&output.stderr)))
+            Err(Self::err(
+                args,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr),
+            ))
         }
     }
 
     /// Runs `git <args>`, returning only whether it exited 0.
     pub fn run_ok(&self, args: &[&str]) -> bool {
-        Command::new("git").args(args).current_dir(&self.dir).output().map(|o| o.status.success()).unwrap_or(false)
+        Command::new("git")
+            .args(args)
+            .current_dir(&self.dir)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 
     /// Runs `git <args>` feeding `input` on stdin.
@@ -65,8 +88,15 @@ impl Git {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| Self::err(args, None, e.to_string()))?;
-        child.stdin.take().expect("piped stdin").write_all(input.as_bytes()).map_err(|e| Self::err(args, None, e.to_string()))?;
-        let output = child.wait_with_output().map_err(|e| Self::err(args, None, e.to_string()))?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(input.as_bytes())
+            .map_err(|e| Self::err(args, None, e.to_string()))?;
+        let output = child
+            .wait_with_output()
+            .map_err(|e| Self::err(args, None, e.to_string()))?;
         if output.status.success() {
             let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
             if s.ends_with('\n') {
@@ -74,14 +104,20 @@ impl Git {
             }
             Ok(s)
         } else {
-            Err(Self::err(args, output.status.code(), String::from_utf8_lossy(&output.stderr)))
+            Err(Self::err(
+                args,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr),
+            ))
         }
     }
 
     // ---- helpers ----
 
     pub fn rev_parse(&self, rev: &str) -> Option<String> {
-        self.run(&["rev-parse", "--verify", "-q", rev]).ok().filter(|s| !s.is_empty())
+        self.run(&["rev-parse", "--verify", "-q", rev])
+            .ok()
+            .filter(|s| !s.is_empty())
     }
 
     pub fn is_ancestor(&self, a: &str, b: &str) -> bool {
@@ -136,13 +172,19 @@ impl Git {
     }
 
     pub fn blob_hash(&self, rev: &str, path: &str) -> Option<String> {
-        self.run(&["rev-parse", "--verify", "-q", &format!("{rev}:{path}")]).ok().filter(|s| !s.is_empty())
+        self.run(&["rev-parse", "--verify", "-q", &format!("{rev}:{path}")])
+            .ok()
+            .filter(|s| !s.is_empty())
     }
 
     /// Recursive, name-only listing of files under `path_prefix` at `rev`.
     pub fn ls_tree_files(&self, rev: &str, path_prefix: &str) -> Vec<String> {
         match self.run(&["ls-tree", "-r", "--name-only", rev, "--", path_prefix]) {
-            Ok(out) => out.lines().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
+            Ok(out) => out
+                .lines()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -167,14 +209,22 @@ impl Git {
         let mut args = vec!["rev-list"];
         args.extend_from_slice(range_args);
         match self.run(&args) {
-            Ok(out) => out.lines().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
+            Ok(out) => out
+                .lines()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
 
     pub fn parents(&self, sha: &str) -> Vec<String> {
         match self.run(&["rev-list", "--parents", "-n", "1", sha]) {
-            Ok(out) => out.split_whitespace().skip(1).map(|s| s.to_string()).collect(),
+            Ok(out) => out
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -209,13 +259,22 @@ impl Git {
 
     /// Force-overwrites the note on `sha` under `notes_ref` with `content`.
     pub fn notes_add(&self, notes_ref: &str, sha: &str, content: &str) -> Result<(), GitError> {
-        self.run_with_stdin(&["notes", "--ref", notes_ref, "add", "-f", "-F", "-", sha], content).map(|_| ())
+        self.run_with_stdin(
+            &["notes", "--ref", notes_ref, "add", "-f", "-F", "-", sha],
+            content,
+        )
+        .map(|_| ())
     }
 
     /// Runs `git <args>` with extra environment variables set (e.g. explicit
     /// author/committer identity for the player's own commits, spec.md §11).
     pub fn run_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, GitError> {
-        let output = Command::new("git").args(args).current_dir(&self.dir).envs(envs.iter().copied()).output().map_err(|e| Self::err(args, None, e.to_string()))?;
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&self.dir)
+            .envs(envs.iter().copied())
+            .output()
+            .map_err(|e| Self::err(args, None, e.to_string()))?;
         if output.status.success() {
             let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
             if s.ends_with('\n') {
@@ -223,7 +282,11 @@ impl Git {
             }
             Ok(s)
         } else {
-            Err(Self::err(args, output.status.code(), String::from_utf8_lossy(&output.stderr)))
+            Err(Self::err(
+                args,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr),
+            ))
         }
     }
 
@@ -243,23 +306,50 @@ impl Git {
     /// conflicts: the merged tree (conflict markers written into conflicted
     /// files) plus the conflicted paths, empty on a clean merge. A director's
     /// conflict resolution (spec §11) may differ from this tree only on those paths.
-    pub fn merge_tree_conflicts(&self, ours: &str, theirs: &str) -> Result<(String, Vec<String>), GitError> {
-        let args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs];
-        let output = Command::new("git").args(args).current_dir(&self.dir).output().map_err(|e| Self::err(&args, None, e.to_string()))?;
+    pub fn merge_tree_conflicts(
+        &self,
+        ours: &str,
+        theirs: &str,
+    ) -> Result<(String, Vec<String>), GitError> {
+        let args = [
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            ours,
+            theirs,
+        ];
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&self.dir)
+            .output()
+            .map_err(|e| Self::err(&args, None, e.to_string()))?;
         if !matches!(output.status.code(), Some(0 | 1)) {
-            return Err(Self::err(&args, output.status.code(), String::from_utf8_lossy(&output.stderr)));
+            return Err(Self::err(
+                &args,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr),
+            ));
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut lines = stdout.lines();
         let tree = lines.next().unwrap_or("").to_string();
-        let conflicts = lines.take_while(|l| !l.is_empty()).map(|l| l.to_string()).collect();
+        let conflicts = lines
+            .take_while(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
         Ok((tree, conflicts))
     }
 
     /// `git commit-tree <tree> -p <parent> ... -m <message>`, with the
     /// player's own author/committer identity forced via env vars so it
     /// never depends on the user's global git config (spec.md §11).
-    pub fn commit_tree(&self, tree: &str, parents: &[&str], message: &str) -> Result<String, GitError> {
+    pub fn commit_tree(
+        &self,
+        tree: &str,
+        parents: &[&str],
+        message: &str,
+    ) -> Result<String, GitError> {
         let mut args: Vec<&str> = vec!["commit-tree", tree];
         for p in parents {
             args.push("-p");
@@ -279,7 +369,9 @@ impl Git {
     }
 
     pub fn config_get(&self, key: &str) -> Option<String> {
-        self.run(&["config", "--get", key]).ok().filter(|s| !s.is_empty())
+        self.run(&["config", "--get", key])
+            .ok()
+            .filter(|s| !s.is_empty())
     }
 
     pub fn config_set(&self, key: &str, val: &str) -> Result<(), GitError> {
@@ -302,7 +394,8 @@ mod tests {
         let git = Git::new(dir.path());
         git.run(&["init", "-q", "-b", "main"]).unwrap();
         git.run(&["config", "user.name", "Test User"]).unwrap();
-        git.run(&["config", "user.email", "test@example.com"]).unwrap();
+        git.run(&["config", "user.email", "test@example.com"])
+            .unwrap();
         (dir, git)
     }
 
@@ -342,7 +435,10 @@ mod tests {
         let second = git.rev_parse("HEAD").unwrap();
         let mut names = git.diff_names(&first, &second);
         names.sort();
-        assert_eq!(names, vec![('A', "b.txt".to_string()), ('D', "a.txt".to_string())]);
+        assert_eq!(
+            names,
+            vec![('A', "b.txt".to_string()), ('D', "a.txt".to_string())]
+        );
     }
 
     #[test]
@@ -351,7 +447,8 @@ mod tests {
         let first = commit_file(&dir, &git, "a.txt", "1\n", "first");
         assert!(!git.is_empty_commit(&first));
 
-        git.run(&["commit", "-q", "--allow-empty", "-m", "accept: marker"]).unwrap();
+        git.run(&["commit", "-q", "--allow-empty", "-m", "accept: marker"])
+            .unwrap();
         let marker = git.rev_parse("HEAD").unwrap();
         assert!(git.is_empty_commit(&marker));
     }
@@ -362,8 +459,10 @@ mod tests {
         let git = Git::new(dir.path());
         git.run(&["init", "-q", "-b", "main"]).unwrap();
         git.run(&["config", "user.name", "Test User"]).unwrap();
-        git.run(&["config", "user.email", "test@example.com"]).unwrap();
-        git.run(&["commit", "-q", "--allow-empty", "-m", "root"]).unwrap();
+        git.run(&["config", "user.email", "test@example.com"])
+            .unwrap();
+        git.run(&["commit", "-q", "--allow-empty", "-m", "root"])
+            .unwrap();
         let root = git.rev_parse("HEAD").unwrap();
         assert!(git.is_empty_commit(&root));
     }
@@ -373,11 +472,19 @@ mod tests {
         let (dir, git) = init_repo();
         let sha = commit_file(&dir, &git, "a.txt", "1\n", "first");
         assert!(git.notes_show("refs/notes/dashboard", &sha).is_none());
-        git.notes_add("refs/notes/dashboard", &sha, "hello note").unwrap();
-        assert_eq!(git.notes_show("refs/notes/dashboard", &sha).as_deref(), Some("hello note"));
+        git.notes_add("refs/notes/dashboard", &sha, "hello note")
+            .unwrap();
+        assert_eq!(
+            git.notes_show("refs/notes/dashboard", &sha).as_deref(),
+            Some("hello note")
+        );
         // Force-overwrite.
-        git.notes_add("refs/notes/dashboard", &sha, "updated note").unwrap();
-        assert_eq!(git.notes_show("refs/notes/dashboard", &sha).as_deref(), Some("updated note"));
+        git.notes_add("refs/notes/dashboard", &sha, "updated note")
+            .unwrap();
+        assert_eq!(
+            git.notes_show("refs/notes/dashboard", &sha).as_deref(),
+            Some("updated note")
+        );
     }
 
     #[test]
@@ -385,7 +492,10 @@ mod tests {
         let (_dir, git) = init_repo();
         assert!(git.config_get("dashboard.home").is_none());
         git.config_set("dashboard.home", "/tmp/somewhere").unwrap();
-        assert_eq!(git.config_get("dashboard.home").as_deref(), Some("/tmp/somewhere"));
+        assert_eq!(
+            git.config_get("dashboard.home").as_deref(),
+            Some("/tmp/somewhere")
+        );
     }
 
     #[test]

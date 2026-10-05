@@ -1,7 +1,7 @@
 # Feature requests from the `personal-assistant` project
 
 Written 2026-10-01 after running roughly 20 tasks through the loop, six of them
-real-device milestones on an Android phone driven by a grok subagent. Everything
+real-device milestones on an Android phone driven by a grok worker. Everything
 here is a **suggestion**: if one cuts against the player's philosophy (single
 writer, never trusts narration, status is a pure function of the hub), drop it
 or reshape it. The pains are real; the proposed fixes are only one way to
@@ -15,18 +15,18 @@ Roughly in priority order.
 
 ---
 
-## 1. A way to say "wait for the operator" before launching a subagent
+## 1. A way to say "wait for the operator" before launching a worker
 
-**Pain.** Posting a task immediately launches the subagent. For a task that
+**Pain.** Posting a task immediately launches the worker. For a task that
 drives hardware (here: a physical phone with a lock screen, app-lock timeouts
-and wireless adb), nothing tells the player the phone must be ready. The subagent
+and wireless adb), nothing tells the player the phone must be ready. The worker
 starts, the phone is locked or adb has dropped, and the run fails for
 environmental reasons. Retiring and replanning that costs far more than a
 "not yet" would.
 
 **Suggestion.** An optional `task.toml` field, e.g. `needs_operator = true`,
 meaning the post is accepted and the check is verified failing as usual, but the
-player does not launch the subagent until the operator runs something like
+player does not launch the worker until the operator runs something like
 `dashboard go <slug>`. Status could show it as `posted (waiting for operator)`.
 
 **Philosophy fit.** The gate is an explicit operator action recorded in the
@@ -43,13 +43,13 @@ was environmental (phone locked, adb dropped, api-proxy down): the code and
 test were fine, yet v2 cost a retire, a plan, a post and a replan before the
 same work could be tried again.
 
-**Suggestion.** A block kind the subagent can mark (e.g. `block(env): ...`) that
+**Suggestion.** A block kind the worker can mark (e.g. `block(env): ...`) that
 parks the task as `paused` and lets the operator `dashboard resume <slug>`
 once the environment is fixed, without burning a task slug or the one-in-flight
 slot's history. Retire stays the answer for design/test blocks.
 
 **Philosophy fit / caveat.** This softens "an escalated task is never resumed in
-place". The rule exists to stop a flailing subagent from being resumed over and
+place". The rule exists to stop a flailing worker from being resumed over and
 over, so it probably needs a cap (e.g. one resume per task, or only when the
 operator, not the agent, classifies the block as environmental).
 
@@ -57,11 +57,11 @@ operator, not the agent, classifies the block as environmental).
 
 ## 3. Escalate automatically when a posted task's session is dead
 
-**Pain.** If the subagent's tmux session dies (here: the operator killed it on
+**Pain.** If the worker's tmux session dies (here: the operator killed it on
 purpose), the task sits `posted` with a dead session. `retire` is rejected for
 posted tasks (§9), so the only exit was `dashboard relaunch` (which restarts an
 agent with `--always-approve`, here against a real phone) followed by killing it
-within a second and writing the `block:` commit by hand in the subagent's clone.
+within a second and writing the `block:` commit by hand in the worker's clone.
 
 **Suggestion.** Any of: (a) `dashboard abandon <slug>` for the operator, which
 escalates the task with a recorded reason; (b) auto-escalate after N minutes of
@@ -122,33 +122,33 @@ pending"), and/or emit an `imported` event per director commit.
 
 ---
 
-## 7. Publish the subagent's evidence on block, not only the commit
+## 7. Publish the worker's evidence on block, not only the commit
 
-**Pain.** The player imports a subagent's finish or block claim and nothing
-else. Evidence the subagent gathered in uncommitted or unpublished state (an
+**Pain.** The player imports a worker's finish or block claim and nothing
+else. Evidence the worker gathered in uncommitted or unpublished state (an
 accessibility-tree proof committed locally as `2a0ecbc`) was invisible to the
-hub and reachable only by reading the subagent's tmux pane. The workaround was
+hub and reachable only by reading the worker's tmux pane. The workaround was
 to put all evidence in the empty `block:` commit's message body, which works but
 is a convention rather than something the player supports.
 
 **Suggestion.** Let a block carry an attachment (a file under a reserved path
 such as `blocks/<slug>.md` that the player imports on a block claim without
 treating it as a finish). Or at minimum document the "evidence in the block
-body" convention in the subagent preamble the player prepends.
+body" convention in the worker preamble the player prepends.
 
 ---
 
 ## 8. A sanctioned path for work the operator did outside the loop
 
 **Pain.** The operator rewrote a scraper directly (because the app's UI had
-changed so much that driving a subagent was slower than doing it). Landing it
+changed so much that driving a worker was slower than doing it). Landing it
 meant planning a task whose only content was "cherry-pick these two commits",
 running the whole post/finish/review cycle, and carefully keeping the observations
 doc off the cherry-pick because it was already on `main`.
 
 **Suggestion.** An operator-initiated "adopt" path, e.g.
 `dashboard adopt <slug> --from <ref>`, which treats an existing local branch as
-the subagent's finish claim (player runs the full suite as it would for any
+the worker's finish claim (player runs the full suite as it would for any
 finish; review and accept proceed as usual).
 
 **Philosophy fit.** The suite still gates it, so nothing is trusted on the
@@ -160,7 +160,7 @@ should probably still require a planned and posted task whose check fails first.
 ## 9. Lower priority / ideas
 
 - **Verification tasks whose proof is a file** (`test -f x.md && grep -q CONFIRMED`)
-  can be passed by any subagent that writes the word. The player can't judge a
+  can be passed by any worker that writes the word. The player can't judge a
   hardware claim, so the review step carries the whole weight. A structured
   verification doc (required sections, required command-output excerpts) that
   the check validates would raise the bar a little without the player judging
@@ -169,7 +169,7 @@ should probably still require a planned and posted task whose check fails first.
 - **A `ready` event is reused** for "dependencies accepted" and re-emitted after
   replans; an event id on the task state would make it easier to tell a fresh
   `ready` from a repeat.
-- **Surface the subagent's `agent_cmd` safety posture** in `status` (here
+- **Surface the worker's `agent_cmd` safety posture** in `status` (here
   `--always-approve`), since it is the one setting that decides whether a
   mistaken launch can touch real hardware.
 
@@ -179,7 +179,7 @@ should probably still require a planned and posted task whose check fails first.
 # Added from the `ai-gpu` project (2026-10-01)
 
 Written after driving a 14-task Rust roadmap (SeedVR2 video upscale) through the
-loop with grok subagents, director task agents and one operator-gated host
+loop with grok workers, director task agents and one operator-gated host
 milestone. Same caveat as above: the player source was not read; everything is
 inferred from behaviour and the CLI. The loop worked well overall: nothing was
 accepted on narration, the suite gate was strict, and a real defect was caught
@@ -214,14 +214,14 @@ postable in that window.
 
 **#1 (wait for the operator) was the cause of the escalation.** I posted an
 operator-gated milestone whose check needs a results file the director/operator
-produces from a real GPU run. The post launched the subagent immediately; it
+produces from a real GPU run. The post launched the worker immediately; it
 correctly refused to invent numbers and used `block:`, the task escalated, and the
 only exit was retire + replan + a new slug. `needs_operator = true` (or any
 "posted but not launched" state) would have turned that into a pause. The
 operator-gated pattern is common for hardware/host milestones; it is worth
 supporting directly rather than relying on the director to sequence perfectly.
 
-**#2 (resumable env block) matches a second case.** A subagent's build failed with
+**#2 (resumable env block) matches a second case.** A worker's build failed with
 a disk-quota error in the temp filesystem (see 11); it reported `unsure` instead of
 blocking, so no strike was spent, but a blocked version would have needed a retire.
 
@@ -231,7 +231,7 @@ For the operator-gated milestone the test was written so the recorded GO/NO-GO
 is *derived* by the check from a JSON file of raw measurements (the GO rule lives
 in the test), and the check also verifies that every number in the doc block
 appears verbatim. A doc that claims GO over failing numbers fails the check, and
-the subagent cannot judge or round. This is the verification-doc idea from #9
+the worker cannot judge or round. This is the verification-doc idea from #9
 made concrete and it worked. It is worth documenting as the recommended shape for
 milestone tasks, along with the director rule it implies: produce the raw
 measurements file *before* posting (see #1).
@@ -244,17 +244,17 @@ a 10639 MiB peak. Both were found only by the real-host milestone. Nothing for t
 player to change, but a short note in the README that milestone tasks are the
 only place real-world defects are caught would set expectations correctly.
 
-## 11. Disk: a subagent clone's `target/` reached 4.5 GB
+## 11. Disk: a worker clone's `target/` reached 4.5 GB
 
-One subagent clone under `.dashboard/subagents/<slug>/` built its own cargo
+One worker clone under `.dashboard/workers/<slug>/` built its own cargo
 `target/` (4.5 GB for a medium crate). Several clones over a roadmap, plus the
 player's own scratch worktree for checks, add up quickly. The temp filesystem of
-the director session hit its quota during this run and a subagent was stranded.
+the director session hit its quota during this run and a worker was stranded.
 Suggestions: (a) let `[player]` set per-project env for launched sessions, e.g.
 `env = { CARGO_TARGET_DIR = "..." }`, so clones can share a build cache;
 (b) delete a clone's build output when its task is accepted or retired (clones
 appear to be removed on accept already; confirm for retire); (c) mention disk in
-the preamble so the subagent avoids creating large artefacts.
+the preamble so the worker avoids creating large artefacts.
 
 ## 12. Agent stall detection (an idle session is not a dead session)
 
@@ -320,14 +320,14 @@ weaken it.
 **Status: implemented** as designed below (spec §14, `src/spike.rs`, tests
 in `tests/spike.rs`, a scenario in `scripts/e2e.sh`). Deviation: the
 director's post may add any file under `tasks/<slug>/` except the
-subagent's `claims/` and `findings/` (baseline scripts live under
+worker's `claims/` and `findings/` (baseline scripts live under
 `baseline/`). The open question about `METRICS` is settled as a last
 stdout line.
 
 **Pain.** Everything must be a failing check up front. That suits well-scoped
 tasks but not design spikes, where nobody knows yet what "working" looks like
 and escalate-and-retire is the only escape hatch. The fix is to change what
-the subagent produces (an answer to a question, backed by runnable claims)
+the worker produces (an answer to a question, backed by runnable claims)
 rather than relax the rules for normal tasks.
 
 **Shape of v1.** A spike answers one pinned question. It is initiated by the
@@ -355,12 +355,12 @@ rules and most of the cheat-proofing.
   The director plans no tasks that depend on a spike.
 - **Player.** Validates the post, including that the director's baseline
   claims pass on `main`. Pins the question files and the base commit,
-  launches the subagent, and on a finish claim requires `findings/<n>.md`
+  launches the worker, and on a finish claim requires `findings/<n>.md`
   and runs every claim against the right code version. It never merges the
   branch and doesn't require the project suite. On conclude it moves the
   branch to `refs/explored/<slug>`, next to `refs/retired/`, and keeps it
   forever. Status shows the task as a spike.
-- **Subagent.** Explores freely, with no path restrictions: it may change any
+- **Worker.** Explores freely, with no path restrictions: it may change any
   file on its branch, since nothing merges and a sandbox would only make the
   codebase harder for it to understand. It writes `findings/<n>.md` and its
   own claims. It cannot touch the pinned files (`task.toml`, `questions/`,
@@ -379,8 +379,8 @@ tasks/<slug>/
   task.toml, prompt.md       director, pinned at launch
   questions/<n>.toml         director, one per round, append-only
   baseline/<n>.toml          director's baseline claims for round n
-  claims/<n>.toml            subagent's claims for round n (+ scripts)
-  findings/<n>.md            subagent's findings for round n
+  claims/<n>.toml            worker's claims for round n (+ scripts)
+  findings/<n>.md            worker's findings for round n
 ```
 
 The player rejects a commit that edits an earlier round's `questions/` or
@@ -407,7 +407,7 @@ prose for the humans; nothing is enforced from it. Each round has its own
 ### Claims (what the player verifies)
 
 A claim is a command the player runs itself in a scratch worktree, so nothing
-rests on the subagent's report. The contract is the one checks already have:
+rests on the worker's report. The contract is the one checks already have:
 exit 0 is a pass, anything else a fail, under a per-claim timeout. A claim may
 print one last line `METRICS {"throughput": 2.1}`; the player stores that JSON
 in the result note so findings can quote it. Two kinds:
@@ -415,19 +415,19 @@ in the result note so findings can quote it. Two kinds:
 - **Baseline claims** describe the code as it is now ("current code streams
   at 1x"). The director supplies them in `baseline/<n>.toml` (pinned) and the
   player verifies at post/send-back time that they pass on `main`, the spike
-  counterpart of "a post must have a failing check". The subagent may add
+  counterpart of "a post must have a failing check". The worker may add
   baseline claims in its own `claims/<n>.toml`. The player runs every
   baseline claim against the **base commit** (where the branch forked from
   `main`, pinned at launch so results are reproducible), with
   `tasks/<slug>/` overlaid so the scripts exist there. They must **pass**.
 - **Spike claims** describe what the exploration achieved ("we can stream at
-  2x"). Only the subagent writes them. The player runs them against the
+  2x"). Only the worker writes them. The player runs them against the
   branch tip, where they must **pass**, and again against the base commit
   with the overlay, where they must **fail**. A claim that passes without the
   spike (`cmd = "true"`) is rejected.
 
 ```toml
-# tasks/<slug>/claims/1.toml, subagent-written
+# tasks/<slug>/claims/1.toml, worker-written
 answer = "yes"                       # from questions/1.toml, or "inconclusive"
 
 [[claim]]
@@ -449,7 +449,7 @@ rejection is reproducible and an unchanged claim isn't re-run.
 `findings/<n>.md` is for the director and operator. The player requires that
 it exists and isn't empty, and nothing more: no front matter, headings or
 quotes are parsed or checked in v1. It may quote claims and their recorded
-metrics, but the quotes are not verified. The subagent's answer to the
+metrics, but the quotes are not verified. The worker's answer to the
 question lives in the claims file instead, where it can be checked (see
 below).
 
@@ -472,7 +472,7 @@ The answer stands only if its claims run and pass. A claim whose command
 can't start, times out or exits non-zero counts as failing, and so does a
 claims file with no runnable claim behind a non-`inconclusive` answer. Any
 failing claim rejects the whole finish, not only the claim that supports the
-answer, and the subagent has to fix it before the answer is accepted.
+answer, and the worker has to fix it before the answer is accepted.
 
 The project suite is not required. The player runs and verifies the claims,
 but does not judge whether they really support the answer, whether the
@@ -490,7 +490,7 @@ operator can stop a spike at any moment.
 
 In notes, like the rest of the player's derived records, not in a commit
 message. The player never writes commits on a spike branch: it stays exactly
-as the subagent and director left it, and a spike's tip has no player merge
+as the worker and director left it, and a spike's tip has no player merge
 to put a message on. A message would also be free text the player would have
 to parse back.
 
@@ -511,12 +511,12 @@ to parse back.
 
 ### Not in v1
 
-- A sandbox or any path restriction on the subagent.
+- A sandbox or any path restriction on the worker.
 - `depends_on` a spike, `unblocks`, or any dependent task. A spike never
   satisfies a dependency and never counts toward a milestone.
 - Enforced `derived_from`. Follow-up tasks are planned afterwards by the
   director with the operator, as ordinary tasks with ordinary director-written
-  checks; the subagent may read `refs/explored/<slug>`, as it can read
+  checks; the worker may read `refs/explored/<slug>`, as it can read
   retired branches. Copying code from there is allowed and still goes through
   pinned tests and review.
 - Player-enforced operator authorization (see Roles), size caps, time
@@ -580,5 +580,5 @@ but it is not a security boundary: a determined agent running as the same
 user could write to the hub directly.
 
 **Suggestion.** Document this in the README next to the guarantees. Optionally,
-run subagents as a separate user, or make the hub's refs writable only by
+run workers as a separate user, or make the hub's refs writable only by
 the player, as a hardening step for anyone who needs it.

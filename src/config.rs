@@ -35,7 +35,7 @@ pub struct Phase {
 #[serde(default)]
 pub struct Limits {
     pub max_review_rounds: u32,
-    /// How many times a subagent may contest the tests it must pass
+    /// How many times a worker may contest the tests it must pass
     /// (spec §18); one more escalates.
     pub max_contest_rounds: u32,
     pub strikes: StrikeLimits,
@@ -43,7 +43,11 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_review_rounds: 2, max_contest_rounds: 2, strikes: StrikeLimits::default() }
+        Self {
+            max_review_rounds: 2,
+            max_contest_rounds: 2,
+            strikes: StrikeLimits::default(),
+        }
     }
 }
 
@@ -67,7 +71,19 @@ pub struct StrikeLimits {
 
 impl Default for StrikeLimits {
     fn default() -> Self {
-        Self { history: 2, ownership: 2, pins: 2, suite: 2, plan: 2, post: 2, review: 2, accept: 2, retire: 2, claims: 2, evidence: 1 }
+        Self {
+            history: 2,
+            ownership: 2,
+            pins: 2,
+            suite: 2,
+            plan: 2,
+            post: 2,
+            review: 2,
+            accept: 2,
+            retire: 2,
+            claims: 2,
+            evidence: 1,
+        }
     }
 }
 
@@ -92,7 +108,7 @@ impl StrikeLimits {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PlayerConfig {
-    /// Launches a task's implementing subagent (spec §9's launch row).
+    /// Launches a task's implementing worker (spec §9's launch row).
     pub agent_cmd: String,
     /// Launches a task's task agent, the director's delegate that posts and
     /// reviews it (spec §17). Empty turns task agents off: the director
@@ -102,7 +118,10 @@ pub struct PlayerConfig {
 
 impl Default for PlayerConfig {
     fn default() -> Self {
-        Self { agent_cmd: "claude --dangerously-skip-permissions".to_string(), task_agent_cmd: "claude --dangerously-skip-permissions".to_string() }
+        Self {
+            agent_cmd: "claude --dangerously-skip-permissions".to_string(),
+            task_agent_cmd: "claude --dangerously-skip-permissions".to_string(),
+        }
     }
 }
 
@@ -225,23 +244,37 @@ fn default_min_pass() -> u32 {
 impl Check {
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.runs < 1 {
-            return Err(format!("check {:?}: runs must be >= 1 (got {})", self.name, self.runs));
+            return Err(format!(
+                "check {:?}: runs must be >= 1 (got {})",
+                self.name, self.runs
+            ));
         }
         if self.min_pass < 1 || self.min_pass > self.runs {
-            return Err(format!("check {:?}: min_pass must be between 1 and runs ({}), got {}", self.name, self.runs, self.min_pass));
+            return Err(format!(
+                "check {:?}: min_pass must be between 1 and runs ({}), got {}",
+                self.name, self.runs, self.min_pass
+            ));
         }
         for pattern in &self.retry_on {
-            regex::Regex::new(pattern).map_err(|e| format!("check {:?}: retry_on {pattern:?}: {e}", self.name))?;
+            regex::Regex::new(pattern)
+                .map_err(|e| format!("check {:?}: retry_on {pattern:?}: {e}", self.name))?;
         }
         if !self.retry_on.is_empty() && self.retry_failed == 0 {
-            return Err(format!("check {:?}: retry_on needs retry_failed >= 1", self.name));
+            return Err(format!(
+                "check {:?}: retry_on needs retry_failed >= 1",
+                self.name
+            ));
         }
         Ok(())
     }
 
     /// A copy that never retries.
     pub fn without_retries(&self) -> Check {
-        Check { retry_failed: 0, retry_on: Vec::new(), ..self.clone() }
+        Check {
+            retry_failed: 0,
+            retry_on: Vec::new(),
+            ..self.clone()
+        }
     }
 }
 
@@ -280,7 +313,9 @@ pub fn suite_fragment_path(slug: &str) -> String {
 
 /// Whether `path` is a suite fragment: a `.toml` file directly in `tests.d/`.
 pub fn is_suite_fragment(path: &str) -> bool {
-    path.strip_prefix(SUITE_DIR).and_then(|rest| rest.strip_prefix('/')).is_some_and(|name| !name.contains('/') && name.ends_with(".toml"))
+    path.strip_prefix(SUITE_DIR)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|name| !name.contains('/') && name.ends_with(".toml"))
 }
 
 /// A `tests.d/*.toml` fragment: only `[[check]]` entries. `test_paths` and
@@ -294,7 +329,10 @@ struct TestsFragment {
 /// The whole project suite: `tests.toml` (`base`) plus every fragment, in
 /// path order, as `(path, text)`. Check names must be unique across all of
 /// them, since results are keyed by name.
-pub(crate) fn suite_from_parts(base: &str, fragments: &[(String, String)]) -> Result<TestsConfig, String> {
+pub(crate) fn suite_from_parts(
+    base: &str,
+    fragments: &[(String, String)],
+) -> Result<TestsConfig, String> {
     let mut cfg = tests_config_from_str(base).map_err(|e| format!("tests.toml: {e}"))?;
     let mut sorted: Vec<&(String, String)> = fragments.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
@@ -308,7 +346,10 @@ pub(crate) fn suite_from_parts(base: &str, fragments: &[(String, String)]) -> Re
     let mut seen = std::collections::BTreeSet::new();
     for c in &cfg.check {
         if !seen.insert(c.name.as_str()) {
-            return Err(format!("check name {:?} is declared more than once across tests.toml and tests.d/", c.name));
+            return Err(format!(
+                "check name {:?} is declared more than once across tests.toml and tests.d/",
+                c.name
+            ));
         }
     }
     Ok(cfg)
@@ -316,7 +357,9 @@ pub(crate) fn suite_from_parts(base: &str, fragments: &[(String, String)]) -> Re
 
 /// The project suite at `rev`: `tests.toml` plus every `tests.d/*.toml`.
 pub(crate) fn suite_at(git: &crate::git::Git, rev: &str) -> Result<TestsConfig, String> {
-    let base = git.show_file(rev, "tests.toml").ok_or_else(|| format!("tests.toml not found at {rev}"))?;
+    let base = git
+        .show_file(rev, "tests.toml")
+        .ok_or_else(|| format!("tests.toml not found at {rev}"))?;
     let fragments: Vec<(String, String)> = git
         .ls_tree_files(rev, &format!("{SUITE_DIR}/"))
         .into_iter()
@@ -374,11 +417,20 @@ impl Evidence {
     /// The runner's view of this evidence. Prefixed so it can't share a
     /// result-cache slot with a suite check of the same name.
     pub fn as_check(&self) -> Check {
-        Check { name: format!("evidence:{}", self.name), cmd: self.cmd.clone(), runs: self.runs, min_pass: self.min_pass, retry_failed: 0, retry_on: Vec::new() }
+        Check {
+            name: format!("evidence:{}", self.name),
+            cmd: self.cmd.clone(),
+            runs: self.runs,
+            min_pass: self.min_pass,
+            retry_failed: 0,
+            retry_on: Vec::new(),
+        }
     }
 
     fn validate(&self) -> Result<(), String> {
-        self.as_check().validate().map_err(|e| e.replacen("check", "evidence", 1))?;
+        self.as_check()
+            .validate()
+            .map_err(|e| e.replacen("check", "evidence", 1))?;
         if self.max_pass < self.min_pass || self.max_pass >= self.runs {
             return Err(format!(
                 "evidence {:?}: max_pass must be between min_pass ({}) and runs - 1 ({}), got {}: a flake fails sometimes",
@@ -426,28 +478,43 @@ impl TaskConfig {
             }
         } else {
             if self.check.is_none() {
-                return Err("a flaky-test-fix needs a [check] proving the replacement is stable".to_string());
+                return Err(
+                    "a flaky-test-fix needs a [check] proving the replacement is stable"
+                        .to_string(),
+                );
             }
             if self.replace.is_empty() {
                 return Err("a flaky-test-fix needs at least one [[replace]]".to_string());
             }
             for r in &self.replace {
                 if r.old.trim().is_empty() || r.new.trim().is_empty() || r.old == r.new {
-                    return Err(format!("replace {:?} -> {:?}: old and new must be different, non-empty test names", r.old, r.new));
+                    return Err(format!(
+                        "replace {:?} -> {:?}: old and new must be different, non-empty test names",
+                        r.old, r.new
+                    ));
                 }
             }
             if self.evidence.is_empty() {
-                return Err("a flaky-test-fix needs at least one [[evidence]] showing the flake on main".to_string());
+                return Err(
+                    "a flaky-test-fix needs at least one [[evidence]] showing the flake on main"
+                        .to_string(),
+                );
             }
             if self.fix_paths.is_empty() {
-                return Err("a flaky-test-fix needs fix_paths: the files the subagent may change".to_string());
+                return Err(
+                    "a flaky-test-fix needs fix_paths: the files the worker may change".to_string(),
+                );
             }
             for p in &self.fix_paths {
                 if p.trim().is_empty() || p.contains(['*', '?', '[']) || p.ends_with('/') {
-                    return Err(format!("fix_paths entry {p:?} must be a plain file path, never a directory or a wildcard"));
+                    return Err(format!(
+                        "fix_paths entry {p:?} must be a plain file path, never a directory or a wildcard"
+                    ));
                 }
                 if p == "tests.toml" || p.starts_with("tasks/") {
-                    return Err(format!("fix_paths entry {p:?} may not be tests.toml or under tasks/"));
+                    return Err(format!(
+                        "fix_paths entry {p:?} may not be tests.toml or under tasks/"
+                    ));
                 }
             }
         }
@@ -558,7 +625,14 @@ impl Claim {
     /// The runner's view of this claim. The name is prefixed so a claim can
     /// never share a result-cache slot with a suite check of the same name.
     pub fn as_check(&self) -> Check {
-        Check { name: format!("claim:{}", self.name), cmd: self.cmd.clone(), runs: self.runs, min_pass: self.min_pass, retry_failed: 0, retry_on: Vec::new() }
+        Check {
+            name: format!("claim:{}", self.name),
+            cmd: self.cmd.clone(),
+            runs: self.runs,
+            min_pass: self.min_pass,
+            retry_failed: 0,
+            retry_on: Vec::new(),
+        }
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -569,16 +643,22 @@ impl Claim {
             return Err(format!("claim {:?}: cmd must not be empty", self.name));
         }
         if self.runs < 1 || self.min_pass < 1 || self.min_pass > self.runs {
-            return Err(format!("claim {:?}: min_pass must be between 1 and runs ({}), got {}", self.name, self.runs, self.min_pass));
+            return Err(format!(
+                "claim {:?}: min_pass must be between 1 and runs ({}), got {}",
+                self.name, self.runs, self.min_pass
+            ));
         }
         if self.timeout == Some(0) {
-            return Err(format!("claim {:?}: timeout must be at least 1 second", self.name));
+            return Err(format!(
+                "claim {:?}: timeout must be at least 1 second",
+                self.name
+            ));
         }
         Ok(())
     }
 }
 
-/// `tasks/<slug>/claims/<n>.toml`, written by the subagent: its answer to the
+/// `tasks/<slug>/claims/<n>.toml`, written by the worker: its answer to the
 /// round's question plus the claims that back it.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -612,7 +692,9 @@ pub(crate) fn claims_file_from_str(s: &str) -> Result<ClaimsFile, String> {
     let f: ClaimsFile = toml::from_str(s).map_err(|e| e.to_string())?;
     validate_claim_list(&f.claim)?;
     if f.answer.trim().is_empty() {
-        return Err("answer must be set (one of the question's answers, or \"inconclusive\")".to_string());
+        return Err(
+            "answer must be set (one of the question's answers, or \"inconclusive\")".to_string(),
+        );
     }
     Ok(f)
 }
@@ -622,10 +704,16 @@ pub(crate) fn baseline_file_from_str(s: &str) -> Result<BaselineFile, String> {
     validate_claim_list(&f.claim)?;
     for c in &mut f.claim {
         if c.kind != ClaimKind::Baseline {
-            return Err(format!("claim {:?}: baseline/<n>.toml only holds baseline claims", c.name));
+            return Err(format!(
+                "claim {:?}: baseline/<n>.toml only holds baseline claims",
+                c.name
+            ));
         }
         if c.supports.is_some() {
-            return Err(format!("claim {:?}: a baseline claim backs no answer (drop `supports`)", c.name));
+            return Err(format!(
+                "claim {:?}: a baseline claim backs no answer (drop `supports`)",
+                c.name
+            ));
         }
     }
     Ok(f)
@@ -669,7 +757,10 @@ mod tests {
         assert_eq!(cfg.limits.max_contest_rounds, 2);
         assert_eq!(cfg.limits.strikes.history, 2);
         assert_eq!(cfg.limits.strikes.suite, 2);
-        assert_eq!(cfg.player.agent_cmd, "claude --dangerously-skip-permissions");
+        assert_eq!(
+            cfg.player.agent_cmd,
+            "claude --dangerously-skip-permissions"
+        );
     }
 
     #[test]
@@ -764,8 +855,14 @@ mod tests {
     fn suite_merges_fragments_in_path_order() {
         let base = "test_paths = [\"tests/\"]\n[[check]]\nname = \"unit\"\ncmd = \"true\"\n";
         let frags = vec![
-            ("tests.d/b.toml".to_string(), "[[check]]\nname = \"b\"\ncmd = \"true\"\n".to_string()),
-            ("tests.d/a.toml".to_string(), "[[check]]\nname = \"a\"\ncmd = \"true\"\n".to_string()),
+            (
+                "tests.d/b.toml".to_string(),
+                "[[check]]\nname = \"b\"\ncmd = \"true\"\n".to_string(),
+            ),
+            (
+                "tests.d/a.toml".to_string(),
+                "[[check]]\nname = \"a\"\ncmd = \"true\"\n".to_string(),
+            ),
         ];
         let cfg = suite_from_parts(base, &frags).unwrap();
         let names: Vec<&str> = cfg.check.iter().map(|c| c.name.as_str()).collect();
@@ -776,10 +873,24 @@ mod tests {
     #[test]
     fn suite_rejects_duplicate_names_and_bad_fragments() {
         let base = "[[check]]\nname = \"unit\"\ncmd = \"true\"\n";
-        let dup = vec![("tests.d/a.toml".to_string(), "[[check]]\nname = \"unit\"\ncmd = \"false\"\n".to_string())];
-        assert!(suite_from_parts(base, &dup).unwrap_err().contains("more than once"));
-        let bad = vec![("tests.d/a.toml".to_string(), "[[check]]\nname = \"x\"\ncmd = \"true\"\nruns = 0\n".to_string())];
-        assert!(suite_from_parts(base, &bad).unwrap_err().starts_with("tests.d/a.toml"));
+        let dup = vec![(
+            "tests.d/a.toml".to_string(),
+            "[[check]]\nname = \"unit\"\ncmd = \"false\"\n".to_string(),
+        )];
+        assert!(
+            suite_from_parts(base, &dup)
+                .unwrap_err()
+                .contains("more than once")
+        );
+        let bad = vec![(
+            "tests.d/a.toml".to_string(),
+            "[[check]]\nname = \"x\"\ncmd = \"true\"\nruns = 0\n".to_string(),
+        )];
+        assert!(
+            suite_from_parts(base, &bad)
+                .unwrap_err()
+                .starts_with("tests.d/a.toml")
+        );
     }
 
     #[test]
@@ -829,22 +940,39 @@ mod tests {
     fn spike_task_config_is_validated() {
         let ok = task_config_from_str("kind = \"spike\"\ntitle = \"s\"\n").unwrap();
         assert_eq!(ok.kind, TaskKind::Spike);
-        assert_eq!(task_config_from_str("title = \"t\"\n").unwrap().kind, TaskKind::Task);
+        assert_eq!(
+            task_config_from_str("title = \"t\"\n").unwrap().kind,
+            TaskKind::Task
+        );
         assert!(task_config_from_str("kind = \"spike\"\ndepends_on = [\"a\"]\n").is_err());
         assert!(task_config_from_str("kind = \"spike\"\nmilestone = true\n").is_err());
-        assert!(task_config_from_str("kind = \"spike\"\n[check]\nname = \"c\"\ncmd = \"true\"\n").is_err());
+        assert!(
+            task_config_from_str("kind = \"spike\"\n[check]\nname = \"c\"\ncmd = \"true\"\n")
+                .is_err()
+        );
     }
 
     #[test]
     fn question_parses_and_validates() {
-        let q = question_from_str("question = \"Can we?\"\nanswers = [\"yes\", \"no\"]\nrefines = 1\n").unwrap();
+        let q =
+            question_from_str("question = \"Can we?\"\nanswers = [\"yes\", \"no\"]\nrefines = 1\n")
+                .unwrap();
         assert_eq!(q.refines, Some(1));
         assert!(q.allows("yes"));
         assert!(q.allows("inconclusive"));
         assert!(!q.allows("maybe"));
-        assert!(question_from_str("answers = [\"yes\"]\n").is_err(), "empty question");
-        assert!(question_from_str("question = \"q\"\n").is_err(), "no answers");
-        assert!(question_from_str("question = \"q\"\nanswers = [\"a\", \"a\"]\n").is_err(), "duplicate answers");
+        assert!(
+            question_from_str("answers = [\"yes\"]\n").is_err(),
+            "empty question"
+        );
+        assert!(
+            question_from_str("question = \"q\"\n").is_err(),
+            "no answers"
+        );
+        assert!(
+            question_from_str("question = \"q\"\nanswers = [\"a\", \"a\"]\n").is_err(),
+            "duplicate answers"
+        );
     }
 
     #[test]
@@ -853,16 +981,34 @@ mod tests {
         assert_eq!(f.claim[0].kind, ClaimKind::Spike);
         assert_eq!(f.claim[0].timeout_secs(), DEFAULT_CLAIM_TIMEOUT_SECS);
         assert_eq!(f.claim[0].as_check().name, "claim:c");
-        assert!(claims_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\n").is_err(), "no answer");
-        assert!(claims_file_from_str("answer = \"yes\"\n[[claim]]\nname = \"c\"\ncmd = \"\"\n").is_err(), "empty cmd");
-        assert!(claims_file_from_str("answer = \"yes\"\n[[claim]]\nname = \"c\"\ncmd = \"x\"\nruns = 2\nmin_pass = 3\n").is_err());
+        assert!(
+            claims_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\n").is_err(),
+            "no answer"
+        );
+        assert!(
+            claims_file_from_str("answer = \"yes\"\n[[claim]]\nname = \"c\"\ncmd = \"\"\n")
+                .is_err(),
+            "empty cmd"
+        );
+        assert!(
+            claims_file_from_str(
+                "answer = \"yes\"\n[[claim]]\nname = \"c\"\ncmd = \"x\"\nruns = 2\nmin_pass = 3\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn baseline_file_only_holds_baseline_claims() {
         assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\n").is_ok());
-        assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nkind = \"spike\"\n").is_err());
-        assert!(baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nsupports = \"yes\"\n").is_err());
+        assert!(
+            baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nkind = \"spike\"\n")
+                .is_err()
+        );
+        assert!(
+            baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nsupports = \"yes\"\n")
+                .is_err()
+        );
     }
 
     #[test]
@@ -870,9 +1016,25 @@ mod tests {
         let ok = tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_failed = 2\nretry_on = [\"Text file busy\", \"os error \\\\d+\"]\n").unwrap();
         assert_eq!(ok.check[0].retry_failed, 2);
         assert_eq!(ok.check[0].retry_on.len(), 2);
-        assert_eq!(tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\n").unwrap().check[0].retry_failed, 0);
-        assert!(tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_failed = 1\nretry_on = [\"(\"]\n").is_err(), "bad regex");
-        assert!(tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_on = [\"a\"]\n").is_err(), "retry_on alone");
+        assert_eq!(
+            tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\n")
+                .unwrap()
+                .check[0]
+                .retry_failed,
+            0
+        );
+        assert!(
+            tests_config_from_str(
+                "[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_failed = 1\nretry_on = [\"(\"]\n"
+            )
+            .is_err(),
+            "bad regex"
+        );
+        assert!(
+            tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_on = [\"a\"]\n")
+                .is_err(),
+            "retry_on alone"
+        );
     }
 
     #[test]
@@ -917,16 +1079,36 @@ mod tests {
 
     #[test]
     fn flaky_test_fix_config_is_validated() {
-        let bad = |from: &str, to: &str| assert!(task_config_from_str(&FLAKY.replace(from, to)).is_err(), "{from} -> {to}");
+        let bad = |from: &str, to: &str| {
+            assert!(
+                task_config_from_str(&FLAKY.replace(from, to)).is_err(),
+                "{from} -> {to}"
+            )
+        };
         bad("max_pass = 99", "max_pass = 100"); // never fails: not a flake
-        bad("min_pass = 1\n        max_pass", "min_pass = 5\n        max_pass = 4\n        #"); // empty window
-        bad("fix_paths = [\"tests/a.rs\", \"tests/common/stub.rs\"]", "fix_paths = [\"tests/\"]");
-        bad("fix_paths = [\"tests/a.rs\", \"tests/common/stub.rs\"]", "fix_paths = [\"tests/*.rs\"]");
-        bad("fix_paths = [\"tests/a.rs\", \"tests/common/stub.rs\"]", "fix_paths = []");
+        bad(
+            "min_pass = 1\n        max_pass",
+            "min_pass = 5\n        max_pass = 4\n        #",
+        ); // empty window
+        bad(
+            "fix_paths = [\"tests/a.rs\", \"tests/common/stub.rs\"]",
+            "fix_paths = [\"tests/\"]",
+        );
+        bad(
+            "fix_paths = [\"tests/a.rs\", \"tests/common/stub.rs\"]",
+            "fix_paths = [\"tests/*.rs\"]",
+        );
+        bad(
+            "fix_paths = [\"tests/a.rs\", \"tests/common/stub.rs\"]",
+            "fix_paths = []",
+        );
         bad("new = \"a_stable\"", "new = \"a\"");
         bad("[[evidence]]", "[[unused]]");
         // The new fields are rejected on any other kind.
-        assert!(task_config_from_str(&FLAKY.replace("kind = \"flaky-test-fix\"", "kind = \"task\"")).is_err());
+        assert!(
+            task_config_from_str(&FLAKY.replace("kind = \"flaky-test-fix\"", "kind = \"task\""))
+                .is_err()
+        );
     }
 
     #[test]

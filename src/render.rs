@@ -23,32 +23,82 @@ struct StatusStyle {
 
 fn status_style(status: Status) -> StatusStyle {
     match status {
-        Status::Accepted => StatusStyle { icon: "✓", codes: &[c::GREEN] },
-        Status::Explored => StatusStyle { icon: "◇", codes: &[c::BLUE] },
-        Status::Tested => StatusStyle { icon: "◆", codes: &[c::CYAN] },
-        Status::InProgress => StatusStyle { icon: "◐", codes: &[c::YELLOW] },
-        Status::Posted => StatusStyle { icon: "▶", codes: &[c::YELLOW] },
-        Status::InRevision => StatusStyle { icon: "↻", codes: &[c::MAGENTA] },
-        Status::Conflicted => StatusStyle { icon: "⇄", codes: &[c::RED] },
-        Status::Contested => StatusStyle { icon: "?", codes: &[c::MAGENTA] },
-        Status::Escalated => StatusStyle { icon: "✗", codes: &[c::RED] },
-        Status::Ready => StatusStyle { icon: "●", codes: &[c::CYAN] },
-        Status::Pending => StatusStyle { icon: "○", codes: &[c::GRAY] },
-        Status::Orphaned => StatusStyle { icon: "⊘", codes: &[c::RED] },
-        Status::Retired => StatusStyle { icon: "✝", codes: &[c::GRAY, c::DIM] },
+        Status::Accepted => StatusStyle {
+            icon: "✓",
+            codes: &[c::GREEN],
+        },
+        Status::Explored => StatusStyle {
+            icon: "◇",
+            codes: &[c::BLUE],
+        },
+        Status::Tested => StatusStyle {
+            icon: "◆",
+            codes: &[c::CYAN],
+        },
+        Status::InProgress => StatusStyle {
+            icon: "◐",
+            codes: &[c::YELLOW],
+        },
+        Status::Posted => StatusStyle {
+            icon: "▶",
+            codes: &[c::YELLOW],
+        },
+        Status::InRevision => StatusStyle {
+            icon: "↻",
+            codes: &[c::MAGENTA],
+        },
+        Status::Conflicted => StatusStyle {
+            icon: "⇄",
+            codes: &[c::RED],
+        },
+        Status::Contested => StatusStyle {
+            icon: "?",
+            codes: &[c::MAGENTA],
+        },
+        Status::Escalated => StatusStyle {
+            icon: "✗",
+            codes: &[c::RED],
+        },
+        Status::Ready => StatusStyle {
+            icon: "●",
+            codes: &[c::CYAN],
+        },
+        Status::Pending => StatusStyle {
+            icon: "○",
+            codes: &[c::GRAY],
+        },
+        Status::Orphaned => StatusStyle {
+            icon: "⊘",
+            codes: &[c::RED],
+        },
+        Status::Retired => StatusStyle {
+            icon: "✝",
+            codes: &[c::GRAY, c::DIM],
+        },
     }
 }
 
 /// Live statuses, in the order the overall summary line and per-phase rows
 /// display them. `Retired` is deliberately excluded — it's counted (and
 /// shown) separately, never part of the live denominator.
-const LIVE_STATUS_ORDER: [Status; 11] =
-    [Status::Accepted, Status::Tested, Status::InProgress, Status::Posted, Status::InRevision, Status::Conflicted, Status::Contested, Status::Escalated, Status::Ready, Status::Pending, Status::Orphaned];
+const LIVE_STATUS_ORDER: [Status; 11] = [
+    Status::Accepted,
+    Status::Tested,
+    Status::InProgress,
+    Status::Posted,
+    Status::InRevision,
+    Status::Conflicted,
+    Status::Contested,
+    Status::Escalated,
+    Status::Ready,
+    Status::Pending,
+    Status::Orphaned,
+];
 
 fn actor_label(actor: Actor) -> &'static str {
     match actor {
         Actor::Director => "director",
-        Actor::Subagent => "subagent",
+        Actor::Worker => "worker",
         Actor::Player => "player",
         Actor::TaskAgent => "task agent",
     }
@@ -80,81 +130,171 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     // their own section, and still show up wherever a task is in flight or
     // escalated.
     let is_spike = |t: &&TaskState| t.config.kind == TaskKind::Spike;
-    let live: Vec<&TaskState> = state.tasks.iter().filter(|t| t.status != Status::Retired && !is_spike(t)).collect();
-    let spikes: Vec<&TaskState> = state.tasks.iter().filter(|t| t.status != Status::Retired && is_spike(t)).collect();
-    let retired: Vec<&TaskState> = state.tasks.iter().filter(|t| t.status == Status::Retired).collect();
+    let live: Vec<&TaskState> = state
+        .tasks
+        .iter()
+        .filter(|t| t.status != Status::Retired && !is_spike(t))
+        .collect();
+    let spikes: Vec<&TaskState> = state
+        .tasks
+        .iter()
+        .filter(|t| t.status != Status::Retired && is_spike(t))
+        .collect();
+    let retired: Vec<&TaskState> = state
+        .tasks
+        .iter()
+        .filter(|t| t.status == Status::Retired)
+        .collect();
 
     // ---- header ----
-    let name = state.roadmap.title.clone().unwrap_or_else(|| if state.project.is_empty() { "PROJECT".to_string() } else { state.project.clone() });
+    let name = state.roadmap.title.clone().unwrap_or_else(|| {
+        if state.project.is_empty() {
+            "PROJECT".to_string()
+        } else {
+            state.project.clone()
+        }
+    });
     let title = format!(" {name} — Roadmap ");
     let inner_w = (width.saturating_sub(2)).max(title.chars().count());
-    out.push(style(&format!("╭{}╮", "─".repeat(inner_w)), &[c::MAGENTA], color));
+    out.push(style(
+        &format!("╭{}╮", "─".repeat(inner_w)),
+        &[c::MAGENTA],
+        color,
+    ));
     out.push(format!(
         "{}{}{}",
         style("│", &[c::MAGENTA], color),
         style(&center(&title, inner_w), &[c::BOLD, c::WHITE], color),
         style("│", &[c::MAGENTA], color)
     ));
-    out.push(style(&format!("╰{}╯", "─".repeat(inner_w)), &[c::MAGENTA], color));
+    out.push(style(
+        &format!("╰{}╯", "─".repeat(inner_w)),
+        &[c::MAGENTA],
+        color,
+    ));
     out.push(String::new());
 
     // ---- overall ----
     let live_total = live.len();
     let accepted = live.iter().filter(|t| t.status == Status::Accepted).count();
-    let frac = if live_total > 0 { accepted as f64 / live_total as f64 } else { 0.0 };
+    let frac = if live_total > 0 {
+        accepted as f64 / live_total as f64
+    } else {
+        0.0
+    };
     let pct = (frac * 100.0).round() as i64;
     let bar_w = 40.min(width.saturating_sub(30));
-    out.push(format!("{}  {}  {}/{} accepted ({}%)", style("Overall", &[c::BOLD], color), bar(frac, bar_w, color), accepted, live_total, pct));
+    out.push(format!(
+        "{}  {}  {}/{} accepted ({}%)",
+        style("Overall", &[c::BOLD], color),
+        bar(frac, bar_w, color),
+        accepted,
+        live_total,
+        pct
+    ));
 
     let mut bits: Vec<String> = LIVE_STATUS_ORDER
         .iter()
         .map(|&s| {
             let n = live.iter().filter(|t| t.status == s).count();
             let ss = status_style(s);
-            style(&format!("{} {} {}", ss.icon, n, s.as_str()), ss.codes, color)
+            style(
+                &format!("{} {} {}", ss.icon, n, s.as_str()),
+                ss.codes,
+                color,
+            )
         })
         .collect();
     let retired_style = status_style(Status::Retired);
-    bits.push(style(&format!("{} {} retired", retired_style.icon, retired.len()), retired_style.codes, color));
+    bits.push(style(
+        &format!("{} {} retired", retired_style.icon, retired.len()),
+        retired_style.codes,
+        color,
+    ));
     out.push(bits.join("  "));
     out.push(String::new());
 
     // ---- phases ----
     let phase_ids: HashSet<&str> = state.roadmap.phases.iter().map(|p| p.id.as_str()).collect();
-    let hidden_ids: HashSet<&str> = state.roadmap.phases.iter().filter(|p| p.hidden).map(|p| p.id.as_str()).collect();
+    let hidden_ids: HashSet<&str> = state
+        .roadmap
+        .phases
+        .iter()
+        .filter(|p| p.hidden)
+        .map(|p| p.id.as_str())
+        .collect();
     for phase in state.roadmap.phases.iter().filter(|p| !p.hidden) {
-        let tasks: Vec<&TaskState> = live.iter().filter(|t| t.config.phase == phase.id).copied().collect();
+        let tasks: Vec<&TaskState> = live
+            .iter()
+            .filter(|t| t.config.phase == phase.id)
+            .copied()
+            .collect();
         let header = phase.title.clone().unwrap_or_else(|| phase.id.clone());
-        render_phase(&mut out, &header, phase.goal.as_deref(), &tasks, color, width);
+        render_phase(
+            &mut out,
+            &header,
+            phase.goal.as_deref(),
+            &tasks,
+            color,
+            width,
+        );
     }
-    let no_phase: Vec<&TaskState> = live.iter().filter(|t| !phase_ids.contains(t.config.phase.as_str())).copied().collect();
+    let no_phase: Vec<&TaskState> = live
+        .iter()
+        .filter(|t| !phase_ids.contains(t.config.phase.as_str()))
+        .copied()
+        .collect();
     if !no_phase.is_empty() {
         render_phase(&mut out, "(no phase)", None, &no_phase, color, width);
     }
     if !hidden_ids.is_empty() {
-        let n = live.iter().filter(|t| hidden_ids.contains(t.config.phase.as_str())).count();
+        let n = live
+            .iter()
+            .filter(|t| hidden_ids.contains(t.config.phase.as_str()))
+            .count();
         let plural = |k: usize| if k == 1 { "" } else { "s" };
         let k = hidden_ids.len();
-        out.push(style(&format!("({k} hidden phase{}, {n} task{})", plural(k), plural(n)), &[c::DIM], color));
+        out.push(style(
+            &format!("({k} hidden phase{}, {n} task{})", plural(k), plural(n)),
+            &[c::DIM],
+            color,
+        ));
         out.push(String::new());
     }
 
     // ---- milestones ----
-    let milestones: Vec<&TaskState> = live.iter().filter(|t| t.config.milestone && !hidden_ids.contains(t.config.phase.as_str())).copied().collect();
+    let milestones: Vec<&TaskState> = live
+        .iter()
+        .filter(|t| t.config.milestone && !hidden_ids.contains(t.config.phase.as_str()))
+        .copied()
+        .collect();
     out.push(style("⚑ Milestones", &[c::BOLD, c::MAGENTA], color));
     if milestones.is_empty() {
         out.push(none_line(color));
     } else {
         for t in &milestones {
             let ss = status_style(t.status);
-            out.push(format!("  {} {} {}", ss.icon, style(&format!("{:<11}", t.status.as_str()), ss.codes, color), truncate(&t.config.title, width.saturating_sub(20))));
+            out.push(format!(
+                "  {} {} {}",
+                ss.icon,
+                style(&format!("{:<11}", t.status.as_str()), ss.codes, color),
+                truncate(&t.config.title, width.saturating_sub(20))
+            ));
         }
     }
     out.push(String::new());
 
     // ---- ready ("actionable now") ----
-    let ready: Vec<&TaskState> = live.iter().filter(|t| t.status == Status::Ready).copied().collect();
-    out.push(style(&format!("▶ Ready ({})", ready.len()), &[c::BOLD, c::CYAN], color));
+    let ready: Vec<&TaskState> = live
+        .iter()
+        .filter(|t| t.status == Status::Ready)
+        .copied()
+        .collect();
+    out.push(style(
+        &format!("▶ Ready ({})", ready.len()),
+        &[c::BOLD, c::CYAN],
+        color,
+    ));
     if ready.is_empty() {
         out.push(none_line(color));
     } else {
@@ -164,14 +304,27 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
                 Some(_) => style("  (task agent dead)", &[c::RED], color),
                 None => String::new(),
             };
-            out.push(format!("  {}  {}{agent}", style(&t.slug, &[c::CYAN], color), truncate(&t.config.title, width.saturating_sub(t.slug.chars().count()).saturating_sub(6))));
+            out.push(format!(
+                "  {}  {}{agent}",
+                style(&t.slug, &[c::CYAN], color),
+                truncate(
+                    &t.config.title,
+                    width
+                        .saturating_sub(t.slug.chars().count())
+                        .saturating_sub(6)
+                )
+            ));
         }
     }
     out.push(String::new());
 
     // ---- spikes ----
     if !spikes.is_empty() {
-        out.push(style(&format!("◇ Spikes ({})", spikes.len()), &[c::BOLD, c::BLUE], color));
+        out.push(style(
+            &format!("◇ Spikes ({})", spikes.len()),
+            &[c::BOLD, c::BLUE],
+            color,
+        ));
         for t in &spikes {
             let ss = status_style(t.status);
             let detail = spike_detail(t);
@@ -187,8 +340,31 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     }
 
     // ---- in flight ----
-    let in_flight: Vec<&TaskState> = live.iter().chain(spikes.iter()).filter(|t| matches!(t.status, Status::Posted | Status::InProgress | Status::Tested | Status::InRevision | Status::Conflicted | Status::Contested)).copied().collect();
-    out.push(style(&if in_flight.len() > 1 { format!("In flight ({})", in_flight.len()) } else { "In flight".to_string() }, &[c::BOLD], color));
+    let in_flight: Vec<&TaskState> = live
+        .iter()
+        .chain(spikes.iter())
+        .filter(|t| {
+            matches!(
+                t.status,
+                Status::Posted
+                    | Status::InProgress
+                    | Status::Tested
+                    | Status::InRevision
+                    | Status::Conflicted
+                    | Status::Contested
+            )
+        })
+        .copied()
+        .collect();
+    out.push(style(
+        &if in_flight.len() > 1 {
+            format!("In flight ({})", in_flight.len())
+        } else {
+            "In flight".to_string()
+        },
+        &[c::BOLD],
+        color,
+    ));
     if in_flight.is_empty() {
         out.push(none_line(color));
     }
@@ -201,22 +377,45 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     out.push(String::new());
 
     // ---- escalated ----
-    let escalated: Vec<&TaskState> = live.iter().chain(spikes.iter()).filter(|t| t.status == Status::Escalated).copied().collect();
-    out.push(style(&format!("✗ Escalated ({})", escalated.len()), &[c::BOLD, c::RED], color));
+    let escalated: Vec<&TaskState> = live
+        .iter()
+        .chain(spikes.iter())
+        .filter(|t| t.status == Status::Escalated)
+        .copied()
+        .collect();
+    out.push(style(
+        &format!("✗ Escalated ({})", escalated.len()),
+        &[c::BOLD, c::RED],
+        color,
+    ));
     if escalated.is_empty() {
         out.push(none_line(color));
     } else {
         for t in &escalated {
             let cause = t.escalation.as_deref().unwrap_or("(no cause recorded)");
-            let cause = truncate(&first_line_truncated(cause), width.saturating_sub(t.slug.chars().count()).saturating_sub(4).max(10));
+            let cause = truncate(
+                &first_line_truncated(cause),
+                width
+                    .saturating_sub(t.slug.chars().count())
+                    .saturating_sub(4)
+                    .max(10),
+            );
             out.push(format!("  {}  {}", style(&t.slug, &[c::RED], color), cause));
         }
     }
     out.push(String::new());
 
     // ---- orphaned ----
-    let orphaned: Vec<&TaskState> = live.iter().filter(|t| t.status == Status::Orphaned).copied().collect();
-    out.push(style(&format!("⊘ Orphaned ({})", orphaned.len()), &[c::BOLD, c::RED], color));
+    let orphaned: Vec<&TaskState> = live
+        .iter()
+        .filter(|t| t.status == Status::Orphaned)
+        .copied()
+        .collect();
+    out.push(style(
+        &format!("⊘ Orphaned ({})", orphaned.len()),
+        &[c::BOLD, c::RED],
+        color,
+    ));
     if orphaned.is_empty() {
         out.push(none_line(color));
     } else {
@@ -225,11 +424,24 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
                 .config
                 .depends_on
                 .iter()
-                .filter(|d| state.tasks.iter().any(|other| other.slug == **d && other.status == Status::Retired))
+                .filter(|d| {
+                    state
+                        .tasks
+                        .iter()
+                        .any(|other| other.slug == **d && other.status == Status::Retired)
+                })
                 .map(|d| d.as_str())
                 .collect();
-            let deps = if dead.is_empty() { "a dependency was retired".to_string() } else { format!("retired dep: {}", dead.join(", ")) };
-            out.push(format!("  {}  {} — needs a replan", style(&t.slug, &[c::RED], color), style(&deps, &[c::DIM], color)));
+            let deps = if dead.is_empty() {
+                "a dependency was retired".to_string()
+            } else {
+                format!("retired dep: {}", dead.join(", "))
+            };
+            out.push(format!(
+                "  {}  {} — needs a replan",
+                style(&t.slug, &[c::RED], color),
+                style(&deps, &[c::DIM], color)
+            ));
         }
     }
     out.push(String::new());
@@ -242,29 +454,68 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     } else {
         for r in &recent {
             let msg = first_line_truncated(&r.message);
-            out.push(format!("  #{} {} {} {} — {}", r.n, r.scope, r.reason.as_str(), actor_label(r.actor), truncate(&msg, width.saturating_sub(20))));
+            out.push(format!(
+                "  #{} {} {} {} — {}",
+                r.n,
+                r.scope,
+                r.reason.as_str(),
+                actor_label(r.actor),
+                truncate(&msg, width.saturating_sub(20))
+            ));
         }
     }
     out.push(String::new());
 
     // ---- flaky checks (the flake ledger) ----
     if !state.flakes.is_empty() {
-        out.push(style(&format!("Flaky checks ({})", state.flakes.len()), &[c::BOLD, c::YELLOW], color));
+        out.push(style(
+            &format!("Flaky checks ({})", state.flakes.len()),
+            &[c::BOLD, c::YELLOW],
+            color,
+        ));
         for f in state.flakes.iter().rev().take(5) {
-            let seen = f.outputs.iter().find_map(|o| o.lines().rev().find(|l| !l.trim().is_empty())).unwrap_or("(no output)");
-            out.push(format!("  {} {} passed on retry {}/{} — {}", f.scope, f.check, f.retries, f.retry_failed, truncate(seen.trim(), width.saturating_sub(40).max(10))));
+            let seen = f
+                .outputs
+                .iter()
+                .find_map(|o| o.lines().rev().find(|l| !l.trim().is_empty()))
+                .unwrap_or("(no output)");
+            out.push(format!(
+                "  {} {} passed on retry {}/{} — {}",
+                f.scope,
+                f.check,
+                f.retries,
+                f.retry_failed,
+                truncate(seen.trim(), width.saturating_sub(40).max(10))
+            ));
         }
         out.push(String::new());
     }
 
     // ---- retired ----
-    out.push(style(&format!("{} Retired ({})", retired_style.icon, retired.len()), retired_style.codes, color));
+    out.push(style(
+        &format!("{} Retired ({})", retired_style.icon, retired.len()),
+        retired_style.codes,
+        color,
+    ));
     if retired.is_empty() {
         out.push(none_line(color));
     } else {
         for t in &retired {
-            let mortem = t.post_mortem.as_deref().unwrap_or("(no post-mortem recorded)");
-            out.push(format!("  {}  {}", style(&t.slug, retired_style.codes, color), truncate(&first_line_truncated(mortem), width.saturating_sub(t.slug.chars().count()).saturating_sub(4).max(10))));
+            let mortem = t
+                .post_mortem
+                .as_deref()
+                .unwrap_or("(no post-mortem recorded)");
+            out.push(format!(
+                "  {}  {}",
+                style(&t.slug, retired_style.codes, color),
+                truncate(
+                    &first_line_truncated(mortem),
+                    width
+                        .saturating_sub(t.slug.chars().count())
+                        .saturating_sub(4)
+                        .max(10)
+                )
+            ));
         }
     }
 
@@ -274,7 +525,13 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
         out.push(style("Recent events", &[c::BOLD, c::DIM], color));
         for e in events.iter().rev().take(5) {
             let slug = e.slug.as_deref().unwrap_or("_main");
-            let line = format!("  #{} {}  {} — {}", e.seq, e.kind.as_str(), slug, first_line_truncated(&e.message));
+            let line = format!(
+                "  #{} {}  {} — {}",
+                e.seq,
+                e.kind.as_str(),
+                slug,
+                first_line_truncated(&e.message)
+            );
             out.push(style(&truncate(&line, width), &[c::DIM], color));
         }
     }
@@ -286,14 +543,37 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
 // Per-phase block
 // --------------------------------------------------------------------------
 
-fn render_phase(out: &mut Vec<String>, header: &str, goal: Option<&str>, tasks: &[&TaskState], color: bool, width: usize) {
+fn render_phase(
+    out: &mut Vec<String>,
+    header: &str,
+    goal: Option<&str>,
+    tasks: &[&TaskState],
+    color: bool,
+    width: usize,
+) {
     let total = tasks.len();
-    let accepted = tasks.iter().filter(|t| t.status == Status::Accepted).count();
-    let frac = if total > 0 { accepted as f64 / total as f64 } else { 0.0 };
-    out.push(format!("{}  {}  {}/{}", style(header, &[c::BOLD], color), bar(frac, 20, color), accepted, total));
+    let accepted = tasks
+        .iter()
+        .filter(|t| t.status == Status::Accepted)
+        .count();
+    let frac = if total > 0 {
+        accepted as f64 / total as f64
+    } else {
+        0.0
+    };
+    out.push(format!(
+        "{}  {}  {}/{}",
+        style(header, &[c::BOLD], color),
+        bar(frac, 20, color),
+        accepted,
+        total
+    ));
     if let Some(goal) = goal {
         if !goal.is_empty() {
-            out.push(format!("  {}", style(&truncate(goal, width.saturating_sub(2)), &[c::DIM], color)));
+            out.push(format!(
+                "  {}",
+                style(&truncate(goal, width.saturating_sub(2)), &[c::DIM], color)
+            ));
         }
     }
     for t in tasks {
@@ -302,8 +582,20 @@ fn render_phase(out: &mut Vec<String>, header: &str, goal: Option<&str>, tasks: 
         let slug = format!("{:<24}", t.slug);
         let status_label = format!("{:<11}", t.status.as_str());
         let title_w = width.saturating_sub(46).max(10);
-        let flaky = if t.flaky > 0 { style(&format!("  flaky: {}", t.flaky), &[c::YELLOW], color) } else { String::new() };
-        out.push(format!("  {} {} {}{} {}{}", ss.icon, style(&status_label, ss.codes, color), style(&slug, &[c::DIM], color), mark, truncate(&t.config.title, title_w), flaky));
+        let flaky = if t.flaky > 0 {
+            style(&format!("  flaky: {}", t.flaky), &[c::YELLOW], color)
+        } else {
+            String::new()
+        };
+        out.push(format!(
+            "  {} {} {}{} {}{}",
+            ss.icon,
+            style(&status_label, ss.codes, color),
+            style(&slug, &[c::DIM], color),
+            mark,
+            truncate(&t.config.title, title_w),
+            flaky
+        ));
     }
     out.push(String::new());
 }
@@ -315,7 +607,9 @@ fn render_phase(out: &mut Vec<String>, header: &str, goal: Option<&str>, tasks: 
 /// One line about a spike: its title with the question round and, once a
 /// round has been validated, the answer the player recorded for it.
 fn spike_detail(t: &TaskState) -> String {
-    let Some(sp) = &t.spike else { return t.config.title.clone() };
+    let Some(sp) = &t.spike else {
+        return t.config.title.clone();
+    };
     let progress = match (&sp.answer, sp.concluded) {
         (Some(a), true) => format!("answer: {a} (round {})", sp.round),
         (Some(a), false) => format!("round {}, latest answer: {a}", sp.round),
@@ -325,18 +619,43 @@ fn spike_detail(t: &TaskState) -> String {
     format!("{progress} — {}", t.config.title)
 }
 
-fn render_in_flight(out: &mut Vec<String>, state: &HubState, t: &TaskState, color: bool, width: usize) {
+fn render_in_flight(
+    out: &mut Vec<String>,
+    state: &HubState,
+    t: &TaskState,
+    color: bool,
+    width: usize,
+) {
     let ss = status_style(t.status);
-    out.push(format!("  {} {}  {}", ss.icon, style(t.status.as_str(), ss.codes, color), style(&t.slug, &[c::BOLD], color)));
-    out.push(format!("  {}", truncate(&t.config.title, width.saturating_sub(2))));
+    out.push(format!(
+        "  {} {}  {}",
+        ss.icon,
+        style(t.status.as_str(), ss.codes, color),
+        style(&t.slug, &[c::BOLD], color)
+    ));
+    out.push(format!(
+        "  {}",
+        truncate(&t.config.title, width.saturating_sub(2))
+    ));
 
     if let Some(conflict) = &t.conflict {
-        let line = format!("  conflicts with main {}: {}", &conflict.main[..conflict.main.len().min(12)], conflict.paths.join(", "));
+        let line = format!(
+            "  conflicts with main {}: {}",
+            &conflict.main[..conflict.main.len().min(12)],
+            conflict.paths.join(", ")
+        );
         out.push(style(&truncate(&line, width), &[c::RED], color));
     }
 
     if let Some(sp) = &t.spike {
-        out.push(format!("  spike round {}{}", sp.round, sp.answer.as_ref().map(|a| format!(", latest answer: {a}")).unwrap_or_default()));
+        out.push(format!(
+            "  spike round {}{}",
+            sp.round,
+            sp.answer
+                .as_ref()
+                .map(|a| format!(", latest answer: {a}"))
+                .unwrap_or_default()
+        ));
     }
 
     if let Some(reason) = &t.contest {
@@ -345,13 +664,28 @@ fn render_in_flight(out: &mut Vec<String>, state: &HubState, t: &TaskState, colo
     }
 
     let max_rounds = state.roadmap.limits.max_review_rounds;
-    let round_codes: &[&str] = if t.review_round >= max_rounds { &[c::RED] } else { &[] };
+    let round_codes: &[&str] = if t.review_round >= max_rounds {
+        &[c::RED]
+    } else {
+        &[]
+    };
     let contests = if t.contest_round > 0 || t.contest.is_some() {
-        format!(", contests c{}/{}", t.contest_round + u32::from(t.contest.is_some()), state.roadmap.limits.max_contest_rounds)
+        format!(
+            ", contests c{}/{}",
+            t.contest_round + u32::from(t.contest.is_some()),
+            state.roadmap.limits.max_contest_rounds
+        )
     } else {
         String::new()
     };
-    out.push(format!("  round {}{contests}", style(&format!("r{}/{}", t.review_round, max_rounds), round_codes, color)));
+    out.push(format!(
+        "  round {}{contests}",
+        style(
+            &format!("r{}/{}", t.review_round, max_rounds),
+            round_codes,
+            color
+        )
+    ));
 
     let strike_bits: Vec<String> = Reason::ALL
         .iter()
@@ -362,7 +696,11 @@ fn render_in_flight(out: &mut Vec<String>, state: &HubState, t: &TaskState, colo
             }
             let limit = state.roadmap.limits.strikes.limit(r);
             let codes: &[&str] = if n >= limit { &[c::RED] } else { &[] };
-            Some(style(&format!("{} {}/{}", r.as_str(), n, limit), codes, color))
+            Some(style(
+                &format!("{} {}/{}", r.as_str(), n, limit),
+                codes,
+                color,
+            ))
         })
         .collect();
     if !strike_bits.is_empty() {
@@ -373,9 +711,18 @@ fn render_in_flight(out: &mut Vec<String>, state: &HubState, t: &TaskState, colo
         if t.spike.is_some() {
             // A spike's cached results are its claims (prefixed `claim:`),
             // not a project suite.
-            let claims: Vec<_> = suite.checks.iter().filter(|c| c.name.starts_with("claim:")).cloned().collect();
+            let claims: Vec<_> = suite
+                .checks
+                .iter()
+                .filter(|c| c.name.starts_with("claim:"))
+                .cloned()
+                .collect();
             if !claims.is_empty() {
-                let claims = SuiteResult { pass: claims.iter().all(|c| c.pass), checks: claims, error: None };
+                let claims = SuiteResult {
+                    pass: claims.iter().all(|c| c.pass),
+                    checks: claims,
+                    error: None,
+                };
                 out.push(format!("  claims: {}", format_suite(&claims)));
             }
         } else {
@@ -384,13 +731,26 @@ fn render_in_flight(out: &mut Vec<String>, state: &HubState, t: &TaskState, colo
     }
 
     let session = crate::state::tmux_session_name(&state.project, &t.slug);
-    let alive = if t.alive { style("alive", &[c::GREEN], color) } else { style("dead", &[c::RED], color) };
+    let alive = if t.alive {
+        style("alive", &[c::GREEN], color)
+    } else {
+        style("dead", &[c::RED], color)
+    };
     out.push(format!("  session: {session} ({alive})"));
 
     if let Some(agent) = &t.agent {
-        let session = crate::state::tmux_session_name(&state.project, &crate::state::agent_key(&t.slug));
-        let alive = if agent.alive { style("alive", &[c::GREEN], color) } else { style("dead", &[c::RED], color) };
-        let verdict = agent.report.as_ref().map(|r| format!(", reported: {}", r.verdict)).unwrap_or_default();
+        let session =
+            crate::state::tmux_session_name(&state.project, &crate::state::agent_key(&t.slug));
+        let alive = if agent.alive {
+            style("alive", &[c::GREEN], color)
+        } else {
+            style("dead", &[c::RED], color)
+        };
+        let verdict = agent
+            .report
+            .as_ref()
+            .map(|r| format!(", reported: {}", r.verdict))
+            .unwrap_or_default();
         out.push(format!("  task agent: {session} ({alive}){verdict}"));
     }
 }
@@ -412,7 +772,13 @@ fn format_suite(suite: &SuiteResult) -> String {
                 (n, true) => format!(", passed on retry {n}/{}", c.retry_failed),
                 (n, false) => format!(", retried {n}/{}", c.retry_failed),
             };
-            format!("{}: {} ({}/{}{retry})", c.name, if c.pass { "pass" } else { "fail" }, passed, c.runs)
+            format!(
+                "{}: {} ({}/{}{retry})",
+                c.name,
+                if c.pass { "pass" } else { "fail" },
+                passed,
+                c.runs
+            )
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -433,9 +799,18 @@ mod tests {
     fn roadmap() -> RoadmapConfig {
         RoadmapConfig {
             title: Some("Widget".to_string()),
-            phases: vec![Phase { id: "p1".to_string(), title: Some("Phase One".to_string()), goal: Some("ship the widget".to_string()), hidden: false }],
+            phases: vec![Phase {
+                id: "p1".to_string(),
+                title: Some("Phase One".to_string()),
+                goal: Some("ship the widget".to_string()),
+                hidden: false,
+            }],
             docs_paths: vec![],
-            limits: Limits { max_review_rounds: 2, max_contest_rounds: 2, strikes: StrikeLimits::default() },
+            limits: Limits {
+                max_review_rounds: 2,
+                max_contest_rounds: 2,
+                strikes: StrikeLimits::default(),
+            },
             player: Default::default(),
         }
     }
@@ -443,7 +818,15 @@ mod tests {
     fn task(slug: &str, phase: &str, status: Status) -> TaskState {
         TaskState {
             slug: slug.to_string(),
-            config: TaskConfig { title: format!("Title for {slug}"), phase: phase.to_string(), milestone: false, depends_on: vec![], check: None, kind: TaskKind::Task, ..Default::default() },
+            config: TaskConfig {
+                title: format!("Title for {slug}"),
+                phase: phase.to_string(),
+                milestone: false,
+                depends_on: vec![],
+                check: None,
+                kind: TaskKind::Task,
+                ..Default::default()
+            },
             status,
             tip: "deadbeef".to_string(),
             strikes: BTreeMap::new(),
@@ -462,7 +845,14 @@ mod tests {
     }
 
     fn hub_state(tasks: Vec<TaskState>) -> HubState {
-        HubState { roadmap: roadmap(), main_tip: "deadbeef".to_string(), tasks, rejections: vec![], flakes: vec![], project: "widget".to_string() }
+        HubState {
+            roadmap: roadmap(),
+            main_tip: "deadbeef".to_string(),
+            tasks,
+            rejections: vec![],
+            flakes: vec![],
+            project: "widget".to_string(),
+        }
     }
 
     fn render_plain(state: &HubState) -> String {
@@ -485,7 +875,11 @@ mod tests {
 
     #[test]
     fn retired_tasks_are_excluded_from_the_progress_denominator() {
-        let tasks = vec![task("a", "p1", Status::Accepted), task("b", "p1", Status::Pending), task("dead", "p1", Status::Retired)];
+        let tasks = vec![
+            task("a", "p1", Status::Accepted),
+            task("b", "p1", Status::Pending),
+            task("dead", "p1", Status::Retired),
+        ];
         let out = render_plain(&hub_state(tasks));
         // 1 accepted out of 2 live tasks (the retired one doesn't count).
         assert!(out.contains("1/2 accepted (50%)"), "{out}");
@@ -494,7 +888,10 @@ mod tests {
 
     #[test]
     fn phases_list_tasks_and_no_phase_group_catches_the_rest() {
-        let tasks = vec![task("in-phase", "p1", Status::Ready), task("stray", "other-phase", Status::Ready)];
+        let tasks = vec![
+            task("in-phase", "p1", Status::Ready),
+            task("stray", "other-phase", Status::Ready),
+        ];
         let out = render_plain(&hub_state(tasks));
         assert!(out.contains("Phase One"), "{out}");
         assert!(out.contains("ship the widget"), "{out}");
@@ -509,7 +906,15 @@ mod tests {
         old.config.milestone = true;
         let tasks = vec![old, task("new-task", "p1", Status::Ready)];
         let mut state = hub_state(tasks);
-        state.roadmap.phases.insert(0, Phase { id: "p0".to_string(), title: Some("Phase Zero".to_string()), goal: None, hidden: true });
+        state.roadmap.phases.insert(
+            0,
+            Phase {
+                id: "p0".to_string(),
+                title: Some("Phase Zero".to_string()),
+                goal: None,
+                hidden: true,
+            },
+        );
         let out = render_plain(&state);
         assert!(!out.contains("Phase Zero"), "{out}");
         assert!(!out.contains("old-task"), "{out}");
@@ -567,7 +972,17 @@ mod tests {
         t.strikes.insert(Reason::Pins, 0); // zero strikes never show
         t.suite = Some(SuiteResult {
             pass: true,
-            checks: vec![CheckResult { name: "unit".to_string(), cmd: "true".to_string(), runs: 1, min_pass: 1, max_pass: None, exits: vec![0], pass: true, output_tail: None, ..Default::default() }],
+            checks: vec![CheckResult {
+                name: "unit".to_string(),
+                cmd: "true".to_string(),
+                runs: 1,
+                min_pass: 1,
+                max_pass: None,
+                exits: vec![0],
+                pass: true,
+                output_tail: None,
+                ..Default::default()
+            }],
             error: None,
         });
         t.alive = true;
@@ -586,20 +1001,40 @@ mod tests {
     #[test]
     fn in_flight_and_ready_show_the_task_agent() {
         let mut t = task("a", "p1", Status::Tested);
-        t.agent = Some(crate::state::AgentState { alive: true, report: Some(crate::records::AgentReport { verdict: "accept".to_string(), text: String::new(), at: 0 }) });
+        t.agent = Some(crate::state::AgentState {
+            alive: true,
+            report: Some(crate::records::AgentReport {
+                verdict: "accept".to_string(),
+                text: String::new(),
+                at: 0,
+            }),
+        });
         let mut r = task("b", "p1", Status::Ready);
-        r.agent = Some(crate::state::AgentState { alive: true, report: None });
+        r.agent = Some(crate::state::AgentState {
+            alive: true,
+            report: None,
+        });
         let out = render_plain(&hub_state(vec![t, r]));
-        assert!(out.contains("task agent: dash-widget-a_agent (alive), reported: accept"), "{out}");
+        assert!(
+            out.contains("task agent: dash-widget-a_agent (alive), reported: accept"),
+            "{out}"
+        );
         assert!(out.contains("(task agent posting)"), "{out}");
     }
 
     #[test]
     fn in_flight_lists_every_parallel_task() {
-        let out = render_plain(&hub_state(vec![task("one", "p1", Status::InProgress), task("two", "p1", Status::Tested), task("done", "p1", Status::Accepted)]));
+        let out = render_plain(&hub_state(vec![
+            task("one", "p1", Status::InProgress),
+            task("two", "p1", Status::Tested),
+            task("done", "p1", Status::Accepted),
+        ]));
         let section = out.split("In flight (2)").nth(1).expect("count in header");
         let section = section.split("✗ Escalated").next().unwrap();
-        assert!(section.contains("one") && section.contains("two"), "{section}");
+        assert!(
+            section.contains("one") && section.contains("two"),
+            "{section}"
+        );
         assert!(!section.contains("done"), "{section}");
     }
 
@@ -637,13 +1072,27 @@ mod tests {
     fn recent_rejections_show_newest_first_capped_at_eight() {
         let mut state = hub_state(vec![]);
         for i in 1..=10u32 {
-            state.rejections.push(RejectionRecord { scope: "x".to_string(), n: i, reason: Reason::Suite, actor: Actor::Subagent, message: format!("attempt {i}"), at: i as u64, commit: format!("sha{i}") });
+            state.rejections.push(RejectionRecord {
+                scope: "x".to_string(),
+                n: i,
+                reason: Reason::Suite,
+                actor: Actor::Worker,
+                message: format!("attempt {i}"),
+                at: i as u64,
+                commit: format!("sha{i}"),
+            });
         }
         let out = render_plain(&state);
         assert!(out.contains("attempt 10"), "{out}");
-        assert!(!out.contains("attempt 2\n") && !out.ends_with("attempt 2"), "should have dropped the two oldest: {out}");
+        assert!(
+            !out.contains("attempt 2\n") && !out.ends_with("attempt 2"),
+            "should have dropped the two oldest: {out}"
+        );
         // Newest (10) appears before an older one (9) in the rendered text.
-        assert!(out.find("attempt 10").unwrap() < out.find("attempt 9").unwrap(), "{out}");
+        assert!(
+            out.find("attempt 10").unwrap() < out.find("attempt 9").unwrap(),
+            "{out}"
+        );
     }
 
     #[test]
@@ -660,12 +1109,23 @@ mod tests {
     #[test]
     fn recent_events_are_shown_newest_first_and_capped_at_five() {
         let state = hub_state(vec![]);
-        let events: Vec<Event> = (1..=7u64).map(|seq| Event { seq, at: seq, kind: EventKind::Tested, slug: Some("x".to_string()), message: format!("msg {seq}") }).collect();
+        let events: Vec<Event> = (1..=7u64)
+            .map(|seq| Event {
+                seq,
+                at: seq,
+                kind: EventKind::Tested,
+                slug: Some("x".to_string()),
+                message: format!("msg {seq}"),
+            })
+            .collect();
         let out = render(&state, &events, false, 100);
         assert!(out.contains("Recent events"), "{out}");
         assert!(out.contains("msg 7"), "{out}");
         assert!(!out.contains("msg 1"), "should only keep the last 5: {out}");
-        assert!(out.find("msg 7").unwrap() < out.find("msg 3").unwrap(), "{out}");
+        assert!(
+            out.find("msg 7").unwrap() < out.find("msg 3").unwrap(),
+            "{out}"
+        );
     }
 
     #[test]

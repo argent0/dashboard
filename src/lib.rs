@@ -2,17 +2,17 @@
 // lets integration tests in tests/ exercise these modules directly instead of
 // only through the CLI. See CLAUDE.md and spec.md for the overall design.
 
-pub mod config;
-pub mod git;
-pub mod paths;
-pub mod ui;
-pub mod render;
-pub mod init;
 pub mod checks;
-pub mod records;
-pub mod state;
-pub mod player;
+pub mod config;
 pub mod events;
-pub mod spike;
 pub mod flaky;
+pub mod git;
+pub mod init;
+pub mod paths;
+pub mod player;
 pub mod prompts;
+pub mod records;
+pub mod render;
+pub mod spike;
+pub mod state;
+pub mod ui;

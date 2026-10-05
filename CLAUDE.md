@@ -1,14 +1,14 @@
 # dashboard
 
-The enforcement point for a subagent-per-task roadmap loop (see `spec.md`,
+The enforcement point for a worker-per-task roadmap loop (see `spec.md`,
 the design source of truth). `dashboard` is no longer a stateless renderer
 of a hand-edited `tasks.yaml`: it's the **player** — a bare git hub plus a
 process that imports and validates every commit a director, task agent or
-subagent clone produces, runs every check itself, launches task agents and
-subagents in `tmux`,
+worker clone produces, runs every check itself, launches task agents and
+workers in `tmux`,
 counts strikes, merges accepted work, retires dead ends, and renders a
 status that's a pure function of the hub. Nobody writes a status; git (plus
-whether a subagent's session is alive) is the only source of truth. This is
+whether a worker's session is alive) is the only source of truth. This is
 greenfield: there is no compatibility with the old `tasks.yaml` format, and
 none is planned.
 
@@ -63,12 +63,12 @@ player.heartbeat     unix time of the last tick, so `wait` can tell the
                      player looks dead (missing or >30s old)
 ```
 
-Subagent clones live *outside* this home, nested inside the **director's own
-working tree** instead (`paths::subagents_root`/`subagent_clone`):
+Worker clones live *outside* this home, nested inside the **director's own
+working tree** instead (`paths::workers_root`/`worker_clone`):
 
 ```
 <director-clone>/.dashboard/workspace/          the one clone of the hub they're all worktrees of
-<director-clone>/.dashboard/subagents/<slug>/   a subagent's worktree (branch task/<slug>)
+<director-clone>/.dashboard/workers/<slug>/   a worker's worktree (branch task/<slug>)
 <director-clone>/.dashboard/agents/<slug>/      a task agent's worktree (branch agent/<slug>, spec §17)
 ```
 
@@ -76,7 +76,7 @@ The player writes each agent's prompt to `dashboard-prompt.md` in that
 worktree's git directory; a task agent leaves its report there as
 `dashboard-report.md`, which the player reads and removes.
 
-A subagent clone is a fresh directory the player creates with nobody present
+A worker clone is a fresh directory the player creates with nobody present
 to click through an agent CLI's first-run workspace-trust dialog. Nesting it
 inside the director's project directory means it inherits whatever trust the
 operator already granted that directory through their own ordinary use,
@@ -96,7 +96,7 @@ refs/retired/<slug>        a retired task's branch, moved here by the player
 refs/explored/<slug>       a concluded spike's branch, moved here on `conclude:` (spec §14)
 refs/incoming/director/*   the director clone's main/task/* fetched in,
                             pre-validation (src/player.rs's `fetch`)
-refs/incoming/subagent/<slug>  a subagent clone's task/<slug>, pre-validation
+refs/incoming/worker/<slug>  a worker clone's task/<slug>, pre-validation
 refs/incoming/agent/<slug>     a task agent clone's agent/<slug>, pre-validation (spec §17)
 refs/dashboard/agent/<slug>    the tip a task's task agent was launched at; never moved
 refs/dashboard/agent-asked/<slug>  the tested tip its task agent was last asked to review
@@ -145,7 +145,7 @@ hidden = false                   # true: left out of `status` (phase list + mile
 
 [limits]
 max_review_rounds = 2            # default 2
-max_contest_rounds = 2           # default 2: subagent contests per task (spec §18)
+max_contest_rounds = 2           # default 2: worker contests per task (spec §18)
 
 [limits.strikes]                 # each defaults to 2 (spec §10)
 history = 2
@@ -161,7 +161,7 @@ claims = 2                       # a spike's finish whose claims/findings don't 
 evidence = 1                     # a flaky-test-fix post whose flake doesn't reproduce
 
 [player]
-agent_cmd = "claude --dangerously-skip-permissions"        # the subagent; default
+agent_cmd = "claude --dangerously-skip-permissions"        # the worker; default
 task_agent_cmd = "claude --dangerously-skip-permissions"   # the task agent (spec §17); default.
                                                            # "" turns task agents off
 ```
@@ -173,9 +173,9 @@ placeholders.
 ```kdl
 max-bytes 6144                   # cap on each delivered prompt's static text
                                  # (placeholders and what fills them not counted)
-subagent max-bytes=512 {         # optional: cap on each template in the section
+worker max-bytes=512 {         # optional: cap on each template in the section
     launch max-bytes=1536 #"""   # optional: this template's cap, instead of the section's
-        You are the subagent for task `{slug}` in project `{project}`. …
+        You are the worker for task `{slug}` in project `{project}`. …
         """#
     finish-accepted "finish accepted — …"
     …
@@ -208,7 +208,7 @@ only `[[check]]` entries, same shape. The suite is `tests.toml`'s checks plus
 every `tests.d/*.toml`'s in path order (`config::suite_at`); check names must
 be unique across all of them. Per-task files mean parallel posts never
 conflict on the suite. A post's task check must be in its own fragment, not
-`tests.toml`; fragments are pinned like `tests.toml`, and a subagent adding
+`tests.toml`; fragments are pinned like `tests.toml`, and a worker adding
 one is a `pins` strike.
 
 `tasks/<slug>/task.toml`:
@@ -253,7 +253,7 @@ why = "…"                                 name = "…"
 answers = ["yes", "no"]                   cmd = "…"   # + runs/min_pass/timeout
 refines = 1                               # on current code; must pass on main
 
-# claims/<n>.toml (subagent)              findings/<n>.md (subagent, free-form,
+# claims/<n>.toml (worker)              findings/<n>.md (worker, free-form,
 answer = "yes"                            #   must exist and be non-empty)
 [[claim]]
 name = "…"
@@ -282,7 +282,7 @@ ignored — no `deny_unknown_fields` anywhere.
   interval 2s). `--once` runs a single tick, prints its report, and exits;
   this is what drives `scripts/e2e.sh` and what a supervisor (systemd timer,
   cron, a loop) should call if you don't want a long-running process.
-- `dashboard relaunch <slug> [--agent]` — manually restarts a dead subagent
+- `dashboard relaunch <slug> [--agent]` — manually restarts a dead worker
   session with the same clone and prompt file; `--agent` restarts the task
   agent instead, with a fresh prompt for the task's current step. There is
   no automatic relaunch (see Decisions below); a dead session just shows up
@@ -305,12 +305,12 @@ subcommand.
   tests in `tests/*.rs` (throwaway repos in temp dirs via `tests/common/mod.rs`)
 - `scripts/e2e.sh [path-to-binary]` — an end-to-end scenario against the
   real binary and real `tmux`: a throwaway director repo + hub, a small
-  fake-agent shell script standing in for a real Claude Code subagent, and
+  fake-agent shell script standing in for a real Claude Code worker, and
   the full plan/post/launch/finish/send-back/accept/block/escalate/retire/
   reject loop, asserted via `dashboard status --no-color` and raw hub ref
   checks. Run it after any change that touches `src/player.rs`,
   `src/state.rs`, or the on-disk/ref layout — it's the only test that
-  exercises real `tmux` sessions and a real subagent-style fetch/merge/
+  exercises real `tmux` sessions and a real worker-style fetch/merge/
   commit cycle.
 - **Installing**: `cargo install --path .` replaces `~/.cargo/bin/dashboard`,
   the binary every director and `~/.claude/skills/dashboard` invoke. When a
@@ -325,8 +325,8 @@ back here):
 - **CLI shape**: `init` / `status` (default) / `player [--once]` /
   `relaunch <slug>` / `wait` — see CLI above.
 - **Hub/clone locations**: the hub home (hub.git, work/, events.jsonl, …) is
-  XDG (`paths::Home`); subagent clones are *not* — they nest inside the
-  director's own working tree (`paths::subagents_root`) so they inherit the
+  XDG (`paths::Home`); worker clones are *not* — they nest inside the
+  director's own working tree (`paths::workers_root`) so they inherit the
   operator's own workspace trust instead of needing the player to grant it
   to a directory it creates unattended. See On-disk layout above.
   `dashboard init` is how the hub gets created (`src/init.rs`).
@@ -335,7 +335,7 @@ back here):
   and returns human-readable lines plus a per-kind hint (e.g. "fetch hub
   and review it"). `dashboard player` still polls its clones internally —
   it's a process, so that's fine; only the director-facing side had to stop.
-- **No auto-relaunch**: a dead subagent session is reported (`status`, a
+- **No auto-relaunch**: a dead worker session is reported (`status`, a
   `session_died` event) but never restarted automatically. `dashboard
   relaunch <slug>` is the manual trigger, reusing the existing clone and
   pins.
@@ -359,7 +359,7 @@ back here):
   `[check]` (`Runner::run_task_check`) or evidence. Every retry is in the
   cached result; a pass after a retry goes in the flake ledger
   (`records::record_flake`, per task or `_main`), shown in `status` as
-  `flaky: N`, a "Flaky checks" list and `passed on retry k/N`. The subagent
+  `flaky: N`, a "Flaky checks" list and `passed on retry k/N`. The worker
   is never told about retries.
 - **Spikes** (spec §14): `kind = "spike"`, operator-initiated by process
   rule (the player doesn't check it), nothing may depend on one, never
@@ -379,7 +379,7 @@ back here):
   branch itself (a player `sync` commit), then merges the branch into
   `main` once the suite passes on the result. If the suite fails because of
   that merge, the tip becomes a `sync_revision` (`in_revision`, re-pinned,
-  relayed to the subagent, no review round, a `merge_failed` event). If the
+  relayed to the worker, no review round, a `merge_failed` event). If the
   merge has a textual conflict, the marker is imported with a
   `dashboard-conflicts` note: the task is `conflicted` (a `conflict`
   event, no strike). Conflict events come from the tick report, not a
@@ -412,7 +412,7 @@ back here):
   (`tests/common`'s `NO_TASK_AGENTS`) unless they're about them
   (`tests/task_agent.rs`).
 
-- **Contests** (spec §18): a subagent's `contest:` marker (clean, like
+- **Contests** (spec §18): a worker's `contest:` marker (clean, like
   `block:`) says a test it must pass is wrong. The task goes `contested`
   (`Transition::Contest`), not escalated; the task agent (or, task agents
   off, the director) replies with one commit adding

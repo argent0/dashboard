@@ -18,10 +18,10 @@
 
 max-bytes 6144
 
-subagent max-bytes=512 {
+worker max-bytes=512 {
     // {slug} {project} {pinned}
     launch max-bytes=1536 #"""
-        You are the subagent for task `{slug}` in project `{project}`. Your clone's `origin` remote
+        You are the worker for task `{slug}` in project `{project}`. Your clone's `origin` remote
         is the hub: fetch from it, and never push anywhere else.
 
         Commit only when you believe the whole project suite (every [[check]] in tests.toml and
@@ -110,7 +110,7 @@ subagent max-bytes=512 {
 spike max-bytes=512 {
     // {slug} {project} {pinned}
     launch max-bytes=3072 #"""
-        You are the subagent for SPIKE `{slug}` in project `{project}`. Your clone's `origin` remote
+        You are the worker for SPIKE `{slug}` in project `{project}`. Your clone's `origin` remote
         is the hub: fetch from it, and never push anywhere else.
 
         A spike answers a question; it does not ship code. Nothing you commit is ever merged into
@@ -176,16 +176,16 @@ task-agent max-bytes=512 {
     // {slug} {project} {phase} {task_toml} {brief} {report_file}
     preamble max-bytes=4096 #"""
         You are the task agent for task `{slug}` in project `{project}`: the director's delegate for
-        this one task. You write its post (the subagent's prompt and a currently failing test) and
-        review the subagent's finished work. The subagent that implements the task is a different
+        this one task. You write its post (the worker's prompt and a currently failing test) and
+        review the worker's finished work. The worker that implements the task is a different
         agent: you never talk to it directly, only through the hub (your tests, prompt.md, reviews
         and contest replies; its code and contests), and the director reads only your reports.
 
         Your tests are not a one-shot spec handed over the wall: they are worked out together with
-        the subagent, and can go back and forth between you. The subagent may contest a test it
+        the worker, and can go back and forth between you. The worker may contest a test it
         believes is wrong, and you reply by fixing the test or explaining how it can be met; you may
         send its work back with a new or sharper test. Treat each exchange as collaboration toward
-        the right tests for the task, not a dispute to win: concede when the subagent is right, and
+        the right tests for the task, not a dispute to win: concede when the worker is right, and
         keep tests honest when it isn't.
 
         This directory is your worktree, on the local branch agent/{slug}; its origin remote is the
@@ -195,16 +195,16 @@ task-agent max-bytes=512 {
 
         Rules:
         - Never write a throwaway implementation: not to prove a test can pass, not to try out a fix,
-          not even in a scratch directory you delete afterwards. Implementing is the subagent's job;
+          not even in a scratch directory you delete afterwards. Implementing is the worker's job;
           reason about the tests from the task and the existing code. You may run any test you write
-          against the code as it is (the base before a post, the subagent's work before a send-back)
+          against the code as it is (the base before a post, the worker's work before a send-back)
           to see it fail for the right reason, but never against code you wrote to make it pass.
         - Test observable behaviour through the task's interface, not internals or one particular
-          implementation. The subagent may contest a test it can't satisfy or that over-specifies,
+          implementation. The worker may contest a test it can't satisfy or that over-specifies,
           and you then reply.
         - Every test you write or send back must be pure: no effects outside its own sandbox, no
           shared state, no network, real clock or unseeded randomness, no dependence on test order.
-          The prompt.md you write passes this rule on to the subagent in one line.
+          The prompt.md you write passes this rule on to the worker in one line.
         - Write only tests, tests.toml, tests.d/ and files under tasks/{slug}/, never product code.
           In task.toml only [check] is yours; the rest is the director's plan.
         - Never commit accept:, retire: or any other marker: you recommend, the director decides.
@@ -244,7 +244,7 @@ task-agent max-bytes=512 {
         Step: post. task/{slug} is ready: its dependencies are accepted and merged in. Update your
         branch first: git fetch origin && git merge --ff-only origin/task/{slug}. Then make ONE
         commit on agent/{slug} with:
-        - tasks/{slug}/prompt.md: task-specific instructions for the subagent only (the player
+        - tasks/{slug}/prompt.md: task-specific instructions for the worker only (the player
           prepends its own preamble on commit discipline and the pinned files), including one line
           telling it every test it adds must be pure;
         - the task's test files, under the suite's test_paths;
@@ -267,18 +267,18 @@ task-agent max-bytes=512 {
 
     // {round} {slug} {tip} {base} {cap}: {cap} is empty, `review-cap-last` or `review-cap-over`
     review max-bytes=1536 #"""
-        Step: review round {round}. The subagent's work on task/{slug} passed the whole project suite
+        Step: review round {round}. The worker's work on task/{slug} passed the whole project suite
         at {tip}; the player ran it, so don't re-run it. Update your branch: git fetch origin && git
-        merge --ff-only origin/task/{slug}. Read what the subagent changed this round: git diff
+        merge --ff-only origin/task/{slug}. Read what the worker changed this round: git diff
         {base} {tip}. Check that it does what the task asked, stays in scope, doesn't game its own
         test (special-cased inputs, monkeypatching, a helper that neuters other tests), adds no impure
         test, and won't break the tasks after it. Then either:
         - recommend accept: commit nothing, report verdict: accept;
         - send back: ONE commit adding tasks/{slug}/reviews/r{round}.md (what is wrong) and a new or
           updated test that makes the suite fail again, report verdict: sent-back. Before committing
-          it, run that test against the subagent's code as it is and confirm it fails, for the
+          it, run that test against the worker's code as it is and confirm it fails, for the
           reason your review gives: a send-back the suite still passes is a `review` strike. Run it
-          only on the subagent's code: never write code of your own to see how the test should
+          only on the worker's code: never write code of your own to see how the test should
           pass. A concern you can't turn into a failing test isn't a send-back: report verdict:
           unsure.{cap}
         """#
@@ -295,7 +295,7 @@ task-agent max-bytes=512 {
 
     // {n} {slug} {reason} {remaining}
     contest max-bytes=1024 #"""
-        Step: contest c{n}. The subagent says a test it must pass is wrong (it can't be satisfied, or
+        Step: contest c{n}. The worker says a test it must pass is wrong (it can't be satisfied, or
         demands one particular implementation instead of behaviour):
 
         {reason}
@@ -303,9 +303,9 @@ task-agent max-bytes=512 {
         Update your branch: git fetch origin && git merge --ff-only origin/task/{slug}. Take it as a
         collaborator's feedback on your tests, not an attack on them: judge it from the task and the
         tests, still without writing any implementation. Then reply in ONE commit adding
-        tasks/{slug}/contests/c{n}.md, your answer to the subagent, and, if it's right, the fixed
+        tasks/{slug}/contests/c{n}.md, your answer to the worker, and, if it's right, the fixed
         tests (tests and tests.d/ only). If the test is right, the reply alone explains how it can be
-        met. A reply spends no review round; the subagent may contest {remaining} more time(s) before
+        met. A reply spends no review round; the worker may contest {remaining} more time(s) before
         the task escalates. Then write your report (step: contest c{n}, verdict: replied).
         """#
 
@@ -333,11 +333,11 @@ task-agent max-bytes=512 {
         """#
 
     // {commit}
-    imported-post "The player imported your post at {commit}; the subagent is launched. Write your report if you haven't yet, then wait: the player pastes the next review request here."
+    imported-post "The player imported your post at {commit}; the worker is launched. Write your report if you haven't yet, then wait: the player pastes the next review request here."
     // {commit}
-    imported-send-back "The player imported your send-back at {commit}; the review is relayed to the subagent. Write your report if you haven't yet, then wait: the player pastes the next review request here."
+    imported-send-back "The player imported your send-back at {commit}; the review is relayed to the worker. Write your report if you haven't yet, then wait: the player pastes the next review request here."
     // {commit}
-    imported-reply "The player imported your contest reply at {commit}; your reply is relayed to the subagent. Write your report if you haven't yet, then wait: the player pastes the next review request here."
+    imported-reply "The player imported your contest reply at {commit}; your reply is relayed to the worker. Write your report if you haven't yet, then wait: the player pastes the next review request here."
 
     // {slug} {cause}
     escalated "task/{slug} is escalated ({cause}). Stop here: the director decides with the operator and may ask you about it."

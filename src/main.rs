@@ -1,6 +1,6 @@
 // The player for a git-hub-backed roadmap loop (spec.md): imports and
-// validates director/subagent commits, runs every check itself, launches
-// subagents in tmux, and merges accepted work — plus `dashboard status`
+// validates director/worker commits, runs every check itself, launches
+// workers in tmux, and merges accepted work — plus `dashboard status`
 // (the default when no subcommand is given), which renders the roadmap
 // purely from what's derived from the hub (src/state.rs, src/render.rs).
 //
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 // --------------------------------------------------------------------------
 
 /// The player for a git-hub-backed roadmap loop: imports and validates
-/// director/subagent commits, runs every check itself, launches subagents in
+/// director/worker commits, runs every check itself, launches workers in
 /// tmux, and merges accepted work. With no subcommand, renders the roadmap
 /// derived from the hub (see spec.md).
 #[derive(Parser)]
@@ -55,7 +55,7 @@ enum Command {
     /// Render the roadmap derived from the hub (spec.md §12). The default
     /// when no subcommand is given.
     Status,
-    /// Run the player loop: import and validate director/subagent commits,
+    /// Run the player loop: import and validate director/worker commits,
     /// run checks, and merge accepted/unblocked work (spec.md §5, §9, §11).
     Player {
         /// Run a single tick, print its report, and exit.
@@ -72,12 +72,12 @@ enum Command {
         #[arg(long, short = 'n', default_value_t = 2)]
         interval: u64,
     },
-    /// Manually restart a task's subagent tmux session after it died (spec.md
+    /// Manually restart a task's worker tmux session after it died (spec.md
     /// §9's launch row leaves automatic relaunch deferred).
     Relaunch {
         /// The task's slug.
         slug: String,
-        /// Restart the task's task agent (spec.md §17) instead of its subagent.
+        /// Restart the task's task agent (spec.md §17) instead of its worker.
         #[arg(long)]
         agent: bool,
     },
@@ -110,7 +110,9 @@ fn main() {
     match args.command {
         Some(Command::Init { name }) => run_init(name, args.home),
         Some(Command::Status) | None => run_status(args.home, args.no_color, args.width),
-        Some(Command::Watch { interval }) => run_watch(args.home, args.no_color, args.width, interval),
+        Some(Command::Watch { interval }) => {
+            run_watch(args.home, args.no_color, args.width, interval)
+        }
         Some(Command::Player { once, interval }) => run_player(args.home, once, interval),
         Some(Command::Relaunch { slug, agent }) => run_relaunch(args.home, &slug, agent),
         Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
@@ -183,10 +185,17 @@ fn render_status(home: Option<PathBuf>, color: bool, width: Option<u32>) -> Resu
     let project = hub
         .config_get("dashboard.project")
         .ok_or("hub is missing dashboard.project — run `dashboard init`")?;
-    let hub_state = state::derive(&hub, &|slug| state::tmux_alive(&state::tmux_session_name(&project, slug)))
-        .map_err(|e| format!("{e} — run `dashboard init`"))?;
+    let hub_state = state::derive(&hub, &|slug| {
+        state::tmux_alive(&state::tmux_session_name(&project, slug))
+    })
+    .map_err(|e| format!("{e} — run `dashboard init`"))?;
     let events = events::read_all(&home);
-    Ok(render::render(&hub_state, &events, color, ui::detect_width(width)))
+    Ok(render::render(
+        &hub_state,
+        &events,
+        color,
+        ui::detect_width(width),
+    ))
 }
 
 // --------------------------------------------------------------------------
@@ -247,7 +256,8 @@ fn run_watch(home: Option<PathBuf>, no_color: bool, width: Option<u32>, interval
     let tick = std::time::Duration::from_millis(100);
     let interval = std::time::Duration::from_secs(interval.max(1));
     while !WATCH_STOP.load(Ordering::SeqCst) {
-        let text = render_status(home.clone(), !no_color, width).unwrap_or_else(|e| format!("error: {e}"));
+        let text =
+            render_status(home.clone(), !no_color, width).unwrap_or_else(|e| format!("error: {e}"));
         let mut lines: Vec<&str> = text.lines().collect();
         if let Some(rows) = ui::detect_height() {
             lines.truncate(rows);
@@ -336,7 +346,11 @@ fn run_player(home: Option<PathBuf>, once: bool, interval: u64) {
 
 fn run_relaunch(home: Option<PathBuf>, slug: &str, agent: bool) {
     let mut player = open_player(home);
-    let result = if agent { player.relaunch_agent(slug) } else { player.relaunch(slug) };
+    let result = if agent {
+        player.relaunch_agent(slug)
+    } else {
+        player.relaunch(slug)
+    };
     match result {
         Ok(()) if agent => println!("relaunched task/{slug}'s task agent"),
         Ok(()) => println!("relaunched task/{slug}"),
@@ -354,7 +368,9 @@ fn run_relaunch(home: Option<PathBuf>, slug: &str, agent: bool) {
 fn run_ask(home: Option<PathBuf>, slug: &str, question: &str) {
     let mut player = open_player(home);
     match player.ask(slug, question) {
-        Ok(()) => println!("asked task/{slug}'s task agent; its answer arrives as an agent_report event (dashboard wait)"),
+        Ok(()) => println!(
+            "asked task/{slug}'s task agent; its answer arrives as an agent_report event (dashboard wait)"
+        ),
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
@@ -421,11 +437,15 @@ fn run_wait(home: Option<PathBuf>, timeout: Option<u64>, all: bool) {
     }
 
     let cursor = events::read_cursor(&home);
-    let deadline = timeout.map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
+    let deadline =
+        timeout.map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
     let mut warned_stale = false;
 
     loop {
-        let new: Vec<_> = events::read_all(&home).into_iter().filter(|e| e.seq > cursor).collect();
+        let new: Vec<_> = events::read_all(&home)
+            .into_iter()
+            .filter(|e| e.seq > cursor)
+            .collect();
         if !new.is_empty() {
             for event in &new {
                 println!("{}\n", event.human());
@@ -447,7 +467,10 @@ fn run_wait(home: Option<PathBuf>, timeout: Option<u64>, all: bool) {
 
         if let Some(deadline) = deadline {
             if std::time::Instant::now() >= deadline {
-                eprintln!("no events within {} s", timeout.expect("deadline implies timeout"));
+                eprintln!(
+                    "no events within {} s",
+                    timeout.expect("deadline implies timeout")
+                );
                 std::process::exit(2);
             }
         }

@@ -34,7 +34,8 @@ impl InitReport {
 }
 
 fn path_str(p: &Path) -> Result<&str, String> {
-    p.to_str().ok_or_else(|| format!("{} is not valid UTF-8", p.display()))
+    p.to_str()
+        .ok_or_else(|| format!("{} is not valid UTF-8", p.display()))
 }
 
 // --------------------------------------------------------------------------
@@ -45,18 +46,27 @@ fn path_str(p: &Path) -> Result<&str, String> {
 /// clone). `name` overrides the project name (default: the clone toplevel's
 /// basename); `home` overrides the dashboard home root (default:
 /// `paths::Home::for_project(name)`).
-pub fn init(director_dir: &Path, name: Option<&str>, home: Option<PathBuf>) -> Result<InitReport, String> {
+pub fn init(
+    director_dir: &Path,
+    name: Option<&str>,
+    home: Option<PathBuf>,
+) -> Result<InitReport, String> {
     // ---- resolve and validate the director clone ----
     let director = Git::new(director_dir);
-    let toplevel_raw = director.run(&["rev-parse", "--show-toplevel"]).map_err(|e| format!("not inside a git clone: {e}"))?;
-    let toplevel = std::fs::canonicalize(&toplevel_raw).map_err(|e| format!("{toplevel_raw}: {e}"))?;
+    let toplevel_raw = director
+        .run(&["rev-parse", "--show-toplevel"])
+        .map_err(|e| format!("not inside a git clone: {e}"))?;
+    let toplevel =
+        std::fs::canonicalize(&toplevel_raw).map_err(|e| format!("{toplevel_raw}: {e}"))?;
     let director = Git::new(&toplevel);
 
     if !director.ref_exists("refs/heads/main") {
         return Err("director clone has no local branch `main` — create one before running `dashboard init`".to_string());
     }
 
-    let roadmap_text = director.show_file("refs/heads/main", "roadmap.toml").ok_or_else(|| "roadmap.toml not found at main's tip".to_string())?;
+    let roadmap_text = director
+        .show_file("refs/heads/main", "roadmap.toml")
+        .ok_or_else(|| "roadmap.toml not found at main's tip".to_string())?;
     config::roadmap_config_from_str(&roadmap_text).map_err(|e| format!("roadmap.toml: {e}"))?;
 
     config::suite_at(&director, "refs/heads/main")?; // tests.toml + tests.d/; also runs Check::validate on every entry
@@ -68,7 +78,10 @@ pub fn init(director_dir: &Path, name: Option<&str>, home: Option<PathBuf>) -> R
     // ---- project name and home ----
     let project = match name {
         Some(n) => n.to_string(),
-        None => toplevel.file_name().map(|s| s.to_string_lossy().into_owned()).ok_or_else(|| format!("cannot derive a project name from {}", toplevel.display()))?,
+        None => toplevel
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .ok_or_else(|| format!("cannot derive a project name from {}", toplevel.display()))?,
     };
 
     let mut home = match home {
@@ -76,16 +89,20 @@ pub fn init(director_dir: &Path, name: Option<&str>, home: Option<PathBuf>) -> R
         None => Home::for_project(&project),
     };
     if home.hub().exists() {
-        return Err(format!("{} already exists — refusing to overwrite an existing hub", home.hub().display()));
+        return Err(format!(
+            "{} already exists — refusing to overwrite an existing hub",
+            home.hub().display()
+        ));
     }
 
     // ---- create the hub ----
     std::fs::create_dir_all(&home.root).map_err(|e| format!("{}: {e}", home.root.display()))?;
-    home.root = std::fs::canonicalize(&home.root).map_err(|e| format!("{}: {e}", home.root.display()))?;
+    home.root =
+        std::fs::canonicalize(&home.root).map_err(|e| format!("{}: {e}", home.root.display()))?;
     let hub_path = home.hub();
 
-    // Subagent clones nest inside the director's own working tree (see
-    // paths::subagents_root) so they inherit whatever workspace trust the
+    // Worker clones nest inside the director's own working tree (see
+    // paths::workers_root) so they inherit whatever workspace trust the
     // operator already granted it, instead of the player needing to grant
     // trust itself to a directory it creates with nobody present. Make sure
     // the director repo ignores that subfolder before the hub ever fetches
@@ -95,44 +112,69 @@ pub fn init(director_dir: &Path, name: Option<&str>, home: Option<PathBuf>) -> R
     ensure_prompts(&toplevel, &home.root)?;
 
     let creator = Git::new(&home.root);
-    creator.run(&["init", "--quiet", "--bare", path_str(&hub_path)?]).map_err(|e| e.to_string())?;
+    creator
+        .run(&["init", "--quiet", "--bare", path_str(&hub_path)?])
+        .map_err(|e| e.to_string())?;
 
     let hub = Git::new(&hub_path);
-    hub.run(&["symbolic-ref", "HEAD", "refs/heads/main"]).map_err(|e| e.to_string())?;
-    hub.run(&["fetch", "--quiet", path_str(&toplevel)?, "refs/heads/main:refs/heads/main"]).map_err(|e| format!("fetching main into the hub: {e}"))?;
+    hub.run(&["symbolic-ref", "HEAD", "refs/heads/main"])
+        .map_err(|e| e.to_string())?;
+    hub.run(&[
+        "fetch",
+        "--quiet",
+        path_str(&toplevel)?,
+        "refs/heads/main:refs/heads/main",
+    ])
+    .map_err(|e| format!("fetching main into the hub: {e}"))?;
 
-    hub.config_set("dashboard.director", path_str(&toplevel)?).map_err(|e| e.to_string())?;
-    hub.config_set("dashboard.project", &project).map_err(|e| e.to_string())?;
+    hub.config_set("dashboard.director", path_str(&toplevel)?)
+        .map_err(|e| e.to_string())?;
+    hub.config_set("dashboard.project", &project)
+        .map_err(|e| e.to_string())?;
 
     // ---- wire up the director clone ----
-    director.config_set("dashboard.home", path_str(&home.root)?).map_err(|e| e.to_string())?;
+    director
+        .config_set("dashboard.home", path_str(&home.root)?)
+        .map_err(|e| e.to_string())?;
 
     match director.run(&["remote", "get-url", "hub"]) {
         Ok(existing) => {
             let existing_canon = std::fs::canonicalize(&existing).ok();
             let target_canon = std::fs::canonicalize(&hub_path).ok();
             if existing_canon != target_canon {
-                return Err(format!("director clone's `hub` remote already points at {existing} (expected {})", hub_path.display()));
+                return Err(format!(
+                    "director clone's `hub` remote already points at {existing} (expected {})",
+                    hub_path.display()
+                ));
             }
         }
         Err(_) => {
-            director.run(&["remote", "add", "hub", path_str(&hub_path)?]).map_err(|e| e.to_string())?;
+            director
+                .run(&["remote", "add", "hub", path_str(&hub_path)?])
+                .map_err(|e| e.to_string())?;
         }
     }
-    director.run(&["fetch", "--quiet", "hub"]).map_err(|e| format!("fetching hub into the director clone: {e}"))?;
+    director
+        .run(&["fetch", "--quiet", "hub"])
+        .map_err(|e| format!("fetching hub into the director clone: {e}"))?;
 
     // ---- home scaffolding ----
-    std::fs::create_dir_all(paths::subagents_root(&toplevel)).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(paths::workers_root(&toplevel)).map_err(|e| e.to_string())?;
     let events = home.events();
     if !events.exists() {
         std::fs::write(&events, "").map_err(|e| e.to_string())?;
     }
 
-    Ok(InitReport { home: home.root, hub: hub_path, project, director: toplevel })
+    Ok(InitReport {
+        home: home.root,
+        hub: hub_path,
+        project,
+        director: toplevel,
+    })
 }
 
 /// Ensures the director repo's `.gitignore` (on `refs/heads/main`) excludes
-/// `/.dashboard/` (where subagent clones live, `paths::subagents_root`),
+/// `/.dashboard/` (where worker clones live, `paths::workers_root`),
 /// committing the change if needed.
 ///
 /// When `main` is what's actually checked out here (the ordinary case —
@@ -147,7 +189,9 @@ pub fn init(director_dir: &Path, name: Option<&str>, home: Option<PathBuf>) -> R
 /// the bug this split avoids.
 fn ensure_dashboard_gitignore(toplevel: &Path, scratch_parent: &Path) -> Result<(), String> {
     let director = Git::new(toplevel);
-    let existing = director.show_file("refs/heads/main", ".gitignore").unwrap_or_default();
+    let existing = director
+        .show_file("refs/heads/main", ".gitignore")
+        .unwrap_or_default();
     if existing.lines().any(|l| l.trim() == "/.dashboard/") {
         return Ok(());
     }
@@ -157,27 +201,55 @@ fn ensure_dashboard_gitignore(toplevel: &Path, scratch_parent: &Path) -> Result<
         content.push('\n');
     }
     content.push_str("/.dashboard/\n");
-    commit_on_main(toplevel, scratch_parent, ".gitignore", &content, "dashboard: ignore subagent clones (.dashboard/)")
+    commit_on_main(
+        toplevel,
+        scratch_parent,
+        ".gitignore",
+        &content,
+        "dashboard: ignore worker clones (.dashboard/)",
+    )
 }
 
 /// Commits the starter prompts.kdl (spec §19) on `main` if it has none; an
 /// existing one was already validated.
 fn ensure_prompts(toplevel: &Path, scratch_parent: &Path) -> Result<(), String> {
-    if Git::new(toplevel).show_file("refs/heads/main", prompts::FILE).is_some() {
+    if Git::new(toplevel)
+        .show_file("refs/heads/main", prompts::FILE)
+        .is_some()
+    {
         return Ok(());
     }
-    commit_on_main(toplevel, scratch_parent, prompts::FILE, prompts::STARTER, "dashboard: add the player's prompts (prompts.kdl)")
+    commit_on_main(
+        toplevel,
+        scratch_parent,
+        prompts::FILE,
+        prompts::STARTER,
+        "dashboard: add the player's prompts (prompts.kdl)",
+    )
 }
 
 /// Commits `content` as `file` on `main`: in place when `main` is checked
 /// out here, else in a scratch worktree, then fast-forwarding the ref (see
 /// `ensure_dashboard_gitignore`).
-fn commit_on_main(toplevel: &Path, scratch_parent: &Path, file: &str, content: &str, message: &str) -> Result<(), String> {
+fn commit_on_main(
+    toplevel: &Path,
+    scratch_parent: &Path,
+    file: &str,
+    content: &str,
+    message: &str,
+) -> Result<(), String> {
     let director = Git::new(toplevel);
-    if director.run(&["symbolic-ref", "-q", "HEAD"]).ok().as_deref() == Some("refs/heads/main") {
+    if director
+        .run(&["symbolic-ref", "-q", "HEAD"])
+        .ok()
+        .as_deref()
+        == Some("refs/heads/main")
+    {
         std::fs::write(toplevel.join(file), content).map_err(|e| e.to_string())?;
         director.run(&["add", file]).map_err(|e| e.to_string())?;
-        director.run(&["commit", "--quiet", "-m", message]).map_err(|e| e.to_string())?;
+        director
+            .run(&["commit", "--quiet", "-m", message])
+            .map_err(|e| e.to_string())?;
         return Ok(());
     }
 
@@ -186,7 +258,15 @@ fn commit_on_main(toplevel: &Path, scratch_parent: &Path, file: &str, content: &
     let tmp_branch = "__dashboard_init_commit";
     let _ = director.run(&["branch", "-D", tmp_branch]);
     director
-        .run(&["worktree", "add", "--quiet", "-B", tmp_branch, path_str(&worktree_dir)?, "refs/heads/main"])
+        .run(&[
+            "worktree",
+            "add",
+            "--quiet",
+            "-B",
+            tmp_branch,
+            path_str(&worktree_dir)?,
+            "refs/heads/main",
+        ])
         .map_err(|e| format!("creating scratch worktree for {file}: {e}"))?;
 
     let commit_result = (|| -> Result<String, String> {
@@ -194,15 +274,21 @@ fn commit_on_main(toplevel: &Path, scratch_parent: &Path, file: &str, content: &
 
         let scratch = Git::new(&worktree_dir);
         scratch.run(&["add", file]).map_err(|e| e.to_string())?;
-        scratch.run(&["commit", "--quiet", "-m", message]).map_err(|e| e.to_string())?;
-        scratch.rev_parse("HEAD").ok_or_else(|| "commit succeeded but HEAD is unreadable".to_string())
+        scratch
+            .run(&["commit", "--quiet", "-m", message])
+            .map_err(|e| e.to_string())?;
+        scratch
+            .rev_parse("HEAD")
+            .ok_or_else(|| "commit succeeded but HEAD is unreadable".to_string())
     })();
 
     let _ = director.run(&["worktree", "remove", "--force", path_str(&worktree_dir)?]);
     let _ = director.run(&["branch", "-D", tmp_branch]);
 
     let new_tip = commit_result?;
-    director.update_ref("refs/heads/main", &new_tip).map_err(|e| e.to_string())
+    director
+        .update_ref("refs/heads/main", &new_tip)
+        .map_err(|e| e.to_string())
 }
 
 // --------------------------------------------------------------------------
@@ -220,6 +306,9 @@ mod tests {
     fn errors_outside_a_git_clone() {
         let dir = tempfile::TempDir::new().unwrap();
         let err = init(dir.path(), None, None).unwrap_err();
-        assert!(err.contains("not inside a git clone"), "unexpected error: {err}");
+        assert!(
+            err.contains("not inside a git clone"),
+            "unexpected error: {err}"
+        );
     }
 }

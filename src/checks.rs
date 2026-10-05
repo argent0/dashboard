@@ -9,9 +9,9 @@ use crate::git::Git;
 use crate::paths::Home;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -71,7 +71,9 @@ impl CheckResult {
     /// threshold all still match — otherwise it's evidence for a different
     /// check that happens to share a name.
     fn reusable_for(&self, check: &Check, max_pass: Option<u32>) -> bool {
-        self.name == check.name && self.cmd == check.cmd && self.runs == check.runs
+        self.name == check.name
+            && self.cmd == check.cmd
+            && self.runs == check.runs
             && self.min_pass == check.min_pass
             && self.max_pass == max_pass
             && self.retry_failed == check.retry_failed
@@ -100,10 +102,14 @@ pub struct SuiteResult {
 impl SuiteResult {
     /// A suite that couldn't even be evaluated (missing/invalid `tests.toml`).
     pub fn failing(error: impl Into<String>) -> Self {
-        Self { pass: false, checks: Vec::new(), error: Some(error.into()) }
+        Self {
+            pass: false,
+            checks: Vec::new(),
+            error: Some(error.into()),
+        }
     }
 
-    /// Short human text for rejection messages and relays to a subagent, e.g.
+    /// Short human text for rejection messages and relays to a worker, e.g.
     /// `suite failed: unit (0/1 runs passed)\n<output tail>`.
     pub fn summary(&self) -> String {
         if let Some(err) = &self.error {
@@ -115,7 +121,10 @@ impl SuiteResult {
         let mut lines = Vec::new();
         for c in self.checks.iter().filter(|c| !c.pass) {
             let passed = c.exits.iter().filter(|&&e| e == 0).count();
-            let mut line = format!("suite failed: {} ({}/{} runs passed)", c.name, passed, c.runs);
+            let mut line = format!(
+                "suite failed: {} ({}/{} runs passed)",
+                c.name, passed, c.runs
+            );
             if let Some(tail) = &c.output_tail {
                 line.push('\n');
                 line.push_str(tail);
@@ -143,7 +152,10 @@ enum WorktreeState {
 
 impl Runner {
     pub fn new(home: &Home) -> Self {
-        Self { hub: Git::new(home.hub()), work: home.work() }
+        Self {
+            hub: Git::new(home.hub()),
+            work: home.work(),
+        }
     }
 
     // ---- worktree management ----
@@ -159,19 +171,28 @@ impl Runner {
             return WorktreeState::Broken;
         }
         let target = std::fs::canonicalize(&self.work).unwrap_or_else(|_| self.work.clone());
-        let listing = self.hub.run(&["worktree", "list", "--porcelain"]).unwrap_or_default();
+        let listing = self
+            .hub
+            .run(&["worktree", "list", "--porcelain"])
+            .unwrap_or_default();
         for block in listing.split("\n\n") {
             let mut path_matches = false;
             let mut prunable = false;
             for line in block.lines() {
                 if let Some(p) = line.strip_prefix("worktree ") {
-                    path_matches = std::fs::canonicalize(p).map(|c| c == target).unwrap_or(false);
+                    path_matches = std::fs::canonicalize(p)
+                        .map(|c| c == target)
+                        .unwrap_or(false);
                 } else if line.starts_with("prunable") {
                     prunable = true;
                 }
             }
             if path_matches {
-                return if prunable { WorktreeState::Broken } else { WorktreeState::Valid };
+                return if prunable {
+                    WorktreeState::Broken
+                } else {
+                    WorktreeState::Valid
+                };
             }
         }
         // Has a `.git` file but isn't registered with the hub at all.
@@ -182,8 +203,14 @@ impl Runner {
         if let Some(parent) = self.work.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        let work_str = self.work.to_str().ok_or_else(|| format!("{} is not valid UTF-8", self.work.display()))?;
-        self.hub.run(&["worktree", "add", "--detach", work_str, commit]).map_err(|e| format!("worktree add: {e}")).map(|_| ())
+        let work_str = self
+            .work
+            .to_str()
+            .ok_or_else(|| format!("{} is not valid UTF-8", self.work.display()))?;
+        self.hub
+            .run(&["worktree", "add", "--detach", work_str, commit])
+            .map_err(|e| format!("worktree add: {e}"))
+            .map(|_| ())
     }
 
     /// Checks the worktree out at `commit`, creating or recreating it as
@@ -196,19 +223,24 @@ impl Runner {
                 // registry, not a precondition for what follows.
                 let _ = self.hub.run(&["worktree", "prune"]);
                 if self.work.exists() {
-                    std::fs::remove_dir_all(&self.work).map_err(|e| format!("removing stale worktree dir: {e}"))?;
+                    std::fs::remove_dir_all(&self.work)
+                        .map_err(|e| format!("removing stale worktree dir: {e}"))?;
                 }
                 self.add_worktree(commit)
             }
             WorktreeState::Valid => {
                 let work_git = Git::new(&self.work);
-                work_git.run(&["checkout", "--detach", "--force", commit]).map_err(|e| format!("checkout in worktree: {e}"))?;
+                work_git
+                    .run(&["checkout", "--detach", "--force", commit])
+                    .map_err(|e| format!("checkout in worktree: {e}"))?;
                 // Deliberately `-ffd`, not `-ffdx`: ignored build caches (a
                 // Rust `target/`, `node_modules/`, etc.) survive between
                 // check runs. The worktree is player-only — no agent commit
                 // ever lands here — so there's no risk of an agent planting
                 // ignored files for a later check run to trust.
-                work_git.run(&["clean", "-ffd"]).map_err(|e| format!("cleaning worktree: {e}"))?;
+                work_git
+                    .run(&["clean", "-ffd"])
+                    .map_err(|e| format!("cleaning worktree: {e}"))?;
                 Ok(())
             }
         }
@@ -227,7 +259,9 @@ impl Runner {
         let mut note = self.read_note(commit);
         note.checks.insert(result.name.clone(), result.clone());
         let json = serde_json::to_string(&note).map_err(|e| e.to_string())?;
-        self.hub.notes_add(NOTES_REF, commit, &json).map_err(|e| e.to_string())
+        self.hub
+            .notes_add(NOTES_REF, commit, &json)
+            .map_err(|e| e.to_string())
     }
 
     // ---- running checks ----
@@ -254,17 +288,38 @@ impl Runner {
         if code != 0 {
             return Err(format!("list_cmd exited {code}: {}", tail_str(&combined)));
         }
-        Ok(String::from_utf8_lossy(&stdout).lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        Ok(String::from_utf8_lossy(&stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
     }
 
     /// Runs a spike claim at `commit` (cached like any check, under the
     /// claim's prefixed name), killing any run that exceeds its timeout.
     pub fn run_claim(&self, commit: &str, claim: &Claim) -> CheckResult {
-        self.run_check_timed(commit, &claim.as_check(), Some(Duration::from_secs(claim.timeout_secs())), None)
+        self.run_check_timed(
+            commit,
+            &claim.as_check(),
+            Some(Duration::from_secs(claim.timeout_secs())),
+            None,
+        )
     }
 
-    fn run_check_timed(&self, commit: &str, check: &Check, timeout: Option<Duration>, max_pass: Option<u32>) -> CheckResult {
-        if let Some(cached) = self.read_note(commit).checks.get(&check.name).filter(|r| r.reusable_for(check, max_pass)).cloned() {
+    fn run_check_timed(
+        &self,
+        commit: &str,
+        check: &Check,
+        timeout: Option<Duration>,
+        max_pass: Option<u32>,
+    ) -> CheckResult {
+        if let Some(cached) = self
+            .read_note(commit)
+            .checks
+            .get(&check.name)
+            .filter(|r| r.reusable_for(check, max_pass))
+            .cloned()
+        {
             return cached;
         }
 
@@ -282,7 +337,13 @@ impl Runner {
     /// `retry_failed` more after a failing verdict (only when the failure's
     /// output matches `retry_on`, if set). The check passes if any attempt
     /// does; the result describes the last attempt plus what the retries saw.
-    fn execute(&self, commit: &str, check: &Check, timeout: Option<Duration>, max_pass: Option<u32>) -> CheckResult {
+    fn execute(
+        &self,
+        commit: &str,
+        check: &Check,
+        timeout: Option<Duration>,
+        max_pass: Option<u32>,
+    ) -> CheckResult {
         let base = CheckResult {
             name: check.name.clone(),
             cmd: check.cmd.clone(),
@@ -299,15 +360,24 @@ impl Runner {
             metrics: None,
         };
         if let Err(e) = self.prepare(commit) {
-            return CheckResult { output_tail: Some(format!("worktree setup failed: {e}")), ..base };
+            return CheckResult {
+                output_tail: Some(format!("worktree setup failed: {e}")),
+                ..base
+            };
         }
 
-        let patterns: Vec<regex::Regex> = check.retry_on.iter().filter_map(|p| regex::Regex::new(p).ok()).collect();
+        let patterns: Vec<regex::Regex> = check
+            .retry_on
+            .iter()
+            .filter_map(|p| regex::Regex::new(p).ok())
+            .collect();
         let mut retries = 0;
         let mut retry_outputs = Vec::new();
         loop {
             let (mut result, failed_output) = self.attempt(check, timeout, max_pass, base.clone());
-            let retry = !result.pass && retries < check.retry_failed && (patterns.is_empty() || patterns.iter().any(|p| p.is_match(&failed_output)));
+            let retry = !result.pass
+                && retries < check.retry_failed
+                && (patterns.is_empty() || patterns.iter().any(|p| p.is_match(&failed_output)));
             if !retry {
                 result.retries = retries;
                 result.retry_outputs = retry_outputs;
@@ -321,7 +391,13 @@ impl Runner {
     /// One attempt: runs `check.cmd` up to `check.runs` times, stopping early
     /// once the verdict is decided. Also returns the full output of every
     /// failing run, which `retry_on` is matched against.
-    fn attempt(&self, check: &Check, timeout: Option<Duration>, max_pass: Option<u32>, mut result: CheckResult) -> (CheckResult, String) {
+    fn attempt(
+        &self,
+        check: &Check,
+        timeout: Option<Duration>,
+        max_pass: Option<u32>,
+        mut result: CheckResult,
+    ) -> (CheckResult, String) {
         let mut exits = Vec::new();
         let mut passes: u32 = 0;
         let mut failed_output = String::new();
@@ -345,7 +421,9 @@ impl Runner {
             // Stop early once the verdict can't change: enough passes
             // already, or not enough runs left to ever reach min_pass.
             // Bounded (evidence) checks always run in full.
-            if max_pass.is_none() && (passes >= check.min_pass || passes + remaining_after_this < check.min_pass) {
+            if max_pass.is_none()
+                && (passes >= check.min_pass || passes + remaining_after_this < check.min_pass)
+            {
                 break;
             }
         }
@@ -372,7 +450,11 @@ impl Runner {
             pass &= result.pass;
             checks.push(result);
         }
-        SuiteResult { pass, checks, error: None }
+        SuiteResult {
+            pass,
+            checks,
+            error: None,
+        }
     }
 
     /// Reads `tasks/<slug>/task.toml` at `commit` and runs its `[check]`.
@@ -380,9 +462,14 @@ impl Runner {
     /// no check — there's nothing to run.
     pub fn run_task_check(&self, commit: &str, slug: &str) -> Result<CheckResult, String> {
         let path = format!("tasks/{slug}/task.toml");
-        let text = self.hub.show_file(commit, &path).ok_or_else(|| format!("{path} not found at {commit}"))?;
+        let text = self
+            .hub
+            .show_file(commit, &path)
+            .ok_or_else(|| format!("{path} not found at {commit}"))?;
         let cfg = config::task_config_from_str(&text).map_err(|e| format!("{path}: {e}"))?;
-        let check = cfg.check.ok_or_else(|| format!("{path}: no [check] section"))?;
+        let check = cfg
+            .check
+            .ok_or_else(|| format!("{path}: no [check] section"))?;
         // A task check that fails must keep meaning "fails for the reason
         // the task exists" (spec §6.3): no retries here.
         Ok(self.run_check(commit, &check.without_retries()))
@@ -393,9 +480,18 @@ impl Runner {
 /// stderr)`. The exit code is -1 for a signal, a spawn failure, or a timeout.
 /// With a timeout the command runs in its own process group so the whole tree
 /// can be killed when the deadline passes.
-fn run_command(cmd: &str, cwd: &std::path::Path, timeout: Option<Duration>) -> (i32, Vec<u8>, Vec<u8>) {
+fn run_command(
+    cmd: &str,
+    cwd: &std::path::Path,
+    timeout: Option<Duration>,
+) -> (i32, Vec<u8>, Vec<u8>) {
     let Some(timeout) = timeout else {
-        return match Command::new("sh").arg("-c").arg(cmd).current_dir(cwd).output() {
+        return match Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(cwd)
+            .output()
+        {
             Ok(out) => {
                 let mut combined = out.stdout.clone();
                 combined.extend_from_slice(&out.stderr);
@@ -407,7 +503,15 @@ fn run_command(cmd: &str, cwd: &std::path::Path, timeout: Option<Duration>) -> (
         };
     };
 
-    let spawned = Command::new("sh").arg("-c").arg(cmd).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).spawn();
+    let spawned = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn();
     let mut child = match spawned {
         Ok(c) => c,
         Err(e) => return (-1, Vec::new(), e.to_string().into_bytes()),
@@ -437,7 +541,9 @@ fn run_command(cmd: &str, cwd: &std::path::Path, timeout: Option<Duration>) -> (
             Ok(None) if Instant::now() >= deadline => {
                 timed_out = true;
                 // A negative pid addresses the whole process group.
-                let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).output();
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{}", child.id())])
+                    .output();
                 let _ = child.kill();
                 break child.wait().ok();
             }
@@ -450,10 +556,16 @@ fn run_command(cmd: &str, cwd: &std::path::Path, timeout: Option<Duration>) -> (
     let mut combined = stdout.clone();
     combined.extend_from_slice(&err_reader.join().unwrap_or_default());
     if timed_out {
-        combined.extend_from_slice(format!("\n[killed: timed out after {}s]", timeout.as_secs()).as_bytes());
+        combined.extend_from_slice(
+            format!("\n[killed: timed out after {}s]", timeout.as_secs()).as_bytes(),
+        );
         return (-1, stdout, combined);
     }
-    (status.and_then(|s| s.code()).unwrap_or(-1), stdout, combined)
+    (
+        status.and_then(|s| s.code()).unwrap_or(-1),
+        stdout,
+        combined,
+    )
 }
 
 /// The JSON object on the last non-empty stdout line, if that line is
@@ -462,7 +574,9 @@ fn parse_metrics(stdout: &[u8]) -> Option<serde_json::Value> {
     let text = String::from_utf8_lossy(stdout);
     let last = text.lines().rev().find(|l| !l.trim().is_empty())?;
     let json = last.trim().strip_prefix("METRICS ")?;
-    serde_json::from_str::<serde_json::Value>(json).ok().filter(|v| v.is_object())
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .filter(|v| v.is_object())
 }
 
 /// Last ~`OUTPUT_TAIL_MAX` bytes of `data`, lossily decoded as UTF-8.
@@ -511,8 +625,29 @@ mod tests {
 
     #[test]
     fn reusable_for_checks_name_cmd_and_threshold() {
-        let check = Check { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2, retry_failed: 0, retry_on: vec![] };
-        let result = CheckResult { name: "unit".into(), cmd: "true".into(), runs: 3, min_pass: 2, max_pass: None, retry_failed: 0, retry_on: vec![], retries: 0, retry_outputs: vec![], exits: vec![0, 0, 0], pass: true, output_tail: None, metrics: None };
+        let check = Check {
+            name: "unit".into(),
+            cmd: "true".into(),
+            runs: 3,
+            min_pass: 2,
+            retry_failed: 0,
+            retry_on: vec![],
+        };
+        let result = CheckResult {
+            name: "unit".into(),
+            cmd: "true".into(),
+            runs: 3,
+            min_pass: 2,
+            max_pass: None,
+            retry_failed: 0,
+            retry_on: vec![],
+            retries: 0,
+            retry_outputs: vec![],
+            exits: vec![0, 0, 0],
+            pass: true,
+            output_tail: None,
+            metrics: None,
+        };
         assert!(result.reusable_for(&check, None));
         assert!(!result.reusable_for(&check, Some(2)));
 
@@ -543,16 +678,30 @@ mod tests {
             error: None,
         };
         let summary = suite.summary();
-        assert!(summary.contains("suite failed: unit (0/1 runs passed)"), "unexpected summary: {summary}");
+        assert!(
+            summary.contains("suite failed: unit (0/1 runs passed)"),
+            "unexpected summary: {summary}"
+        );
         assert!(summary.contains("boom"), "unexpected summary: {summary}");
     }
 
     #[test]
     fn parse_metrics_reads_a_final_metrics_line() {
         let out = b"warming up\nMETRICS {\"throughput\": 2.1}\n\n";
-        assert_eq!(parse_metrics(out), Some(serde_json::json!({"throughput": 2.1})));
-        assert_eq!(parse_metrics(b"METRICS {\"a\": 1}\nthen more output\n"), None, "must be the last line");
-        assert_eq!(parse_metrics(b"METRICS [1, 2]\n"), None, "must be an object");
+        assert_eq!(
+            parse_metrics(out),
+            Some(serde_json::json!({"throughput": 2.1}))
+        );
+        assert_eq!(
+            parse_metrics(b"METRICS {\"a\": 1}\nthen more output\n"),
+            None,
+            "must be the last line"
+        );
+        assert_eq!(
+            parse_metrics(b"METRICS [1, 2]\n"),
+            None,
+            "must be an object"
+        );
         assert_eq!(parse_metrics(b"METRICS nope\n"), None);
         assert_eq!(parse_metrics(b""), None);
     }
@@ -576,7 +725,11 @@ mod tests {
 
     #[test]
     fn suite_summary_pass() {
-        let suite = SuiteResult { pass: true, checks: Vec::new(), error: None };
+        let suite = SuiteResult {
+            pass: true,
+            checks: Vec::new(),
+            error: None,
+        };
         assert_eq!(suite.summary(), "suite passed");
     }
 }

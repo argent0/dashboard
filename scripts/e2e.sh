@@ -2,7 +2,7 @@
 # End-to-end scenario against the real `dashboard` binary and real tmux
 # (spec.md, plan step 9a). Builds a throwaway director repo + hub in a temp
 # dir, writes a small fake-agent script to stand in for a real Claude Code
-# subagent, and drives the whole director/player/subagent loop by hand:
+# worker, and drives the whole director/player/worker loop by hand:
 #
 #   plan alpha -> post alpha -> tmux launch -> tested -> send-back -> tested
 #   -> accept -> plan+post beta (depends on alpha) -> block -> escalated
@@ -145,8 +145,8 @@ assert_contains() {
 
 # --------------------------------------------------------------------------
 # The fake agent: not an LLM, just a git-driven loop standing in for a real
-# Claude Code subagent session (spec's launch row). It fetches from `origin`
-# (the hub, per the player's subagent clone setup), fast-forwards onto any
+# Claude Code worker session (spec's launch row). It fetches from `origin`
+# (the hub, per the player's worker clone setup), fast-forwards onto any
 # new director commit, then runs the director-authored `tasks/<slug>/
 # agent*.sh` for the current review round and commits whatever it produced.
 # --------------------------------------------------------------------------
@@ -154,14 +154,14 @@ assert_contains() {
 write_fake_agent() {
   cat >"$FAKE_AGENT" <<'FAKE_AGENT_EOF'
 #!/bin/sh
-# Fake subagent driver (written by scripts/e2e.sh). $1 is the prompt text,
+# Fake worker driver (written by scripts/e2e.sh). $1 is the prompt text,
 # ignored: the real instructions live in tasks/<slug>/agent*.sh, which this
 # loop just executes. Never touches anything under tasks/<slug>/ besides
 # reading it (those paths are pinned).
 set -eu
 
-git config user.name "E2E Fake Subagent" || true
-git config user.email "fake-subagent@example.com" || true
+git config user.name "E2E Fake Worker" || true
+git config user.email "fake-worker@example.com" || true
 git config commit.gpgsign false || true
 
 end=$(($(date +%s) + 60))
@@ -230,7 +230,7 @@ FAKE_AGENT_EOF
 # Launched with "Step: post" in its prompt, it copies the post the scenario
 # prepared for its slug ($TA_TEMPLATES/<slug>/) into its worktree, commits it
 # on agent/<slug> and reports `posted`. Then it watches the hub: once the
-# subagent's work (<slug>.txt) is on task/<slug>, it reports `accept`.
+# worker's work (<slug>.txt) is on task/<slug>, it reports `accept`.
 # --------------------------------------------------------------------------
 
 write_fake_task_agent() {
@@ -586,7 +586,7 @@ wait_until "probe's tmux session is gone" session_gone probe
 
 # --------------------------------------------------------------------------
 # 7c. Parallel tasks (spec §4): gamma and delta posted side by side, both
-#     subagents live at once. Each post adds its own tests.d/<slug>.toml, so
+#     workers live at once. Each post adds its own tests.d/<slug>.toml, so
 #     the suite never conflicts; but both agents write shared.txt
 #     differently, so once gamma is accepted, the player can't merge main
 #     into delta to land its accept:
@@ -658,7 +658,7 @@ done
 # 7b. Task agents (spec §17): a roadmap commit on main turns them on; the
 #     player launches a fake task agent for the newly planned epsilon in
 #     its own tmux session; it posts (imported as the task agent's), the
-#     subagent finishes, the task agent reports accept, the director accepts
+#     worker finishes, the task agent reports accept, the director accepts
 #     on it, and the task agent's session ends with the task.
 # --------------------------------------------------------------------------
 
@@ -683,7 +683,7 @@ git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: epsilon"
 
 wait_until "epsilon's task agent session exists" session_alive epsilon_agent
-wait_until "epsilon's subagent session exists" session_alive epsilon
+wait_until "epsilon's worker session exists" session_alive epsilon
 post_sha=$(git --git-dir "$HOME_DIR/hub.git" log --format=%H --grep='^post: epsilon' refs/heads/task/epsilon)
 assert_contains "$(git --git-dir "$HOME_DIR/hub.git" notes --ref refs/notes/dashboard-imports show "$post_sha")" '"actor":"task_agent"' "epsilon's post import note"
 

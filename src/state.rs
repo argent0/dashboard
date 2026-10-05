@@ -1,6 +1,6 @@
 // Derived roadmap/task status (spec.md §10, §12): a pure function of the
 // hub's git state (branches, notes, rejections, pins, merges) plus whether a
-// task's subagent tmux session is alive. Nothing here mutates the hub — the
+// task's worker tmux session is alive. Nothing here mutates the hub — the
 // player (steps 5-6) does the writing; this module and src/records.rs only
 // read it back.
 
@@ -32,7 +32,7 @@ pub enum Status {
     /// An accept the player couldn't land: merging `main` conflicts, and the
     /// director must resolve that specific conflict (spec §11).
     Conflicted,
-    /// The subagent contested a test it must pass (spec §18): the task
+    /// The worker contested a test it must pass (spec §18): the task
     /// agent (or the director) must reply.
     Contested,
     Escalated,
@@ -79,7 +79,7 @@ pub struct TaskState {
     pub review_round: u32,
     /// Contests answered so far: `tasks/<slug>/contests/c*.md` at the tip.
     pub contest_round: u32,
-    /// The subagent's reason, set only when `status == Contested`.
+    /// The worker's reason, set only when `status == Contested`.
     pub contest: Option<String>,
     /// The cause text, set only when `status == Escalated`.
     pub escalation: Option<String>,
@@ -87,7 +87,7 @@ pub struct TaskState {
     pub post_mortem: Option<String>,
     /// Cached check results at `tip`, read-only (never runs anything).
     pub suite: Option<SuiteResult>,
-    /// Whether this task's subagent tmux session is alive right now — the
+    /// Whether this task's worker tmux session is alive right now — the
     /// same `live_session` call `derive` uses to distinguish `posted` from
     /// `in_progress`, but recorded for every task so the renderer can show
     /// it in the in-flight block even once the task has moved past `posted`
@@ -140,12 +140,16 @@ pub struct HubState {
 // --------------------------------------------------------------------------
 
 /// Computes every task's status from the hub. `live_session(slug)` reports
-/// whether that task's subagent tmux session is currently alive — the one
+/// whether that task's worker tmux session is currently alive — the one
 /// piece of status that isn't pure git state (spec §12: `in_progress` is
 /// "runtime, not git").
 pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState, String> {
-    let main_tip = hub.rev_parse("refs/heads/main").ok_or_else(|| "hub has no main".to_string())?;
-    let roadmap_text = hub.show_file(&main_tip, "roadmap.toml").ok_or_else(|| "roadmap.toml not found at main's tip".to_string())?;
+    let main_tip = hub
+        .rev_parse("refs/heads/main")
+        .ok_or_else(|| "hub has no main".to_string())?;
+    let roadmap_text = hub
+        .show_file(&main_tip, "roadmap.toml")
+        .ok_or_else(|| "roadmap.toml not found at main's tip".to_string())?;
     let roadmap = config::roadmap_config_from_str(&roadmap_text)?;
 
     let accepted = records::accepted_tasks(hub, &main_tip);
@@ -169,25 +173,52 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
 
     let mut tasks = Vec::with_capacity(slugs.len());
     for slug in &slugs {
-        tasks.push(derive_task(hub, &roadmap, slug, &accepted, &retired, &rejections, &flakes, live_session)?);
+        tasks.push(derive_task(
+            hub,
+            &roadmap,
+            slug,
+            &accepted,
+            &retired,
+            &rejections,
+            &flakes,
+            live_session,
+        )?);
     }
 
     // Task list order: the order of phases in roadmap.toml, then slug.
     let phase_order: Vec<&str> = roadmap.phases.iter().map(|p| p.id.as_str()).collect();
     tasks.sort_by(|a, b| {
-        let a_idx = phase_order.iter().position(|p| *p == a.config.phase).unwrap_or(usize::MAX);
-        let b_idx = phase_order.iter().position(|p| *p == b.config.phase).unwrap_or(usize::MAX);
+        let a_idx = phase_order
+            .iter()
+            .position(|p| *p == a.config.phase)
+            .unwrap_or(usize::MAX);
+        let b_idx = phase_order
+            .iter()
+            .position(|p| *p == b.config.phase)
+            .unwrap_or(usize::MAX);
         a_idx.cmp(&b_idx).then_with(|| a.slug.cmp(&b.slug))
     });
 
-    Ok(HubState { roadmap, main_tip, tasks, rejections, flakes, project })
+    Ok(HubState {
+        roadmap,
+        main_tip,
+        tasks,
+        rejections,
+        flakes,
+        project,
+    })
 }
 
 /// The tip to read `slug`'s state from: the retirement, else the live task
 /// branch, else (branch already gone) the accepted merge on main. `task.toml`
 /// is reachable from every one of these, since a retire marker is empty and
 /// an accepted merge lands `tasks/<slug>/` on main (spec §8.2).
-fn task_tip(hub: &Git, slug: &str, accepted: &BTreeMap<String, String>, retired: &[String]) -> Option<String> {
+fn task_tip(
+    hub: &Git,
+    slug: &str,
+    accepted: &BTreeMap<String, String>,
+    retired: &[String],
+) -> Option<String> {
     if retired.iter().any(|s| s == slug) {
         return hub.rev_parse(&format!("refs/retired/{slug}"));
     }
@@ -214,13 +245,20 @@ fn derive_task(
     let is_accepted = accepted.contains_key(slug);
     let is_explored = records::is_explored(hub, slug);
     let alive = live_session(slug);
-    let agent = records::agent_launched(hub, slug).then(|| AgentState { alive: live_session(&agent_key(slug)), report: None });
+    let agent = records::agent_launched(hub, slug).then(|| AgentState {
+        alive: live_session(&agent_key(slug)),
+        report: None,
+    });
 
-    let tip = task_tip(hub, slug, accepted, retired).ok_or_else(|| format!("no branch, retirement, or merge found for task {slug}"))?;
+    let tip = task_tip(hub, slug, accepted, retired)
+        .ok_or_else(|| format!("no branch, retirement, or merge found for task {slug}"))?;
 
     let task_toml_path = format!("tasks/{slug}/task.toml");
-    let config_text = hub.show_file(&tip, &task_toml_path).ok_or_else(|| format!("{task_toml_path} not found at {tip}"))?;
-    let task_config = config::task_config_from_str(&config_text).map_err(|e| format!("{task_toml_path}: {e}"))?;
+    let config_text = hub
+        .show_file(&tip, &task_toml_path)
+        .ok_or_else(|| format!("{task_toml_path} not found at {tip}"))?;
+    let task_config =
+        config::task_config_from_str(&config_text).map_err(|e| format!("{task_toml_path}: {e}"))?;
 
     // ---- strikes (only rejections scoped to this slug; `_main` never counts) ----
     let mut strikes: BTreeMap<Reason, u32> = BTreeMap::new();
@@ -262,8 +300,14 @@ fn derive_task(
 
     // ---- dependency resolution, needed only for the pending family, but
     // cheap enough to always compute ----
-    let any_dep_retired = task_config.depends_on.iter().any(|d| retired.iter().any(|r| r == d));
-    let all_deps_accepted = task_config.depends_on.iter().all(|d| accepted.contains_key(d));
+    let any_dep_retired = task_config
+        .depends_on
+        .iter()
+        .any(|d| retired.iter().any(|r| r == d));
+    let all_deps_accepted = task_config
+        .depends_on
+        .iter()
+        .all(|d| accepted.contains_key(d));
 
     let mut escalation: Option<String> = None;
     let mut post_mortem: Option<String> = None;
@@ -277,7 +321,8 @@ fn derive_task(
         Status::Accepted
     } else if is_explored {
         Status::Explored
-    } else if let Some(cause) = escalation_cause(hub, roadmap, slug, &strikes, note.as_ref(), &tip) {
+    } else if let Some(cause) = escalation_cause(hub, roadmap, slug, &strikes, note.as_ref(), &tip)
+    {
         escalation = Some(cause);
         Status::Escalated
     } else if let Some(c) = records::conflict(hub, &tip) {
@@ -286,7 +331,9 @@ fn derive_task(
     } else {
         match note.as_ref().map(|n| n.transition) {
             Some(Transition::Finish) => Status::Tested,
-            Some(Transition::SendBack | Transition::SyncRevision | Transition::ContestReply) => Status::InRevision,
+            Some(Transition::SendBack | Transition::SyncRevision | Transition::ContestReply) => {
+                Status::InRevision
+            }
             Some(Transition::Contest) => {
                 contest = Some(marker_text(hub, &tip, "contest:"));
                 Status::Contested
@@ -316,8 +363,28 @@ fn derive_task(
         }
     };
 
-    let agent = agent.map(|a| AgentState { report: records::agent_reports(hub, &tip).pop(), ..a });
-    Ok(TaskState { slug: slug.to_string(), config: task_config, status, tip, strikes, review_round, contest_round, contest, escalation, post_mortem, suite, alive, spike, flaky, conflict, agent })
+    let agent = agent.map(|a| AgentState {
+        report: records::agent_reports(hub, &tip).pop(),
+        ..a
+    });
+    Ok(TaskState {
+        slug: slug.to_string(),
+        config: task_config,
+        status,
+        tip,
+        strikes,
+        review_round,
+        contest_round,
+        contest,
+        escalation,
+        post_mortem,
+        suite,
+        alive,
+        spike,
+        flaky,
+        conflict,
+        agent,
+    })
 }
 
 /// Whether `cfg`'s post and send-backs belong to a task agent (spec §17):
@@ -343,7 +410,12 @@ fn escalation_cause(
         let limit = roadmap.limits.strikes.limit(reason);
         let count = strikes.get(&reason).copied().unwrap_or(0);
         if count >= limit {
-            return Some(format!("strike limit: {} {}/{}", reason.as_str(), count, limit));
+            return Some(format!(
+                "strike limit: {} {}/{}",
+                reason.as_str(),
+                count,
+                limit
+            ));
         }
     }
 
@@ -361,10 +433,18 @@ fn escalation_cause(
 /// A marker commit's explanation: its subject without `prefix`, then its body.
 fn marker_text(hub: &Git, commit: &str, prefix: &str) -> String {
     let subject = hub.commit_subject(commit).unwrap_or_default();
-    let subject = subject.strip_prefix(prefix).map(str::trim_start).unwrap_or(&subject).to_string();
+    let subject = subject
+        .strip_prefix(prefix)
+        .map(str::trim_start)
+        .unwrap_or(&subject)
+        .to_string();
     let body = hub.commit_body(commit).unwrap_or_default();
     let body = body.trim();
-    if body.is_empty() { subject } else { format!("{subject}\n{body}") }
+    if body.is_empty() {
+        subject
+    } else {
+        format!("{subject}\n{body}")
+    }
 }
 
 /// The contest replies on a task at `commit`: `tasks/<slug>/contests/c<N>.md`.
@@ -373,7 +453,9 @@ pub fn contest_files(hub: &Git, commit: &str, slug: &str) -> Vec<String> {
         .into_iter()
         .filter(|f| {
             let base = f.rsplit('/').next().unwrap_or("");
-            base.strip_prefix('c').and_then(|r| r.strip_suffix(".md")).is_some_and(|n| n.parse::<u32>().is_ok())
+            base.strip_prefix('c')
+                .and_then(|r| r.strip_suffix(".md"))
+                .is_some_and(|n| n.parse::<u32>().is_ok())
         })
         .collect()
 }
@@ -387,7 +469,11 @@ fn cached_suite_summary(hub: &Git, commit: &str) -> Option<SuiteResult> {
         return None;
     }
     let pass = results.iter().all(|c| c.pass);
-    Some(SuiteResult { pass, checks: results, error: None })
+    Some(SuiteResult {
+        pass,
+        checks: results,
+        error: None,
+    })
 }
 
 // --------------------------------------------------------------------------
@@ -399,14 +485,16 @@ fn cached_suite_summary(hub: &Git, commit: &str) -> Option<SuiteResult> {
 /// replaced by `-`.
 pub fn tmux_session_name(project: &str, slug: &str) -> String {
     fn sanitize(s: &str) -> String {
-        s.chars().map(|c| if c == '.' || c == ':' { '-' } else { c }).collect()
+        s.chars()
+            .map(|c| if c == '.' || c == ':' { '-' } else { c })
+            .collect()
     }
     format!("dash-{}-{}", sanitize(project), sanitize(slug))
 }
 
 /// The `Sessions` key of `slug`'s task agent (spec §17), next to the
-/// subagent's own key `slug`. `_` never appears in a slug, so it can't
-/// collide with another task's subagent session.
+/// worker's own key `slug`. `_` never appears in a slug, so it can't
+/// collide with another task's worker session.
 pub fn agent_key(slug: &str) -> String {
     format!("{slug}_agent")
 }
@@ -414,7 +502,11 @@ pub fn agent_key(slug: &str) -> String {
 /// Whether a tmux session named `name` is currently alive. `false` if tmux
 /// itself isn't installed, not just if the session is missing.
 pub fn tmux_alive(name: &str) -> bool {
-    Command::new("tmux").args(["has-session", "-t", &format!("={name}")]).output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("tmux")
+        .args(["has-session", "-t", &format!("={name}")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 // --------------------------------------------------------------------------
@@ -429,7 +521,10 @@ mod tests {
 
     #[test]
     fn tmux_session_name_sanitizes_dots_and_colons() {
-        assert_eq!(tmux_session_name("my.project", "slug:with:colons"), "dash-my-project-slug-with-colons");
+        assert_eq!(
+            tmux_session_name("my.project", "slug:with:colons"),
+            "dash-my-project-slug-with-colons"
+        );
         assert_eq!(tmux_session_name("plain", "slug"), "dash-plain-slug");
     }
 
@@ -437,6 +532,8 @@ mod tests {
     fn tmux_alive_is_false_for_a_bogus_session() {
         // Doesn't assert anything about a missing `tmux` binary (environment-
         // dependent), only that a session name nobody used isn't alive.
-        assert!(!tmux_alive("dashboard-tests-definitely-not-a-real-session-name"));
+        assert!(!tmux_alive(
+            "dashboard-tests-definitely-not-a-real-session-name"
+        ));
     }
 }

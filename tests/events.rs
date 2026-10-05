@@ -20,60 +20,102 @@ use std::path::Path;
 use tempfile::TempDir;
 
 // --------------------------------------------------------------------------
-// Fixture helpers (same shape as tests/player_subagent.rs)
+// Fixture helpers (same shape as tests/player_worker.rs)
 // --------------------------------------------------------------------------
 
 fn init_hub(repo: &DirectorRepo) -> (TempDir, Home) {
     let home_dir = temp_home();
-    let report = init::init(repo.path(), Some("proj"), Some(home_dir.path().join("home"))).expect("init should succeed");
+    let report = init::init(
+        repo.path(),
+        Some("proj"),
+        Some(home_dir.path().join("home")),
+    )
+    .expect("init should succeed");
     (home_dir, Home { root: report.home })
 }
 
 fn open_player(home: &Home) -> Player<NullSessions> {
-    Player::open(Home { root: home.root.clone() }, NullSessions::default()).expect("player open")
+    Player::open(
+        Home {
+            root: home.root.clone(),
+        },
+        NullSessions::default(),
+    )
+    .expect("player open")
 }
 
 fn task_status(hub: &Git, slug: &str) -> Status {
     let hub_state = state::derive(hub, &|_| false).expect("derive should succeed");
-    hub_state.tasks.iter().find(|t| t.slug == slug).unwrap_or_else(|| panic!("no task state for {slug:?}")).status
+    hub_state
+        .tasks
+        .iter()
+        .find(|t| t.slug == slug)
+        .unwrap_or_else(|| panic!("no task state for {slug:?}"))
+        .status
 }
 
 fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task_toml: &str) {
-    director_commit_on_branch(repo.path(), &format!("task/{slug}"), &format!("tasks/{slug}/task.toml"), task_toml, &format!("plan: {slug}"));
+    director_commit_on_branch(
+        repo.path(),
+        &format!("task/{slug}"),
+        &format!("tasks/{slug}/task.toml"),
+        task_toml,
+        &format!("plan: {slug}"),
+    );
     let report = player.tick().expect("plan tick should succeed");
-    assert!(report.rejected.is_empty(), "plan: {slug} unexpectedly rejected: {report}");
+    assert!(
+        report.rejected.is_empty(),
+        "plan: {slug} unexpectedly rejected: {report}"
+    );
 }
 
 /// Posts `slug` (already planned and `ready`) with a task check that fails
 /// until `feature-<slug>.txt` shows up (slug-specific, since an accepted
 /// task's files land on `main` and a later task's branch is cut from it —
 /// two tasks sharing one filename would make the second's check pass before
-/// any work happened), and ticks (which also launches the subagent, per step
+/// any work happened), and ticks (which also launches the worker, per step
 /// 6).
 fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
     let feature = format!("feature-{slug}.txt");
     checkout_branch(repo.path(), &format!("task/{slug}"));
-    write_file(repo.path(), &format!("tasks/{slug}/prompt.md"), "do the thing\n");
+    write_file(
+        repo.path(),
+        &format!("tasks/{slug}/prompt.md"),
+        "do the thing\n",
+    );
     write_file(
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
-        &format!("title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f {feature}\"\n"),
+        &format!(
+            "title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f {feature}\"\n"
+        ),
     );
-    write_file(repo.path(), &format!("tests.d/{slug}.toml"), &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f {feature}\"\n"));
+    write_file(
+        repo.path(),
+        &format!("tests.d/{slug}.toml"),
+        &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f {feature}\"\n"),
+    );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
-    assert_eq!(report.imported.len(), 1, "post: {slug} not imported: {report}");
+    assert_eq!(
+        report.imported.len(),
+        1,
+        "post: {slug} not imported: {report}"
+    );
 }
 
 fn ensure_identity(dir: &Path) {
     let git = Git::new(dir);
-    git.run(&["config", "user.name", "Test Subagent"]).expect("set user.name");
-    git.run(&["config", "user.email", "subagent@example.com"]).expect("set user.email");
-    git.run(&["config", "commit.gpgsign", "false"]).expect("disable gpgsign");
+    git.run(&["config", "user.name", "Test Worker"])
+        .expect("set user.name");
+    git.run(&["config", "user.email", "worker@example.com"])
+        .expect("set user.email");
+    git.run(&["config", "commit.gpgsign", "false"])
+        .expect("disable gpgsign");
 }
 
 fn commit_in_clone(repo: &DirectorRepo, slug: &str, rel: &str, content: &str, msg: &str) -> String {
-    let dir = paths::subagent_clone(&repo.director_path(), slug);
+    let dir = paths::worker_clone(&repo.director_path(), slug);
     ensure_identity(&dir);
     write_file(&dir, rel, content);
     commit(&dir, msg)
@@ -87,18 +129,23 @@ fn commit_in_clone(repo: &DirectorRepo, slug: &str, rel: &str, content: &str, ms
 fn director_pull_main(repo: &Path) {
     checkout_branch(repo, "main");
     let git = Git::new(repo);
-    git.run(&["fetch", "-q", "hub", "main"]).expect("fetch main from hub");
-    git.run(&["merge", "-q", "--ff-only", "FETCH_HEAD"]).expect("fast-forward local main onto hub's main");
+    git.run(&["fetch", "-q", "hub", "main"])
+        .expect("fetch main from hub");
+    git.run(&["merge", "-q", "--ff-only", "FETCH_HEAD"])
+        .expect("fast-forward local main onto hub's main");
 }
 
 fn block_in_clone(repo: &DirectorRepo, slug: &str, msg: &str) -> String {
-    let dir = paths::subagent_clone(&repo.director_path(), slug);
+    let dir = paths::worker_clone(&repo.director_path(), slug);
     ensure_identity(&dir);
     commit_empty(&dir, msg)
 }
 
 fn events_for(home: &Home, slug: &str, kind: EventKind) -> Vec<events::Event> {
-    events::read_all(home).into_iter().filter(|e| e.kind == kind && e.slug.as_deref() == Some(slug)).collect()
+    events::read_all(home)
+        .into_iter()
+        .filter(|e| e.kind == kind && e.slug.as_deref() == Some(slug))
+        .collect()
 }
 
 // --------------------------------------------------------------------------
@@ -114,22 +161,46 @@ fn player_tick_emits_the_full_set_of_director_relevant_events() {
     let mut player = open_player(&home);
 
     // ---- DirectorRejected: an invalid slug (spec §9's plan row) ----
-    director_commit_on_branch(repo.path(), "task/Bad_Slug", "tasks/Bad_Slug/task.toml", "title = \"Bad\"\nphase = \"p1\"\n", "plan: Bad_Slug");
+    director_commit_on_branch(
+        repo.path(),
+        "task/Bad_Slug",
+        "tasks/Bad_Slug/task.toml",
+        "title = \"Bad\"\nphase = \"p1\"\n",
+        "plan: Bad_Slug",
+    );
     player.tick().expect("tick should succeed");
     let rejected = events_for(&home, "Bad_Slug", EventKind::DirectorRejected);
     assert_eq!(rejected.len(), 1, "{:?}", events::read_all(&home));
-    assert!(rejected[0].message.contains("plan"), "{}", rejected[0].message);
+    assert!(
+        rejected[0].message.contains("plan"),
+        "{}",
+        rejected[0].message
+    );
 
     // ---- Tested: dep's finish claim passes the suite ----
-    plan(&repo, &mut player, "dep", "title = \"Dep\"\nphase = \"p1\"\n");
-    plan(&repo, &mut player, "depender", "title = \"Depender\"\nphase = \"p1\"\ndepends_on = [\"dep\"]\n");
+    plan(
+        &repo,
+        &mut player,
+        "dep",
+        "title = \"Dep\"\nphase = \"p1\"\n",
+    );
+    plan(
+        &repo,
+        &mut player,
+        "depender",
+        "title = \"Depender\"\nphase = \"p1\"\ndepends_on = [\"dep\"]\n",
+    );
     post(&repo, &mut player, "dep");
     commit_in_clone(&repo, "dep", "feature-dep.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
     assert_eq!(task_status(&hub, "dep"), Status::Tested);
     let tested = events_for(&home, "dep", EventKind::Tested);
     assert_eq!(tested.len(), 1, "{:?}", events::read_all(&home));
-    assert!(tested[0].message.contains("awaiting director review"), "{}", tested[0].message);
+    assert!(
+        tested[0].message.contains("awaiting director review"),
+        "{}",
+        tested[0].message
+    );
 
     // ---- Accepted (dep) + Ready (depender, unblocked in the same tick) ----
     director_pull_task_branch(repo.path(), "dep");
@@ -137,39 +208,78 @@ fn player_tick_emits_the_full_set_of_director_relevant_events() {
     player.tick().expect("accept tick should succeed");
     assert_eq!(task_status(&hub, "dep"), Status::Accepted);
     assert_eq!(task_status(&hub, "depender"), Status::Ready);
-    assert_eq!(events_for(&home, "dep", EventKind::Accepted).len(), 1, "{:?}", events::read_all(&home));
-    assert_eq!(events_for(&home, "depender", EventKind::Ready).len(), 1, "{:?}", events::read_all(&home));
+    assert_eq!(
+        events_for(&home, "dep", EventKind::Accepted).len(),
+        1,
+        "{:?}",
+        events::read_all(&home)
+    );
+    assert_eq!(
+        events_for(&home, "depender", EventKind::Ready).len(),
+        1,
+        "{:?}",
+        events::read_all(&home)
+    );
 
     // ---- Escalated: a block ----
     // `main` advanced in the hub (the accept merge above); the director must
     // pull it before planning a new branch from it.
     director_pull_main(repo.path());
-    plan(&repo, &mut player, "blk", "title = \"Blocked\"\nphase = \"p1\"\n");
+    plan(
+        &repo,
+        &mut player,
+        "blk",
+        "title = \"Blocked\"\nphase = \"p1\"\n",
+    );
     post(&repo, &mut player, "blk");
-    block_in_clone(&repo, "blk", "block: cannot be done\n\nThe API this needs doesn't exist.");
+    block_in_clone(
+        &repo,
+        "blk",
+        "block: cannot be done\n\nThe API this needs doesn't exist.",
+    );
     player.tick().expect("block tick should succeed");
     assert_eq!(task_status(&hub, "blk"), Status::Escalated);
     let escalated = events_for(&home, "blk", EventKind::Escalated);
     assert_eq!(escalated.len(), 1, "{:?}", events::read_all(&home));
-    assert!(escalated[0].message.contains("doesn't exist"), "{}", escalated[0].message);
+    assert!(
+        escalated[0].message.contains("doesn't exist"),
+        "{}",
+        escalated[0].message
+    );
 
     // ---- Retired ----
     // The director's local task/blk branch is stale after the block (which
-    // happened in the subagent clone, not the director's); pull it first so
+    // happened in the worker clone, not the director's); pull it first so
     // the retire marker builds on the hub's actual tip.
     checkout_branch(repo.path(), "task/blk");
     let git = repo.git();
-    git.run(&["fetch", "-q", "hub", "task/blk"]).expect("fetch task branch from hub");
-    git.run(&["reset", "-q", "--hard", "FETCH_HEAD"]).expect("reset onto hub's task/blk tip");
-    commit_empty(repo.path(), "retire: didn't pan out\n\nThe API this needs doesn't exist and won't soon.");
+    git.run(&["fetch", "-q", "hub", "task/blk"])
+        .expect("fetch task branch from hub");
+    git.run(&["reset", "-q", "--hard", "FETCH_HEAD"])
+        .expect("reset onto hub's task/blk tip");
+    commit_empty(
+        repo.path(),
+        "retire: didn't pan out\n\nThe API this needs doesn't exist and won't soon.",
+    );
     let report = player.tick().expect("retire tick should succeed");
-    assert_eq!(report.imported.iter().filter(|(_, _, t)| *t == Transition::Retire).count(), 1, "{report}");
+    assert_eq!(
+        report
+            .imported
+            .iter()
+            .filter(|(_, _, t)| *t == Transition::Retire)
+            .count(),
+        1,
+        "{report}"
+    );
     assert_eq!(task_status(&hub, "blk"), Status::Retired);
     let retired = events_for(&home, "blk", EventKind::Retired);
     assert_eq!(retired.len(), 1, "{:?}", events::read_all(&home));
     // The post-mortem is the marker commit's *body* (spec §5): the subject
     // line ("retire: ...") is the transition marker itself, not the message.
-    assert_eq!(retired[0].message, "The API this needs doesn't exist and won't soon.");
+    assert_eq!(
+        retired[0].message,
+        "The API this needs doesn't exist and won't soon."
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -196,10 +306,19 @@ fn no_reemission_after_reconstructing_the_player() {
     drop(player);
     let mut player = open_player(&home);
     let count_before = events::read_all(&home).len();
-    player.tick().expect("tick after reconstruction should succeed");
+    player
+        .tick()
+        .expect("tick after reconstruction should succeed");
     let count_after = events::read_all(&home).len();
-    assert_eq!(count_after, count_before, "reconstructing the player must not re-emit unchanged statuses");
-    assert_eq!(events_for(&home, "x", EventKind::Tested).len(), 1, "still exactly the one Tested event");
+    assert_eq!(
+        count_after, count_before,
+        "reconstructing the player must not re-emit unchanged statuses"
+    );
+    assert_eq!(
+        events_for(&home, "x", EventKind::Tested).len(),
+        1,
+        "still exactly the one Tested event"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -213,9 +332,20 @@ fn first_run_with_no_state_file_emits_nothing_for_preexisting_statuses() {
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
 
-    plan(&repo, &mut player, "already", "title = \"Already\"\nphase = \"p1\"\n");
+    plan(
+        &repo,
+        &mut player,
+        "already",
+        "title = \"Already\"\nphase = \"p1\"\n",
+    );
     post(&repo, &mut player, "already");
-    commit_in_clone(&repo, "already", "feature-already.txt", "done\n", "finish work");
+    commit_in_clone(
+        &repo,
+        "already",
+        "feature-already.txt",
+        "done\n",
+        "finish work",
+    );
     player.tick().expect("finish tick should succeed");
     assert_eq!(task_status(&hub, "already"), Status::Tested);
     assert_eq!(events_for(&home, "already", EventKind::Tested).len(), 1);
@@ -228,10 +358,19 @@ fn first_run_with_no_state_file_emits_nothing_for_preexisting_statuses() {
     let mut fresh = open_player(&home);
 
     let count_before = events::read_all(&home).len();
-    fresh.tick().expect("first-run tick after losing state should succeed");
+    fresh
+        .tick()
+        .expect("first-run tick after losing state should succeed");
     let count_after = events::read_all(&home).len();
-    assert_eq!(count_after, count_before, "the first run after losing state must not re-emit already-Tested as new");
-    assert_eq!(events_for(&home, "already", EventKind::Tested).len(), 1, "still exactly the original Tested event");
+    assert_eq!(
+        count_after, count_before,
+        "the first run after losing state must not re-emit already-Tested as new"
+    );
+    assert_eq!(
+        events_for(&home, "already", EventKind::Tested).len(),
+        1,
+        "still exactly the original Tested event"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -244,9 +383,17 @@ fn session_dying_while_in_progress_emits_session_died() {
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
 
-    plan(&repo, &mut player, "die", "title = \"Die\"\nphase = \"p1\"\n");
+    plan(
+        &repo,
+        &mut player,
+        "die",
+        "title = \"Die\"\nphase = \"p1\"\n",
+    );
     post(&repo, &mut player, "die");
-    assert!(player.sessions().alive("die"), "post should have launched a subagent session");
+    assert!(
+        player.sessions().alive("die"),
+        "post should have launched a worker session"
+    );
 
     // Simulate the session dying on its own — not via `kill` (accept/retire)
     // — by removing it from `NullSessions::alive` directly, exactly as that
@@ -274,7 +421,10 @@ fn killing_a_session_via_accept_does_not_emit_session_died() {
     commit_empty(repo.path(), "accept: looks good");
     player.tick().expect("accept tick should succeed");
     assert_eq!(task_status(&hub, "ok"), Status::Accepted);
-    assert!(events_for(&home, "ok", EventKind::SessionDied).is_empty(), "an accept-time kill isn't a session death");
+    assert!(
+        events_for(&home, "ok", EventKind::SessionDied).is_empty(),
+        "an accept-time kill isn't a session death"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -293,7 +443,13 @@ fn wait_timeout_exits_2_with_no_events() {
     let (dir, _home) = plain_home();
     let home_str = dir.path().to_str().expect("valid utf-8 path");
     let output = run_dashboard(&["--home", home_str, "wait", "--timeout", "1"], dir.path());
-    assert_eq!(output.status.code(), Some(2), "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("no events within 1 s"));
 }
 
@@ -305,14 +461,22 @@ fn wait_prints_pending_events_then_a_second_wait_times_out_after_the_cursor_adva
 
     let home_str = dir.path().to_str().expect("valid utf-8 path");
     let output = run_dashboard(&["--home", home_str, "wait"], dir.path());
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("#1 tested"), "{stdout}");
     assert!(stdout.contains("#2 accepted"), "{stdout}");
     assert_eq!(events::read_cursor(&home), 2);
 
     let output2 = run_dashboard(&["--home", home_str, "wait", "--timeout", "1"], dir.path());
-    assert_eq!(output2.status.code(), Some(2), "cursor should have advanced past both events");
+    assert_eq!(
+        output2.status.code(),
+        Some(2),
+        "cursor should have advanced past both events"
+    );
 }
 
 #[test]
@@ -324,20 +488,35 @@ fn wait_all_prints_history_without_moving_the_cursor() {
     let output = run_dashboard(&["--home", home_str, "wait", "--all"], dir.path());
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("#1 tested"));
-    assert_eq!(events::read_cursor(&home), 0, "--all must not move the cursor");
+    assert_eq!(
+        events::read_cursor(&home),
+        0,
+        "--all must not move the cursor"
+    );
 
     // A normal wait afterwards should still see event #1.
     let output2 = run_dashboard(&["--home", home_str, "wait", "--timeout", "1"], dir.path());
-    assert!(output2.status.success(), "the event should still be unread after --all");
+    assert!(
+        output2.status.success(),
+        "the event should still be unread after --all"
+    );
 }
 
 #[test]
 fn wait_blocks_then_returns_once_an_event_is_appended_from_another_thread() {
     let (dir, home) = plain_home();
-    let home_for_thread = Home { root: home.root.clone() };
+    let home_for_thread = Home {
+        root: home.root.clone(),
+    };
     let handle = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(1000));
-        events::append(&home_for_thread, EventKind::Tested, Some("late"), "finish accepted").expect("append from thread");
+        events::append(
+            &home_for_thread,
+            EventKind::Tested,
+            Some("late"),
+            "finish accepted",
+        )
+        .expect("append from thread");
     });
 
     let home_str = dir.path().to_str().expect("valid utf-8 path");
@@ -346,7 +525,14 @@ fn wait_blocks_then_returns_once_an_event_is_appended_from_another_thread() {
     let elapsed = start.elapsed();
     handle.join().expect("appender thread should not panic");
 
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
-    assert!(elapsed >= std::time::Duration::from_millis(800), "wait returned too early: {elapsed:?}");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(800),
+        "wait returned too early: {elapsed:?}"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("late"));
 }

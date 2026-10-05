@@ -19,19 +19,32 @@ use tempfile::TempDir;
 
 fn init_hub(repo: &DirectorRepo) -> (TempDir, Home) {
     let home_dir = temp_home();
-    let report = init::init(repo.path(), Some("proj"), Some(home_dir.path().join("home"))).expect("init should succeed");
+    let report = init::init(
+        repo.path(),
+        Some("proj"),
+        Some(home_dir.path().join("home")),
+    )
+    .expect("init should succeed");
     (home_dir, Home { root: report.home })
 }
 
 fn status_of(hub: &Git, slug: &str) -> Status {
     let hub_state = state::derive(hub, &|_| false).expect("derive should succeed");
-    hub_state.tasks.iter().find(|t| t.slug == slug).unwrap_or_else(|| panic!("no task state for {slug:?}")).status
+    hub_state
+        .tasks
+        .iter()
+        .find(|t| t.slug == slug)
+        .unwrap_or_else(|| panic!("no task state for {slug:?}"))
+        .status
 }
 
 /// An evidence command that passes on every other run (counter in `dir`).
 fn alternating(dir: &Path) -> String {
     let f = dir.join("count");
-    format!("n=$(cat {f} 2>/dev/null || echo 0); echo $((n+1)) > {f}; test $((n % 2)) -eq 0", f = f.display())
+    format!(
+        "n=$(cat {f} 2>/dev/null || echo 0); echo $((n+1)) > {f}; test $((n % 2)) -eq 0",
+        f = f.display()
+    )
 }
 
 fn task_toml(evidence_cmd: &str) -> String {
@@ -46,9 +59,26 @@ fn task_toml(evidence_cmd: &str) -> String {
 const TESTS_TOML: &str = "test_paths = [\"tests/\"]\nlist_cmd = \"cat tests/inventory.txt\"\n\n[[check]]\nname = \"unit\"\ncmd = \"true\"\n";
 
 /// Plans and posts `fix` (a flaky-test-fix), returning the player and hub.
-fn plan_and_post(repo: &DirectorRepo, home: &Home, evidence_cmd: &str, tests_toml: &str) -> (Player<NullSessions>, dashboard::player::TickReport) {
-    let mut player = Player::open(Home { root: home.root.clone() }, NullSessions::default()).expect("player open");
-    director_commit_on_branch(repo.path(), "task/fix", "tasks/fix/task.toml", &task_toml(evidence_cmd), "plan: fix");
+fn plan_and_post(
+    repo: &DirectorRepo,
+    home: &Home,
+    evidence_cmd: &str,
+    tests_toml: &str,
+) -> (Player<NullSessions>, dashboard::player::TickReport) {
+    let mut player = Player::open(
+        Home {
+            root: home.root.clone(),
+        },
+        NullSessions::default(),
+    )
+    .expect("player open");
+    director_commit_on_branch(
+        repo.path(),
+        "task/fix",
+        "tasks/fix/task.toml",
+        &task_toml(evidence_cmd),
+        "plan: fix",
+    );
     let report = player.tick().expect("plan tick");
     assert!(report.rejected.is_empty(), "{report}");
 
@@ -74,13 +104,21 @@ fn a_reproduced_flake_posts_launches_and_unpins_only_fix_paths() {
     let pinned = records::pinned_files(&hub, "fix").unwrap();
     assert!(pinned.contains_key("tests.toml"));
     assert!(pinned.contains_key("tasks/fix/task.toml"));
-    assert!(!pinned.contains_key("tests/inventory.txt"), "fix_paths are unpinned: {pinned:?}");
+    assert!(
+        !pinned.contains_key("tests/inventory.txt"),
+        "fix_paths are unpinned: {pinned:?}"
+    );
 
-    // The subagent is told which files are its to edit.
-    let clone = paths::subagent_clone(&repo.director_path(), "fix");
-    let git_dir = Git::new(&clone).run(&["rev-parse", "--absolute-git-dir"]).unwrap();
+    // The worker is told which files are its to edit.
+    let clone = paths::worker_clone(&repo.director_path(), "fix");
+    let git_dir = Git::new(&clone)
+        .run(&["rev-parse", "--absolute-git-dir"])
+        .unwrap();
     let prompt = std::fs::read_to_string(Path::new(&git_dir).join("dashboard-prompt.md")).unwrap();
-    assert!(prompt.contains("flaky-test-fix") && prompt.contains("flaky_stable"), "{prompt}");
+    assert!(
+        prompt.contains("flaky-test-fix") && prompt.contains("flaky_stable"),
+        "{prompt}"
+    );
 }
 
 #[test]
@@ -97,7 +135,10 @@ fn evidence_that_does_not_reproduce_retires_the_task_on_the_first_miss() {
     assert_eq!(status_of(&hub, "fix"), Status::Retired);
     assert!(!hub.ref_exists("refs/heads/task/fix"));
     let mortem = records::post_mortem(&hub, "fix").unwrap();
-    assert!(mortem.contains("evidence did not reproduce (4/4)"), "{mortem}");
+    assert!(
+        mortem.contains("evidence did not reproduce (4/4)"),
+        "{mortem}"
+    );
 }
 
 #[test]
@@ -105,24 +146,47 @@ fn a_higher_evidence_limit_only_strikes() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
-    write_file(repo.path(), "roadmap.toml", &format!("title = \"t\"\n\n[[phases]]\nid = \"p1\"\n\n[limits.strikes]\nevidence = 2\n{NO_TASK_AGENTS}"));
+    write_file(
+        repo.path(),
+        "roadmap.toml",
+        &format!(
+            "title = \"t\"\n\n[[phases]]\nid = \"p1\"\n\n[limits.strikes]\nevidence = 2\n{NO_TASK_AGENTS}"
+        ),
+    );
     commit(repo.path(), "docs: raise the evidence limit");
-    let mut player = Player::open(Home { root: home.root.clone() }, NullSessions::default()).unwrap();
+    let mut player = Player::open(
+        Home {
+            root: home.root.clone(),
+        },
+        NullSessions::default(),
+    )
+    .unwrap();
     player.tick().unwrap();
 
     let (_player, report) = plan_and_post(&repo, &home, "true", TESTS_TOML);
     assert_eq!(report.rejected[0].reason, Reason::Evidence, "{report}");
-    assert_eq!(status_of(&hub, "fix"), Status::Ready, "one miss of two is only a strike");
+    assert_eq!(
+        status_of(&hub, "fix"),
+        Status::Ready,
+        "one miss of two is only a strike"
+    );
 }
 
 #[test]
 fn the_stress_check_may_not_join_tests_toml() {
     let repo = director_repo();
     let (home_dir, home) = init_hub(&repo);
-    let tests = format!("{TESTS_TOML}\n[[check]]\nname = \"stable\"\ncmd = \"grep -qx flaky_stable tests/inventory.txt\"\n");
+    let tests = format!(
+        "{TESTS_TOML}\n[[check]]\nname = \"stable\"\ncmd = \"grep -qx flaky_stable tests/inventory.txt\"\n"
+    );
     let (_player, report) = plan_and_post(&repo, &home, &alternating(home_dir.path()), &tests);
     assert_eq!(report.rejected[0].reason, Reason::Post, "{report}");
-    assert!(report.rejected[0].message.contains("must not be added to the suite"), "{report}");
+    assert!(
+        report.rejected[0]
+            .message
+            .contains("must not be added to the suite"),
+        "{report}"
+    );
 }
 
 #[test]
@@ -141,10 +205,11 @@ fn finish_replaces_the_flaky_test_and_nothing_else() {
     let (home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let (mut player, _) = plan_and_post(&repo, &home, &alternating(home_dir.path()), TESTS_TOML);
-    let clone = paths::subagent_clone(&repo.director_path(), "fix");
+    let clone = paths::worker_clone(&repo.director_path(), "fix");
     let git = Git::new(&clone);
-    git.run(&["config", "user.name", "Test Subagent"]).unwrap();
-    git.run(&["config", "user.email", "subagent@example.com"]).unwrap();
+    git.run(&["config", "user.name", "Test Worker"]).unwrap();
+    git.run(&["config", "user.email", "worker@example.com"])
+        .unwrap();
     git.run(&["config", "commit.gpgsign", "false"]).unwrap();
 
     // Dropping another test is rejected as a suite strike, and relayed.
@@ -170,10 +235,11 @@ fn finish_with_the_replacement_is_tested() {
     let (home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let (mut player, _) = plan_and_post(&repo, &home, &alternating(home_dir.path()), TESTS_TOML);
-    let clone = paths::subagent_clone(&repo.director_path(), "fix");
+    let clone = paths::worker_clone(&repo.director_path(), "fix");
     let git = Git::new(&clone);
-    git.run(&["config", "user.name", "Test Subagent"]).unwrap();
-    git.run(&["config", "user.email", "subagent@example.com"]).unwrap();
+    git.run(&["config", "user.name", "Test Worker"]).unwrap();
+    git.run(&["config", "user.email", "worker@example.com"])
+        .unwrap();
     git.run(&["config", "commit.gpgsign", "false"]).unwrap();
 
     write_file(&clone, "tests/inventory.txt", "keep\nflaky_stable\n");
@@ -198,18 +264,24 @@ fn a_finish_that_needed_a_retry_is_in_the_ledger_and_the_status() {
         "n=$(cat {c} 2>/dev/null || echo 0); echo $((n+1)) > {c}; if [ $n -lt 1 ]; then echo 'Text file busy'; exit 1; fi",
         c = counter.display()
     );
-    let tests = format!("test_paths = [\"tests/\"]\nlist_cmd = \"cat tests/inventory.txt\"\n\n[[check]]\nname = \"unit\"\ncmd = {unit:?}\nretry_failed = 1\nretry_on = [\"Text file busy\"]\n");
+    let tests = format!(
+        "test_paths = [\"tests/\"]\nlist_cmd = \"cat tests/inventory.txt\"\n\n[[check]]\nname = \"unit\"\ncmd = {unit:?}\nretry_failed = 1\nretry_on = [\"Text file busy\"]\n"
+    );
     let (mut player, _) = plan_and_post(&repo, &home, &alternating(home_dir.path()), &tests);
-    let clone = paths::subagent_clone(&repo.director_path(), "fix");
+    let clone = paths::worker_clone(&repo.director_path(), "fix");
     let git = Git::new(&clone);
-    git.run(&["config", "user.name", "Test Subagent"]).unwrap();
-    git.run(&["config", "user.email", "subagent@example.com"]).unwrap();
+    git.run(&["config", "user.name", "Test Worker"]).unwrap();
+    git.run(&["config", "user.email", "worker@example.com"])
+        .unwrap();
     git.run(&["config", "commit.gpgsign", "false"]).unwrap();
 
     write_file(&clone, "tests/inventory.txt", "keep\nflaky_stable\n");
     commit(&clone, "finish: replace the flaky test");
     let report = player.tick().unwrap();
-    assert!(report.rejected.is_empty(), "no strike for an environmental flake: {report}");
+    assert!(
+        report.rejected.is_empty(),
+        "no strike for an environmental flake: {report}"
+    );
     assert_eq!(status_of(&hub, "fix"), Status::Tested);
 
     let hub_state = state::derive(&hub, &|_| false).unwrap();
@@ -231,10 +303,11 @@ fn finish_touching_anything_but_fix_paths_is_a_pins_strike() {
     let (home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let (mut player, _) = plan_and_post(&repo, &home, &alternating(home_dir.path()), TESTS_TOML);
-    let clone = paths::subagent_clone(&repo.director_path(), "fix");
+    let clone = paths::worker_clone(&repo.director_path(), "fix");
     let git = Git::new(&clone);
-    git.run(&["config", "user.name", "Test Subagent"]).unwrap();
-    git.run(&["config", "user.email", "subagent@example.com"]).unwrap();
+    git.run(&["config", "user.name", "Test Worker"]).unwrap();
+    git.run(&["config", "user.email", "worker@example.com"])
+        .unwrap();
     git.run(&["config", "commit.gpgsign", "false"]).unwrap();
 
     // A production change alongside the replacement: not a test flake.
@@ -244,7 +317,11 @@ fn finish_touching_anything_but_fix_paths_is_a_pins_strike() {
     let report = player.tick().unwrap();
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Pins);
-    assert!(report.rejected[0].message.contains("src/lib.txt") && report.rejected[0].message.contains("block:"), "{report}");
+    assert!(
+        report.rejected[0].message.contains("src/lib.txt")
+            && report.rejected[0].message.contains("block:"),
+        "{report}"
+    );
     assert_eq!(status_of(&hub, "fix"), Status::Posted);
 
     // Without it, and with a brand-new test file, the finish is fine.

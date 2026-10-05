@@ -1,4 +1,4 @@
-// XDG-based on-disk layout for a project's dashboard home (hub, subagent
+// XDG-based on-disk layout for a project's dashboard home (hub, worker
 // clones, player scratch worktree, event log, director cursor).
 
 use crate::git::Git;
@@ -11,7 +11,10 @@ pub fn data_root() -> PathBuf {
         Ok(v) if !v.is_empty() => PathBuf::from(v).join("dashboard"),
         _ => {
             let home = std::env::var("HOME").unwrap_or_default();
-            PathBuf::from(home).join(".local").join("share").join("dashboard")
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("dashboard")
         }
     }
 }
@@ -23,7 +26,9 @@ pub struct Home {
 
 impl Home {
     pub fn for_project(name: &str) -> Self {
-        Self { root: data_root().join(name) }
+        Self {
+            root: data_root().join(name),
+        }
     }
 
     pub fn hub(&self) -> PathBuf {
@@ -56,40 +61,40 @@ impl Home {
     }
 }
 
-/// Where a project's subagent clones live: nested inside the *director's*
+/// Where a project's worker clones live: nested inside the *director's*
 /// own working tree, never under the dashboard home. `dashboard init`
 /// gitignores this subfolder.
 ///
-/// Each one is a `git worktree` of `subagent_workspace` (never a fresh
+/// Each one is a `git worktree` of `worker_workspace` (never a fresh
 /// `git clone`), because an agent CLI's workspace trust is scoped to a git
 /// *repository*, not a filesystem path: a fresh clone is always a fresh
 /// repository, and nobody is present to click through its first-run
 /// trust dialog. A worktree shares its repository's identity with
-/// `subagent_workspace`, so it inherits the one trust decision the operator
+/// `worker_workspace`, so it inherits the one trust decision the operator
 /// already made for that single, permanent repo instead of needing a fresh
 /// one per task — safe because slugs are never reused (spec §8.1), so
 /// worktrees never collide on a branch name. Parallel tasks (spec §4) do
-/// share `refs/remotes/origin/*`, so two subagents fetching at the same
+/// share `refs/remotes/origin/*`, so two workers fetching at the same
 /// instant can see a transient ref-lock error; a retry clears it.
-pub fn subagents_root(director: &Path) -> PathBuf {
-    director.join(".dashboard").join("subagents")
+pub fn workers_root(director: &Path) -> PathBuf {
+    director.join(".dashboard").join("workers")
 }
 
-pub fn subagent_clone(director: &Path, slug: &str) -> PathBuf {
-    subagents_root(director).join(slug)
+pub fn worker_clone(director: &Path, slug: &str) -> PathBuf {
+    workers_root(director).join(slug)
 }
 
 /// Where a task's task agent works (spec §17): another worktree of
-/// `subagent_workspace`, for the same trust reason, on the local branch
-/// `agent/<slug>` (the subagent's worktree has `task/<slug>`).
+/// `worker_workspace`, for the same trust reason, on the local branch
+/// `agent/<slug>` (the worker's worktree has `task/<slug>`).
 pub fn agent_clone(director: &Path, slug: &str) -> PathBuf {
     director.join(".dashboard").join("agents").join(slug)
 }
 
-/// The one persistent clone of the hub every subagent's worktree hangs off
-/// (see `subagents_root`). Created lazily on first launch, trusted once by
+/// The one persistent clone of the hub every worker's worktree hangs off
+/// (see `workers_root`). Created lazily on first launch, trusted once by
 /// the operator, and never deleted.
-pub fn subagent_workspace(director: &Path) -> PathBuf {
+pub fn worker_workspace(director: &Path) -> PathBuf {
     director.join(".dashboard").join("workspace")
 }
 
@@ -101,8 +106,13 @@ pub fn resolve_home(explicit: Option<PathBuf>, cwd: &Path) -> Result<Home, Strin
     }
     let git = Git::new(cwd);
     match git.config_get("dashboard.home") {
-        Some(v) if !v.is_empty() => Ok(Home { root: PathBuf::from(v) }),
-        _ => Err("no dashboard home configured for this repo — run `dashboard init` or pass --home".to_string()),
+        Some(v) if !v.is_empty() => Ok(Home {
+            root: PathBuf::from(v),
+        }),
+        _ => Err(
+            "no dashboard home configured for this repo — run `dashboard init` or pass --home"
+                .to_string(),
+        ),
     }
 }
 
@@ -135,12 +145,18 @@ mod tests {
             std::env::remove_var("XDG_DATA_HOME");
             std::env::set_var("HOME", "/home/someone");
         }
-        assert_eq!(data_root(), PathBuf::from("/home/someone/.local/share/dashboard"));
+        assert_eq!(
+            data_root(),
+            PathBuf::from("/home/someone/.local/share/dashboard")
+        );
 
         unsafe {
             std::env::set_var("XDG_DATA_HOME", "");
         }
-        assert_eq!(data_root(), PathBuf::from("/home/someone/.local/share/dashboard"));
+        assert_eq!(
+            data_root(),
+            PathBuf::from("/home/someone/.local/share/dashboard")
+        );
 
         unsafe {
             match saved_xdg {
@@ -156,21 +172,44 @@ mod tests {
 
     #[test]
     fn home_accessors() {
-        let home = Home { root: PathBuf::from("/data/dashboard/myproj") };
+        let home = Home {
+            root: PathBuf::from("/data/dashboard/myproj"),
+        };
         assert_eq!(home.hub(), PathBuf::from("/data/dashboard/myproj/hub.git"));
         assert_eq!(home.work(), PathBuf::from("/data/dashboard/myproj/work"));
-        assert_eq!(home.events(), PathBuf::from("/data/dashboard/myproj/events.jsonl"));
-        assert_eq!(home.director_cursor(), PathBuf::from("/data/dashboard/myproj/director.cursor"));
-        assert_eq!(home.player_state(), PathBuf::from("/data/dashboard/myproj/player-state.json"));
-        assert_eq!(home.heartbeat(), PathBuf::from("/data/dashboard/myproj/player.heartbeat"));
+        assert_eq!(
+            home.events(),
+            PathBuf::from("/data/dashboard/myproj/events.jsonl")
+        );
+        assert_eq!(
+            home.director_cursor(),
+            PathBuf::from("/data/dashboard/myproj/director.cursor")
+        );
+        assert_eq!(
+            home.player_state(),
+            PathBuf::from("/data/dashboard/myproj/player-state.json")
+        );
+        assert_eq!(
+            home.heartbeat(),
+            PathBuf::from("/data/dashboard/myproj/player.heartbeat")
+        );
     }
 
     #[test]
-    fn subagent_paths_nest_under_the_directors_own_tree() {
+    fn worker_paths_nest_under_the_directors_own_tree() {
         let director = PathBuf::from("/home/op/myproj");
-        assert_eq!(subagents_root(&director), PathBuf::from("/home/op/myproj/.dashboard/subagents"));
-        assert_eq!(subagent_clone(&director, "foo"), PathBuf::from("/home/op/myproj/.dashboard/subagents/foo"));
-        assert_eq!(subagent_workspace(&director), PathBuf::from("/home/op/myproj/.dashboard/workspace"));
+        assert_eq!(
+            workers_root(&director),
+            PathBuf::from("/home/op/myproj/.dashboard/workers")
+        );
+        assert_eq!(
+            worker_clone(&director, "foo"),
+            PathBuf::from("/home/op/myproj/.dashboard/workers/foo")
+        );
+        assert_eq!(
+            worker_workspace(&director),
+            PathBuf::from("/home/op/myproj/.dashboard/workspace")
+        );
     }
 
     #[test]
@@ -210,7 +249,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let git = Git::new(dir.path());
         git.run(&["init", "-q", "-b", "main"]).unwrap();
-        git.config_set("dashboard.home", "/configured/home").unwrap();
+        git.config_set("dashboard.home", "/configured/home")
+            .unwrap();
         let home = resolve_home(None, dir.path()).unwrap();
         assert_eq!(home.root, PathBuf::from("/configured/home"));
     }
