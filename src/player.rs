@@ -56,6 +56,23 @@ pub trait Sessions {
     /// The session's visible screen, or `None` when it can't be read (the
     /// session is gone): what pane-staleness idle detection hashes.
     fn capture(&self, slug: &str) -> Option<String>;
+    /// Clears away a dead session. A session's pane outlives its command
+    /// (tmux's `remain-on-exit`), so a crash's last output survives until
+    /// this reads it, with the exit status, and ends the session (freeing
+    /// its name for a relaunch). `None` when there's nothing to reap: no
+    /// such session, or a live one (never touched).
+    fn reap(&mut self, slug: &str) -> Option<Remains>;
+}
+
+/// What a dead session left behind (`Sessions::reap`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Remains {
+    /// The dead pane's last output, `None` if it couldn't be read.
+    pub screen: Option<String>,
+    /// The command's exit status, if it exited.
+    pub status: Option<i32>,
+    /// The signal that killed it, if one did.
+    pub signal: Option<i32>,
 }
 
 /// A `Sessions` that records every `launch`/`send`/`kill` call so tests can
@@ -65,7 +82,10 @@ pub trait Sessions {
 /// (unless it's in `stillborn`: a session that dies before any tick sees
 /// it); `kill` removes it — a test after that point can remove it directly
 /// too, to simulate a session dying on its own. `panes` is what `capture`
-/// returns per live session (a live one missing from it shows "").
+/// returns per live session (a live one missing from it shows ""). A dead
+/// session whose pane lingers is one in `lingering` (and not in `alive`):
+/// what `reap` returns once, recording the slug in `reaped`. A launch or
+/// kill clears it, as replacing or killing the tmux session would.
 #[derive(Debug, Default)]
 pub struct NullSessions {
     pub sent: Vec<(String, String)>,
@@ -74,6 +94,8 @@ pub struct NullSessions {
     pub alive: BTreeSet<String>,
     pub stillborn: BTreeSet<String>,
     pub panes: BTreeMap<String, String>,
+    pub lingering: BTreeMap<String, Remains>,
+    pub reaped: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +124,7 @@ impl Sessions for NullSessions {
             agent_cmd: agent_cmd.to_string(),
             prompt_file: prompt_file.to_path_buf(),
         });
+        self.lingering.remove(slug);
         if !self.stillborn.contains(slug) {
             self.alive.insert(slug.to_string());
         }
@@ -115,12 +138,22 @@ impl Sessions for NullSessions {
     fn kill(&mut self, slug: &str) {
         self.killed.push(slug.to_string());
         self.alive.remove(slug);
+        self.lingering.remove(slug);
     }
 
     fn capture(&self, slug: &str) -> Option<String> {
         self.alive
             .contains(slug)
             .then(|| self.panes.get(slug).cloned().unwrap_or_default())
+    }
+
+    fn reap(&mut self, slug: &str) -> Option<Remains> {
+        if self.alive.contains(slug) {
+            return None;
+        }
+        let remains = self.lingering.remove(slug)?;
+        self.reaped.push(slug.to_string());
+        Some(remains)
     }
 }
 
@@ -146,10 +179,14 @@ impl Sessions for TmuxSessions {
     }
 
     /// `tmux new-session -d -s <name> -c <clone_dir> sh -c '<agent_cmd>
-    /// "$(cat <prompt_file>)"'`. `clone_dir` and `agent_cmd` are passed as
-    /// plain argv elements (no shell involved for the outer `tmux` call), but
-    /// `prompt_file` is interpolated into the inner `sh -c` string, so it's
-    /// the one path that needs shell quoting.
+    /// "$(cat <prompt_file>)"' \; set-option -w -t =<name>: remain-on-exit
+    /// on`. `clone_dir` and `agent_cmd` are passed as plain argv elements
+    /// (no shell involved for the outer `tmux` call), but `prompt_file` is
+    /// interpolated into the inner `sh -c` string, so it's the one path that
+    /// needs shell quoting. `remain-on-exit` (in the same command list, so
+    /// the server sets it before it can see the command exit) keeps a
+    /// crashed agent's pane, dead, for `reap`. A dead session still holding
+    /// the name (a relaunch before the player reaped it) is killed first.
     fn launch(
         &mut self,
         slug: &str,
@@ -165,6 +202,10 @@ impl Sessions for TmuxSessions {
             .to_str()
             .ok_or_else(|| format!("{} is not valid UTF-8", prompt_file.display()))?;
         let inner = format!("{agent_cmd} \"$(cat {})\"", shell_quote(prompt_str));
+        if !self.alive(slug) {
+            self.kill(slug);
+        }
+        let target = format!("={name}:");
         let status = Command::new("tmux")
             .args([
                 "new-session",
@@ -176,6 +217,13 @@ impl Sessions for TmuxSessions {
                 "sh",
                 "-c",
                 &inner,
+                ";",
+                "set-option",
+                "-w",
+                "-t",
+                &target,
+                "remain-on-exit",
+                "on",
             ])
             .status()
             .map_err(|e| format!("tmux new-session for {name}: {e}"))?;
@@ -272,6 +320,101 @@ impl Sessions for TmuxSessions {
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     }
+
+    /// `#{pane_dead}` decides (a live pane is left alone), then the dead
+    /// pane's whole history (`capture-pane -S -`: its last lines may have
+    /// scrolled off the screen when tmux wrote its own "Pane is dead" line,
+    /// which is dropped) and `#{pane_dead_status}`/`#{pane_dead_signal}`,
+    /// then `kill-session`.
+    fn reap(&mut self, slug: &str) -> Option<Remains> {
+        let name = state::tmux_session_name(&self.project, slug);
+        let target = format!("={name}:");
+        let out = Command::new("tmux")
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &target,
+                "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}",
+            ])
+            .output()
+            .ok()?;
+        let info = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let mut fields = info.split('|');
+        if !out.status.success() || fields.next() != Some("1") {
+            return None;
+        }
+        let status = fields.next().and_then(|f| f.parse().ok());
+        let signal = fields.next().and_then(|f| f.parse().ok());
+        let screen = Command::new("tmux")
+            .args(["capture-pane", "-p", "-S", "-", "-t", &target])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                let text = String::from_utf8_lossy(&o.stdout);
+                let mut lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+                while lines.last().is_some_and(|l| l.is_empty()) {
+                    lines.pop();
+                }
+                if lines.last().is_some_and(|l| l.starts_with("Pane is dead")) {
+                    lines.pop();
+                }
+                lines.join("\n")
+            });
+        self.kill(slug);
+        Some(Remains {
+            screen,
+            status,
+            signal,
+        })
+    }
+}
+
+/// Session screen tails in events: at most this many non-blank lines…
+const SCREEN_LINES: usize = 25;
+/// …and this many bytes of them, so events.jsonl doesn't bloat.
+const SCREEN_BYTES: usize = 2048;
+
+/// A screen's last `SCREEN_LINES` non-blank lines, trimmed of trailing
+/// whitespace and indented under a "last screen:" header, cut from the
+/// front to `SCREEN_BYTES`; or a plain "no screen captured" when there's
+/// nothing to show, so the director knows it wasn't left out.
+pub fn screen_tail(screen: Option<&str>) -> String {
+    let lines: Vec<&str> = screen
+        .unwrap_or("")
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return "no screen captured".to_string();
+    }
+    let mut kept: Vec<String> = Vec::new();
+    let mut size = 0;
+    let mut cut = lines.len() > SCREEN_LINES;
+    for line in lines.iter().rev().take(SCREEN_LINES) {
+        let line = format!("  {line}");
+        if size + line.len() + 1 > SCREEN_BYTES {
+            cut = true;
+            if kept.is_empty() {
+                // One huge line: keep its end.
+                let mut start = line.len() - (SCREEN_BYTES - 1);
+                while !line.is_char_boundary(start) {
+                    start += 1;
+                }
+                kept.push(format!("  {}", &line[start..]));
+            }
+            break;
+        }
+        size += line.len() + 1;
+        kept.push(line);
+    }
+    if cut {
+        kept.push("  …".to_string());
+    }
+    kept.reverse();
+    format!("last screen:\n{}", kept.join("\n"))
 }
 
 /// Wraps `s` in single quotes for safe interpolation into a `sh -c` string,
@@ -962,6 +1105,8 @@ impl<S: Sessions> Player<S> {
     /// launch id isn't the one already told. Seen alive, it's re-armed. A
     /// first run records what it finds without emitting. A kill by
     /// accept/retire is never reported: the task is no longer watched.
+    /// Whatever dead session lingers is reaped (`Sessions::reap`), watched
+    /// or not; the report carries its exit status and last screen.
     fn report_death(
         &mut self,
         key: &str,
@@ -975,6 +1120,7 @@ impl<S: Sessions> Player<S> {
             self.deaths_told.remove(key);
             return Ok(());
         }
+        let remains = self.sessions.reap(key);
         if !watched {
             return Ok(());
         }
@@ -983,7 +1129,19 @@ impl<S: Sessions> Player<S> {
             return Ok(());
         }
         if !self.first_run {
-            events::append(&self.home, kind, Some(slug), message)?;
+            let remains = remains.unwrap_or_default();
+            let exit = match (remains.status, remains.signal) {
+                (_, Some(signal)) => format!(" (killed by signal {signal})"),
+                (Some(status), None) => format!(" (exit status {status})"),
+                (None, None) => String::new(),
+            };
+            let tail = screen_tail(remains.screen.as_deref());
+            events::append(
+                &self.home,
+                kind,
+                Some(slug),
+                &format!("{message}{exit}\n{tail}"),
+            )?;
         }
         self.deaths_told.insert(key.to_string(), launch);
         Ok(())
@@ -1150,7 +1308,11 @@ impl<S: Sessions> Player<S> {
             } else {
                 EventKind::SessionIdle
             };
-            let message = format!("task/{}'s {who} {why} (tmux session {session})", task.slug);
+            let tail = screen_tail(self.sessions.capture(&key).as_deref());
+            let message = format!(
+                "task/{}'s {who} {why} (tmux session {session})\n{tail}",
+                task.slug
+            );
             events::append(&self.home, kind, Some(&task.slug), &message)?;
         }
         Ok(())
@@ -5041,6 +5203,41 @@ mod tests {
         s.kill("foo");
         assert_eq!(s.sent, vec![("foo".to_string(), "hello".to_string())]);
         assert_eq!(s.killed, vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn screen_tail_keeps_the_last_non_blank_lines_within_the_cap() {
+        assert_eq!(screen_tail(None), "no screen captured");
+        assert_eq!(screen_tail(Some(" \n\n  \n")), "no screen captured");
+        assert_eq!(
+            screen_tail(Some("a  \n\n  b\t\n\n\n")),
+            "last screen:\n  a\n    b"
+        );
+
+        // 25 lines of 200 bytes: cut to the newest that fit.
+        let wide: String = (0..25).map(|i| format!("{i:0>200}\n")).collect();
+        let tail = screen_tail(Some(&wide));
+        assert!(tail.len() <= SCREEN_BYTES + 32, "{}", tail.len());
+        assert!(tail.starts_with("last screen:\n  …\n"), "{tail}");
+        assert!(tail.ends_with(&format!("{:0>200}", 24)));
+
+        // One enormous line: its end, still capped, on a char boundary.
+        let huge = "é".repeat(10_000);
+        let tail = screen_tail(Some(&huge));
+        assert!(tail.len() <= SCREEN_BYTES + 32, "{}", tail.len());
+        assert!(tail.ends_with("éé"));
+    }
+
+    #[test]
+    fn null_sessions_reap_a_lingering_dead_session_once() {
+        let mut s = NullSessions::default();
+        s.alive.insert("a".to_string());
+        s.lingering.insert("a".to_string(), Remains::default());
+        assert_eq!(s.reap("a"), None, "a live session is never reaped");
+        s.alive.remove("a");
+        assert_eq!(s.reap("a"), Some(Remains::default()));
+        assert_eq!(s.reap("a"), None);
+        assert_eq!(s.reaped, vec!["a".to_string()]);
     }
 
     #[test]

@@ -369,6 +369,16 @@ back here):
   told is reported, so one that crashed before any tick saw it alive still
   is. Every launch (`Player::launch_session`, including `relaunch` in its
   own process) writes a fresh id to `launches/<key>`, re-arming it.
+  Sessions are launched with `remain-on-exit on`, so a crashed agent's
+  pane lingers, dead: "alive" means the pane's command is running
+  (`#{pane_dead}` is 0, `state::tmux_alive`, also what `status` asks),
+  not that the session exists. Each tick, a dead session that lingers is
+  reaped (`Sessions::reap`: its history, `#{pane_dead_status}` /
+  `#{pane_dead_signal}`, then `kill-session`), watched or not, and the
+  death event carries the exit status and its screen tail. A launch kills
+  a dead session still holding its name first, so `relaunch` works
+  before the player reaps it. Not a tee of the agent's output to a file:
+  piping a TUI's output breaks it.
 - **Idle sessions**: a live Claude Code session that ends its turn
   without the commit or report it owes (or on an API error / usage
   limit) is otherwise invisible. The launch-installed hooks (see On-disk
@@ -385,6 +395,11 @@ back here):
   since its last launch/relay. Anything else is waiting on someone else.
   `owes_work` is the reusable "supposed to be working" rule. Another
   `agent_cmd` just ignores the settings file.
+- **Screen tails**: every idle and death event ends with the session's
+  last screen (`player::screen_tail`: the last 25 non-blank lines,
+  trimmed and indented under "last screen:", cut from the front to 2 KiB),
+  or "no screen captured", so a director that can't `tmux attach` sees
+  why it stopped. Idle: `Sessions::capture`; death: `Sessions::reap`.
 - **Stale screens** (any agent): each tick, a live session that
   `owes_work` has its pane captured (`Sessions::capture`, `tmux
   capture-pane -p -t =<name>:`) and hashed (`pane_hash`, trailing
@@ -404,8 +419,9 @@ back here):
 - **`agent_cmd`**: `[player] agent_cmd` in `roadmap.toml`, default `claude
   --dangerously-skip-permissions`. Launched as `tmux new-session -d -s
   dash-<project>-<slug> -c <clone> sh -c '<agent_cmd> "$(cat
-  <prompt-file>)"'`; relays go through `tmux load-buffer`/`paste-buffer`/
-  `send-keys` into that same session.
+  <prompt-file>)"' \; set-option -w remain-on-exit on`; relays go
+  through `tmux load-buffer`/`paste-buffer`/`send-keys` into that same
+  session.
 
 - **flaky-test-fix** (spec §15): pins exclude `fix_paths`, and a finish
   changing any other path (new files under `test_paths` aside) is a `pins`

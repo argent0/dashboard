@@ -528,13 +528,23 @@ pub fn agent_key(slug: &str) -> String {
     format!("{slug}_agent")
 }
 
-/// Whether a tmux session named `name` is currently alive. `false` if tmux
-/// itself isn't installed, not just if the session is missing.
+/// Whether the agent in tmux session `name` is currently alive: the
+/// session exists *and* its pane's command is still running. Sessions are
+/// launched with `remain-on-exit`, so a crashed agent's pane lingers, dead,
+/// until the player reaps it (`Sessions::reap`); that's dead here already.
+/// `false` if tmux itself isn't installed, not just if the session is
+/// missing (`display-message` on a missing target prints nothing).
 pub fn tmux_alive(name: &str) -> bool {
     Command::new("tmux")
-        .args(["has-session", "-t", &format!("={name}")])
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={name}:"),
+            "#{pane_dead}",
+        ])
         .output()
-        .map(|o| o.status.success())
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "0")
         .unwrap_or(false)
 }
 

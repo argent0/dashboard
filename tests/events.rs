@@ -896,3 +896,166 @@ fn wait_blocks_then_returns_once_an_event_is_appended_from_another_thread() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("late"));
 }
+
+// --------------------------------------------------------------------------
+// The evidence in session-health events: screen tails, dead panes
+// --------------------------------------------------------------------------
+
+#[test]
+fn idle_events_carry_the_screen_tail() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(
+        &repo,
+        &mut player,
+        "scr",
+        "title = \"Scr\"\nphase = \"p1\"\n",
+    );
+    post(&repo, &mut player, "scr");
+    let idle = || events_for(&home, "scr", EventKind::SessionIdle);
+
+    // The stop-hook path: the screen's last non-blank lines, trimmed.
+    let screen: String = (1..=40).map(|i| format!("line {i}   \n\n")).collect();
+    show(&mut player, "scr", &screen);
+    player.set_clock(1000);
+    player.tick().expect("tick");
+    worker_stops(&repo, "scr", "stop 100 1");
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 1, "{:?}", events::read_all(&home));
+    let message = &idle()[0].message;
+    let tail = message.split_once("\nlast screen:\n").expect(message).1;
+    let want: Vec<String> = (16..=40).map(|i| format!("  line {i}")).collect();
+    assert_eq!(tail, format!("  …\n{}", want.join("\n")));
+
+    // The stale-pane path, on a screen that changed since.
+    commit_in_clone(&repo, "scr", "other.txt", "x\n", "finish: not really");
+    player.tick().expect("rejection tick");
+    show(
+        &mut player,
+        "scr",
+        "Do you trust this folder?\n> Yes\n  No\n\n",
+    );
+    player.set_clock(2000);
+    player.tick().expect("tick");
+    player.set_clock(3000);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 2, "{:?}", events::read_all(&home));
+    let message = &idle()[1].message;
+    assert!(message.contains("no new output"), "{message}");
+    assert!(
+        message.ends_with("\nlast screen:\n  Do you trust this folder?\n  > Yes\n    No"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_idle_event_with_an_empty_screen_says_so() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(
+        &repo,
+        &mut player,
+        "emp",
+        "title = \"Emp\"\nphase = \"p1\"\n",
+    );
+    post(&repo, &mut player, "emp");
+    player.tick().expect("tick");
+    worker_stops(&repo, "emp", "stop 100 1");
+    player.tick().expect("tick");
+    let idle = events_for(&home, "emp", EventKind::SessionIdle);
+    assert_eq!(idle.len(), 1, "{:?}", events::read_all(&home));
+    assert!(
+        idle[0].message.ends_with("\nno screen captured"),
+        "{}",
+        idle[0].message
+    );
+}
+
+/// Kills session `key` the way a crash does: its pane lingers, dead, with
+/// `screen` on it and exit `status`.
+fn crash(player: &mut Player<NullSessions>, key: &str, screen: &str, status: i32) {
+    let sessions = player.sessions_mut();
+    sessions.alive.remove(key);
+    sessions.lingering.insert(
+        key.to_string(),
+        player::Remains {
+            screen: Some(screen.to_string()),
+            status: Some(status),
+            signal: None,
+        },
+    );
+}
+
+#[test]
+fn a_died_event_carries_the_dead_panes_output_and_exit_status_then_reaps_it() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(&repo, &mut player, "cr", "title = \"Cr\"\nphase = \"p1\"\n");
+    post(&repo, &mut player, "cr");
+    player.tick().expect("tick");
+
+    crash(&mut player, "cr", "Error: invalid API key\n\n\n", 1);
+    assert!(
+        !player.sessions().alive("cr"),
+        "a lingering dead pane is dead"
+    );
+    player.tick().expect("tick");
+    let died = events_for(&home, "cr", EventKind::SessionDied);
+    assert_eq!(died.len(), 1, "{:?}", events::read_all(&home));
+    assert_eq!(
+        died[0].message,
+        "task/cr's worker session died (exit status 1)\nlast screen:\n  Error: invalid API key"
+    );
+    assert_eq!(player.sessions().reaped, vec!["cr".to_string()]);
+    assert!(
+        player.sessions().lingering.is_empty(),
+        "reaped after reporting"
+    );
+
+    // A relaunch from another process (`dashboard relaunch`) before the
+    // player reaped it: dead, so allowed, and the launch replaces it.
+    let mut other = open_player(&home);
+    crash(&mut other, "cr", "Segmentation fault\n", 139);
+    other
+        .relaunch("cr")
+        .expect("a lingering dead pane can be relaunched");
+    assert!(other.sessions().lingering.is_empty());
+    assert!(other.sessions().alive("cr"));
+
+    // A death with nothing left behind still says so.
+    player.tick().expect("tick after the relaunch");
+    assert_eq!(events_for(&home, "cr", EventKind::SessionDied).len(), 2);
+    let died = events_for(&home, "cr", EventKind::SessionDied);
+    assert_eq!(
+        died[1].message,
+        "task/cr's worker session died\nno screen captured"
+    );
+}
+
+#[test]
+fn a_dead_session_nobody_watches_is_still_reaped() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan(
+        &repo,
+        &mut player,
+        "fin",
+        "title = \"Fin\"\nphase = \"p1\"\n",
+    );
+    post(&repo, &mut player, "fin");
+    commit_in_clone(&repo, "fin", "feature-fin.txt", "done\n", "finish work");
+    player.tick().expect("finish tick");
+    assert_eq!(task_status(&hub, "fin"), Status::Tested);
+
+    // Waiting for review, it exits: not a death worth reporting, but its
+    // pane doesn't linger either.
+    crash(&mut player, "fin", "bye\n", 0);
+    player.tick().expect("tick");
+    assert!(events_for(&home, "fin", EventKind::SessionDied).is_empty());
+    assert!(player.sessions().lingering.is_empty());
+}
