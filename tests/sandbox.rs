@@ -15,7 +15,9 @@ use dashboard::git::Git;
 use dashboard::init;
 use dashboard::paths::Home;
 use dashboard::player::{NullSessions, Player};
+use dashboard::records::{self, Actor, Transition};
 use dashboard::sandbox::Sandbox;
+use dashboard::{render, state};
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -299,4 +301,147 @@ fn a_bad_writable_path_is_rejected_at_init() {
     )
     .unwrap_err();
     assert!(err.contains("writable"), "{err}");
+}
+
+#[test]
+fn a_failure_against_the_jails_walls_is_impure() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let runner = jailed_runner(&home, &[]);
+    let commit = repo.git().rev_parse("HEAD").unwrap();
+    let outside = TempDir::new().unwrap();
+
+    let c = Check {
+        runs: 3,
+        retry_failed: 1,
+        ..check(
+            "writes-home",
+            &format!("echo x > {}/state", outside.path().display()),
+        )
+    };
+    let r = runner.run_check(&commit, &c);
+    assert!(!r.pass);
+    assert!(r.leaked.is_empty());
+    assert_eq!(r.blocked.len(), 1, "{r:?}");
+    assert!(r.blocked[0].contains("Read-only file system"), "{r:?}");
+    assert_eq!(r.exits.len(), 1, "stops at the first blocked run");
+    assert_eq!(r.retries, 0, "never retried");
+    assert!(r.impurity().unwrap().contains("the sandbox stopped it"));
+
+    // An ordinary failure is just a failure.
+    let r = runner.run_check(&commit, &check("plain", "echo nope; exit 1"));
+    assert!(!r.pass && r.impurity().is_none(), "{r:?}");
+}
+
+#[test]
+fn a_task_check_failing_only_against_the_jail_cannot_be_posted() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = Player::open(
+        Home {
+            root: home.root.clone(),
+        },
+        NullSessions::default(),
+    )
+    .unwrap();
+    director_commit_on_branch(
+        repo.path(),
+        "task/a",
+        "tasks/a/task.toml",
+        "title = \"a\"\nphase = \"p1\"\n",
+        "plan: a",
+    );
+    player.tick().unwrap();
+
+    // It "fails", but only because $HOME is read-only in the jail.
+    let cmd = "echo seen > \"$HOME/.dashboard-test-state\" && test -f feature.txt";
+    write_file(repo.path(), "tasks/a/prompt.md", "do it\n");
+    write_file(
+        repo.path(),
+        "tasks/a/task.toml",
+        &format!("title = \"a\"\nphase = \"p1\"\n\n[check]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
+    );
+    write_file(
+        repo.path(),
+        "tests.d/a.toml",
+        &format!("[[check]]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
+    );
+    let post = commit(repo.path(), "post: a");
+    let report = player.tick().unwrap();
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Post);
+    assert!(
+        report.rejected[0].message.contains("sandbox stopped it"),
+        "{}",
+        report.rejected[0].message
+    );
+
+    // And it's in the impurity ledger, under the task.
+    let ledger = records::impurities(&hub);
+    assert_eq!(ledger.len(), 1, "{ledger:?}");
+    assert_eq!(
+        (ledger[0].scope.as_str(), ledger[0].check.as_str()),
+        ("a", "a-check")
+    );
+    assert_eq!(ledger[0].commit, post);
+    let hub_state = state::derive(&hub, &|_| false).unwrap();
+    assert_eq!(hub_state.impurities.len(), 1);
+    let a = hub_state.tasks.iter().find(|t| t.slug == "a").unwrap();
+    assert_eq!(a.impure, 1);
+    let out = render::render(&hub_state, &[], false, 120);
+    assert!(out.contains("Impure checks (1)"), "{out}");
+    assert!(out.contains("impure: 1"), "{out}");
+
+    // Re-reading the same cached result doesn't add another entry.
+    player.tick().unwrap();
+    assert_eq!(records::impurities(&hub).len(), 1);
+}
+
+#[test]
+fn a_held_launch_is_reported_once_per_tip() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = Player::open(
+        Home {
+            root: home.root.clone(),
+        },
+        NullSessions::default(),
+    )
+    .unwrap();
+    director_commit_on_branch(
+        repo.path(),
+        "task/a",
+        "tasks/a/task.toml",
+        "title = \"a\"\nphase = \"p1\"\n",
+        "plan: a",
+    );
+    player.tick().unwrap();
+
+    // A post that went in before the player could tell its task check is
+    // impure (say, under an older player): put straight into the hub.
+    let cmd = "touch scratch.txt; test -f feature.txt";
+    write_file(repo.path(), "tasks/a/prompt.md", "do it\n");
+    write_file(
+        repo.path(),
+        "tasks/a/task.toml",
+        &format!("title = \"a\"\nphase = \"p1\"\n\n[check]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
+    );
+    write_file(
+        repo.path(),
+        "tests.d/a.toml",
+        &format!("[[check]]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
+    );
+    let post = commit(repo.path(), "post: a");
+    repo.git().run(&["push", "-q", "hub", "task/a"]).unwrap();
+    records::record_import(&hub, &post, Actor::Director, Transition::Post, Some("a")).unwrap();
+
+    let report = player.tick().unwrap();
+    assert!(report.launched.is_empty(), "{report}");
+    assert_eq!(report.errors.len(), 1, "{report}");
+    assert!(report.errors[0].contains("impure"), "{report}");
+    let report = player.tick().unwrap();
+    assert!(report.errors.is_empty(), "reported once: {report}");
+    assert!(report.launched.is_empty(), "{report}");
 }

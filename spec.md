@@ -794,8 +794,17 @@ guarantee.
   failure `init` creates nothing and the player runs no tick: checks never
   run unjailed by accident. `enabled = false` turns the jail (not the
   clean-worktree check) off, e.g. on a host without bubblewrap.
-- **The cache.** A cached result records the policy it ran under and is
-  only reused under the same one.
+- **Hitting the walls.** A failing run whose output shows the jail refused
+  it (`Read-only file system`; with the network off, an unreachable network
+  or a failed name lookup) is impure too, the same as a leak. It's a
+  heuristic on libc's and curl's messages, but such a failure never means
+  "fails for the task's reason", so it can't satisfy a post either.
+- **The impurity ledger.** Every impure check the player sees is recorded
+  under its task (or `_main`), like the flake ledger: `status` shows
+  `impure: N` per task and the latest entries, with what each left behind
+  or which wall it hit.
+- **The cache.** A cached result records the policy it ran under, and the
+  version of the impurity detector, and is only reused under the same.
 
 **An impure `main`.** Impurity that's already on `main` (older than
 this check, or surfacing under a new policy) is nobody's current work, so
@@ -810,7 +819,8 @@ and a worker's finish or a director's accept is *held* — neither imported
 nor rejected, no strike, said once. When those checks are clean on `main`,
 a held accept is simply re-landed; a held finish's branch still carries the
 old check, so the player merges `main` into it (a `sync_revision`,
-re-pinned) and the worker rebases its finish onto that.
+re-pinned) and the worker rebases its finish onto that. A launch held for
+an impure task check is reported once per tip, not every tick.
 
 Not enforced: determinism and order independence (a clock, unseeded
 randomness, state shared through a `writable` path). The task agent's review

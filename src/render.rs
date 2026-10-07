@@ -478,12 +478,30 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
         ));
         for (check, leaked) in &state.main_impure {
             out.push(format!(
-                "  {check} leaves {}",
+                "  {check}: {}",
                 truncate(&leaked.join(", "), width.saturating_sub(10).max(10))
             ));
         }
         if !state.held.is_empty() {
             out.push(format!("  held: {}", state.held.join(", ")));
+        }
+        out.push(String::new());
+    }
+
+    // ---- impure checks (the impurity ledger) ----
+    if !state.impurities.is_empty() {
+        out.push(style(
+            &format!("Impure checks ({})", state.impurities.len()),
+            &[c::BOLD, c::RED],
+            color,
+        ));
+        for i in state.impurities.iter().rev().take(5) {
+            out.push(format!(
+                "  {} {} — {}",
+                i.scope,
+                i.check,
+                truncate(&i.evidence.join(", "), width.saturating_sub(30).max(10))
+            ));
         }
         out.push(String::new());
     }
@@ -604,11 +622,14 @@ fn render_phase(
         let slug = format!("{:<24}", t.slug);
         let status_label = format!("{:<11}", t.status.as_str());
         let title_w = width.saturating_sub(46).max(10);
-        let flaky = if t.flaky > 0 {
+        let mut badges = if t.flaky > 0 {
             style(&format!("  flaky: {}", t.flaky), &[c::YELLOW], color)
         } else {
             String::new()
         };
+        if t.impure > 0 {
+            badges.push_str(&style(&format!("  impure: {}", t.impure), &[c::RED], color));
+        }
         out.push(format!(
             "  {} {} {}{} {}{}",
             ss.icon,
@@ -616,7 +637,7 @@ fn render_phase(
             style(&slug, &[c::DIM], color),
             mark,
             truncate(&t.config.title, title_w),
-            flaky
+            badges
         ));
     }
     out.push(String::new());
@@ -862,6 +883,7 @@ mod tests {
             alive: false,
             spike: None,
             flaky: 0,
+            impure: 0,
             conflict: None,
             agent: None,
         }
@@ -874,6 +896,7 @@ mod tests {
             tasks,
             rejections: vec![],
             flakes: vec![],
+            impurities: vec![],
             main_impure: vec![],
             held: vec![],
             project: "widget".to_string(),

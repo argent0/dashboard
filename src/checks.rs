@@ -66,6 +66,11 @@ pub struct CheckResult {
     /// code, and isn't retried.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leaked: Vec<String>,
+    /// Output lines of a failing run that show it hit the jail's walls (a
+    /// read-only filesystem, no network; `Sandbox::walls_hit`): impure like
+    /// a leak, since that failure says nothing about the code under test.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<String>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -78,19 +83,38 @@ impl CheckResult {
         self.pass && self.retries > 0
     }
 
-    /// `Some(why)` if a run left files in the worktree: the check failed
-    /// because it's impure, not because the code under test is wrong, so a
-    /// caller that wants it to fail (a post, a send-back) mustn't count it.
+    /// `Some(why)` if a run left files in the worktree or was stopped by the
+    /// sandbox: the check failed because it's impure, not because the code
+    /// under test is wrong, so a caller that wants it to fail (a post, a
+    /// send-back) mustn't count it.
     pub fn impurity(&self) -> Option<String> {
-        if self.leaked.is_empty() {
-            return None;
+        if !self.leaked.is_empty() {
+            return Some(format!(
+                "check {:?} is impure: it left files in its worktree ({}). A test may only write \
+                 to a temp dir it creates; build outputs belong in .gitignore",
+                self.name,
+                self.leaked.join(", ")
+            ));
         }
-        Some(format!(
-            "check {:?} is impure: it left files in its worktree ({}). A test may only write \
-             to a temp dir it creates; build outputs belong in .gitignore",
-            self.name,
-            self.leaked.join(", ")
-        ))
+        if !self.blocked.is_empty() {
+            return Some(format!(
+                "check {:?} is impure: the sandbox stopped it ({}). A test may only write to its \
+                 worktree and a temp dir it creates, and may not use the network",
+                self.name,
+                self.blocked.join("; ")
+            ));
+        }
+        None
+    }
+
+    /// What made the check impure: the files it left, else the lines
+    /// showing it hit the sandbox. Empty for a pure one.
+    pub fn impure_evidence(&self) -> Vec<String> {
+        if self.leaked.is_empty() {
+            self.blocked.clone()
+        } else {
+            self.leaked.clone()
+        }
     }
 
     /// A cached result is reusable for `check` only if the name, cmd and
@@ -408,6 +432,7 @@ impl Runner {
             metrics: None,
             isolation: self.sandbox.fingerprint(),
             leaked: Vec::new(),
+            blocked: Vec::new(),
         };
         if let Err(e) = self.prepare(commit) {
             return CheckResult {
@@ -426,7 +451,7 @@ impl Runner {
         loop {
             let (mut result, failed_output) = self.attempt(check, timeout, max_pass, base.clone());
             let retry = !result.pass
-                && result.leaked.is_empty()
+                && result.impurity().is_none()
                 && retries < check.retry_failed
                 && (patterns.is_empty() || patterns.iter().any(|p| p.is_match(&failed_output)));
             if !retry {
@@ -471,6 +496,20 @@ impl Runner {
                 result.runs = exits.len() as u32;
                 result.exits = exits;
                 return (result, failed_output);
+            }
+
+            // Failed against the jail's walls: the same in every run.
+            if code != 0 {
+                let blocked = self.sandbox.walls_hit(&String::from_utf8_lossy(&combined));
+                if !blocked.is_empty() {
+                    exits.push(code);
+                    result.blocked = blocked;
+                    result.output_tail = Some(tail_str(&combined));
+                    result.pass = false;
+                    result.runs = exits.len() as u32;
+                    result.exits = exits;
+                    return (result, failed_output);
+                }
             }
 
             exits.push(code);

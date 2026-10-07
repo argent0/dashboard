@@ -77,20 +77,51 @@ impl Sandbox {
     }
 
     /// Identifies the policy, so a check result cached under one policy is
-    /// never reused under another (`CheckResult::isolation`). The `v1`
-    /// prefix also covers the worktree-leak check every run gets.
+    /// never reused under another (`CheckResult::isolation`). The version
+    /// prefix also covers how impurity is detected (v1: worktree leaks; v2:
+    /// also `walls_hit`), so results from an older detector re-run.
     pub fn fingerprint(&self) -> String {
         match &self.jail {
-            None => "v1 jail=off".to_string(),
+            None => "v2 jail=off".to_string(),
             Some(j) => {
                 let rw: Vec<String> = j.writable.iter().map(|p| p.display().to_string()).collect();
                 format!(
-                    "v1 jail=bwrap net={} rw={}",
+                    "v2 jail=bwrap net={} rw={}",
                     if j.network { "on" } else { "off" },
                     rw.join(":")
                 )
             }
         }
+    }
+
+    /// The lines of a failing run's output showing it hit the jail: a write
+    /// the read-only host filesystem refused or, with the network off, a
+    /// connection or name lookup that had nowhere to go. A heuristic (the
+    /// messages are libc's and curl's), but a failure like that never means
+    /// "fails for the task's reason". Empty when the jail is off.
+    pub fn walls_hit(&self, output: &str) -> Vec<String> {
+        let Some(j) = &self.jail else {
+            return Vec::new();
+        };
+        let mut walls = vec!["Read-only file system"];
+        if !j.network {
+            walls.extend([
+                "Network is unreachable",
+                "Temporary failure in name resolution",
+                "Could not resolve host",
+            ]);
+        }
+        let mut hits: Vec<String> = Vec::new();
+        for line in output.lines() {
+            let line = line.trim();
+            if walls.iter().any(|w| line.contains(w)) && !hits.iter().any(|h| h == line) {
+                hits.push(line.to_string());
+            }
+            if hits.len() == 3 {
+                break;
+            }
+        }
+        hits
     }
 
     /// One line for the operator, e.g. `bwrap, network off, writable: ~/.cargo`.
@@ -301,6 +332,21 @@ mod tests {
     fn writable_must_be_absolute_or_home_relative() {
         assert!(Sandbox::from_config(&cfg(true, false, &["relative/dir"])).is_err());
         assert!(Sandbox::from_config(&cfg(true, false, &["~/.cargo", "/opt"])).is_ok());
+    }
+
+    #[test]
+    fn walls_hit_matches_the_jails_refusals_only() {
+        let out = "ok\nsh: 1: cannot create /home/x: Read-only file system\n\
+                   curl: (6) Could not resolve host: example.com\nboom\n";
+        let jailed = Sandbox::from_config(&cfg(true, false, &[])).unwrap();
+        assert_eq!(jailed.walls_hit(out).len(), 2);
+        let with_net = Sandbox::from_config(&cfg(true, true, &[])).unwrap();
+        assert_eq!(
+            with_net.walls_hit(out),
+            vec!["sh: 1: cannot create /home/x: Read-only file system".to_string()]
+        );
+        assert!(Sandbox::off().walls_hit(out).is_empty());
+        assert!(jailed.walls_hit("assertion failed\n").is_empty());
     }
 
     #[test]

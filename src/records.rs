@@ -345,6 +345,100 @@ pub fn flakes(hub: &Git) -> Vec<FlakeRecord> {
 }
 
 // --------------------------------------------------------------------------
+// Impurity ledger: refs/impure/<scope>/<n> (spec §20)
+// --------------------------------------------------------------------------
+
+const IMPURITIES_NOTES_REF: &str = "refs/notes/dashboard-impurities";
+
+/// A check the player found impure: it left files in its worktree, or the
+/// sandbox stopped it. The note on a commit is a JSON array of these (one per
+/// scope and check), like the flake ledger's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImpurityRecord {
+    pub scope: String,
+    pub check: String,
+    /// `CheckResult::impure_evidence`: the files left, or the sandbox lines.
+    pub evidence: Vec<String>,
+    pub at: u64,
+    #[serde(default)]
+    pub commit: String,
+}
+
+fn read_impurity_note(hub: &Git, commit: &str) -> Vec<ImpurityRecord> {
+    hub.notes_show(IMPURITIES_NOTES_REF, commit)
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Records that `result` (a check result at `commit`) is impure, under
+/// `scope` (a task slug, or `_main`). A no-op for a pure result, and for a
+/// (scope, check, commit) already recorded: cached results are re-read
+/// every tick.
+pub fn record_impurity(
+    hub: &Git,
+    scope: &str,
+    commit: &str,
+    result: &crate::checks::CheckResult,
+) -> Result<(), String> {
+    if result.impurity().is_none() {
+        return Ok(());
+    }
+    let mut entries = read_impurity_note(hub, commit);
+    if entries
+        .iter()
+        .any(|e| e.scope == scope && e.check == result.name)
+    {
+        return Ok(());
+    }
+    entries.push(ImpurityRecord {
+        scope: scope.to_string(),
+        check: result.name.clone(),
+        evidence: result.impure_evidence(),
+        at: now_unix(),
+        commit: String::new(),
+    });
+    let json = serde_json::to_string(&entries).map_err(|e| e.to_string())?;
+    hub.notes_add(IMPURITIES_NOTES_REF, commit, &json)
+        .map_err(|e| e.to_string())?;
+
+    let existing = hub.for_each_ref(&format!("refs/impure/{scope}/*"));
+    if !existing.iter().any(|(_, sha)| sha == commit) {
+        let n = existing
+            .iter()
+            .filter_map(|(r, _)| r.rsplit('/').next()?.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        hub.update_ref(&format!("refs/impure/{scope}/{n}"), commit)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Every recorded impurity, oldest first.
+pub fn impurities(hub: &Git) -> Vec<ImpurityRecord> {
+    let mut out = Vec::new();
+    for (refname, sha) in hub.for_each_ref("refs/impure/*/*") {
+        let scope = refname
+            .trim_start_matches("refs/impure/")
+            .rsplit_once('/')
+            .map(|(s, _)| s.to_string())
+            .unwrap_or_default();
+        out.extend(
+            read_impurity_note(hub, &sha)
+                .into_iter()
+                .filter(|e| e.scope == scope)
+                .map(|e| ImpurityRecord {
+                    commit: sha.clone(),
+                    ..e
+                }),
+        );
+    }
+    out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.check.cmp(&b.check)));
+    out
+}
+
+// --------------------------------------------------------------------------
 // Escalation records: refs/dashboard/escalated/<slug> (spec §10)
 // --------------------------------------------------------------------------
 

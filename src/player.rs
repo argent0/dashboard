@@ -403,6 +403,9 @@ pub struct Player<S: Sessions> {
     /// tick while `main` stays the same. (Held finishes live in the hub:
     /// `records::held_commit`.)
     held_accepts: BTreeMap<String, (String, String)>,
+    /// The (tip, reason) each held launch was last reported for
+    /// (`hold_launch`).
+    launch_told: BTreeMap<String, String>,
 }
 
 impl<S: Sessions> Player<S> {
@@ -433,6 +436,7 @@ impl<S: Sessions> Player<S> {
             main_verified: String::new(),
             main_told: None,
             held_accepts: BTreeMap::new(),
+            launch_told: BTreeMap::new(),
         })
     }
 
@@ -446,7 +450,7 @@ impl<S: Sessions> Player<S> {
             .rev_parse("refs/heads/main")
             .ok_or("hub has no main")?;
         let suite = self.runner.run_suite(&main_tip);
-        self.note_flakes("_main", &main_tip, &suite);
+        self.note_ledgers("_main", &main_tip, &suite);
         self.main_impure = suite
             .checks
             .iter()
@@ -906,7 +910,7 @@ impl<S: Sessions> Player<S> {
             }
         }
         let suite = self.runner.run_suite(candidate);
-        self.note_flakes("_main", candidate, &suite);
+        self.note_ledgers("_main", candidate, &suite);
         // Failing only where main already fails impurely is main's old
         // problem, not this commit's: it mustn't block the director (who may
         // be here to change `[sandbox]`).
@@ -1692,6 +1696,7 @@ impl<S: Sessions> Player<S> {
             .run_task_check(candidate, slug)
             .map_err(|e| format!("post: task/{slug}: {e}"))?;
         if let Some(why) = result.impurity() {
+            let _ = records::record_impurity(&self.hub, slug, candidate, &result);
             return Err(format!("post: task/{slug}: {why}"));
         }
         if result.pass {
@@ -1785,7 +1790,7 @@ impl<S: Sessions> Player<S> {
         }
 
         let suite = self.runner.run_suite(candidate);
-        self.note_flakes(slug, candidate, &suite);
+        self.note_ledgers(slug, candidate, &suite);
         if suite.pass {
             let msg = format!(
                 "send-back: task/{slug}: send-back without evidence: the project suite still passes"
@@ -2084,7 +2089,7 @@ impl<S: Sessions> Player<S> {
             .map_err(|e| e.to_string())?;
 
         let suite = self.runner.run_suite(&merge_sha);
-        self.note_flakes(slug, &merge_sha, &suite);
+        self.note_ledgers(slug, &merge_sha, &suite);
         if !suite.pass {
             // Not the work's fault, nor the merge's: leave the marker
             // unimported (no strike, no sync_revision) until main is clean.
@@ -2879,6 +2884,17 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
+    /// Reports a launch the player won't make yet. The task stays `posted`
+    /// and is looked at again every tick (each a cache hit), so the same
+    /// reason at the same tip is reported once, not every tick.
+    fn hold_launch(&mut self, slug: &str, tip: &str, msg: String, report: &mut TickReport) {
+        let key = format!("{tip}\n{msg}");
+        if self.launch_told.get(slug) != Some(&key) {
+            self.launch_told.insert(slug.to_string(), key);
+            report.errors.push(msg);
+        }
+    }
+
     fn try_launch(&mut self, slug: &str, tip: &str, report: &mut TickReport) -> Result<(), String> {
         let is_spike = records::is_spike_at(&self.hub, tip, slug);
         if is_spike {
@@ -2889,7 +2905,11 @@ impl<S: Sessions> Player<S> {
                 .map_err(|e| format!("launch: task/{slug}: {e}"))?;
             let failures = spike::failing_at(&self.runner, tip, &baseline, "on the current code");
             if !failures.is_empty() {
-                report.errors.push(format!("launch: task/{slug}: the director's baseline claims no longer pass at the tip — not launching\n{}", failures.join("\n")));
+                let msg = format!(
+                    "launch: task/{slug}: the director's baseline claims no longer pass at the tip — not launching\n{}",
+                    failures.join("\n")
+                );
+                self.hold_launch(slug, tip, msg, report);
                 return Ok(());
             }
         } else {
@@ -2898,13 +2918,16 @@ impl<S: Sessions> Player<S> {
                 .run_task_check(tip, slug)
                 .map_err(|e| format!("launch: task/{slug}: {e}"))?;
             if let Some(why) = result.impurity() {
-                report
-                    .errors
-                    .push(format!("launch: task/{slug}: {why} — not launching"));
+                let _ = records::record_impurity(&self.hub, slug, tip, &result);
+                let msg = format!("launch: task/{slug}: {why} — not launching");
+                self.hold_launch(slug, tip, msg, report);
                 return Ok(());
             }
             if result.pass {
-                report.errors.push(format!("launch: task/{slug}: the task check now passes at the tip — not launching a worker for work that's already done"));
+                let msg = format!(
+                    "launch: task/{slug}: the task check now passes at the tip — not launching a worker for work that's already done"
+                );
+                self.hold_launch(slug, tip, msg, report);
                 return Ok(());
             }
             if let Some(miss) = self.evidence_miss(slug, tip) {
@@ -3382,7 +3405,7 @@ impl<S: Sessions> Player<S> {
         }
 
         let suite = self.runner.run_suite(candidate);
-        self.note_flakes(slug, candidate, &suite);
+        self.note_ledgers(slug, candidate, &suite);
         if !suite.pass {
             // Failing only where main already fails impurely: not the
             // worker's doing. Left unimported, it's re-judged every tick
@@ -3434,11 +3457,13 @@ impl<S: Sessions> Player<S> {
     }
 
     /// Files every check in `suite` that passed only on a retry into the
-    /// flake ledger under `scope`, so the director can plan a hygiene task
-    /// with evidence. Best effort: a ledger write never fails a transition.
-    fn note_flakes(&self, scope: &str, commit: &str, suite: &checks::SuiteResult) {
+    /// flake ledger, and every impure one into the impurity ledger, under
+    /// `scope`, so the director can plan a hygiene task with evidence. Best
+    /// effort: a ledger write never fails a transition.
+    fn note_ledgers(&self, scope: &str, commit: &str, suite: &checks::SuiteResult) {
         for c in &suite.checks {
             let _ = records::record_flake(&self.hub, scope, commit, c);
+            let _ = records::record_impurity(&self.hub, scope, commit, c);
         }
     }
 

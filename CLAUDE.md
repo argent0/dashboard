@@ -123,6 +123,7 @@ refs/notes/dashboard-imports     provenance per imported commit (actor, transiti
 refs/notes/dashboard-rejections  reason/actor/message/at per refs/rejected/* commit
 refs/notes/dashboard-escalations cause/at per refs/dashboard/escalated/<slug>
 refs/notes/dashboard-flakes       the flake ledger: checks that passed only on a retry (refs/flakes/<scope>/<n>)
+refs/notes/dashboard-impurities   the impurity ledger: checks found impure (refs/impure/<scope>/<n>, spec §20)
 refs/notes/dashboard-explorations a spike round's verified answer + claim results, on each validated
                                  finish commit; {concluded: true, ...} on the `conclude:` commit
 refs/notes/dashboard-conflicts   on a conflicted task's tip: the exact main commit an accept couldn't
@@ -461,6 +462,15 @@ back here):
   merging main into the branch (a `sync_revision`, re-pinned,
   `worker.released`: rebase); a merge conflict there just un-holds it.
   Tests: `tests/main_impure.rs`.
+- **Impurity beyond leaks** (spec §20): a failing run whose output
+  `Sandbox::walls_hit` matches (EROFS; with the network off, unreachable
+  network / failed name lookup) sets `CheckResult::blocked`, impure like
+  `leaked` (`impurity()`, `impure_evidence()`); the fingerprint's `v2`
+  makes results from the leak-only detector re-run. Every impure result
+  goes in the impurity ledger (`records::record_impurity`, via
+  `note_ledgers` and at post/launch), shown as `impure: N` and an "Impure
+  checks" list. `hold_launch` reports a launch held at the same tip for
+  the same reason once (`launch_told`).
 
 Still undecided (spec §13): timeout/crash handling beyond manual relaunch,
 scope enforcement beyond pins, and suite-runtime cost at scale.

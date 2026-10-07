@@ -7,7 +7,7 @@
 use crate::checks::{self, SuiteResult};
 use crate::config::{self, Reason, RoadmapConfig, TaskConfig, TaskKind};
 use crate::git::Git;
-use crate::records::{self, FlakeRecord, RejectionRecord, Transition};
+use crate::records::{self, FlakeRecord, ImpurityRecord, RejectionRecord, Transition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
@@ -97,6 +97,8 @@ pub struct TaskState {
     pub spike: Option<SpikeState>,
     /// How many flake-ledger entries this task has.
     pub flaky: u32,
+    /// Impurity-ledger entries under this task's scope (spec §20).
+    pub impure: u32,
     /// The conflict to resolve, set only when `status == Conflicted`.
     pub conflict: Option<records::ConflictRecord>,
     /// The task's task agent (spec §17), once one was launched.
@@ -130,6 +132,8 @@ pub struct HubState {
     pub rejections: Vec<RejectionRecord>,
     /// Checks that passed only on a retry (the flake ledger).
     pub flakes: Vec<FlakeRecord>,
+    /// Checks the player found impure (the impurity ledger, spec §20).
+    pub impurities: Vec<ImpurityRecord>,
     /// Checks cached as impure on `main`'s tip under main's own `[sandbox]`
     /// policy (spec §20): (check, what it left in the worktree). Until a
     /// task fixes them, work failing only on these is held.
@@ -162,13 +166,17 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
     let retired: Vec<String> = records::retired_slugs(hub);
     let rejections = records::rejections(hub);
     let flakes = records::flakes(hub);
+    let impurities = records::impurities(hub);
     let isolation = crate::sandbox::Sandbox::from_config(&roadmap.sandbox)
         .map(|s| s.fingerprint())
         .unwrap_or_default();
     let main_impure = checks::cached(hub, &main_tip)
         .into_iter()
-        .filter(|r| !r.leaked.is_empty() && r.isolation == isolation)
-        .map(|r| (r.name, r.leaked))
+        .filter(|r| r.impurity().is_some() && r.isolation == isolation)
+        .map(|r| {
+            let evidence = r.impure_evidence();
+            (r.name, evidence)
+        })
         .collect();
     let project = hub.config_get("dashboard.project").unwrap_or_default();
 
@@ -195,6 +203,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
             &retired,
             &rejections,
             &flakes,
+            &impurities,
             live_session,
         )?);
     }
@@ -219,6 +228,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         tasks,
         rejections,
         flakes,
+        impurities,
         main_impure,
         held: records::held_slugs(hub),
         project,
@@ -255,6 +265,7 @@ fn derive_task(
     retired: &[String],
     rejections: &[RejectionRecord],
     flakes: &[FlakeRecord],
+    impurities: &[ImpurityRecord],
     live_session: &dyn Fn(&str) -> bool,
 ) -> Result<TaskState, String> {
     let is_retired = retired.iter().any(|s| s == slug);
@@ -311,6 +322,7 @@ fn derive_task(
 
     let contest_round = contest_files(hub, &tip, slug).len() as u32;
     let flaky = flakes.iter().filter(|f| f.scope == slug).count() as u32;
+    let impure = impurities.iter().filter(|i| i.scope == slug).count() as u32;
     let suite = cached_suite_summary(hub, &tip);
     let note = records::import_note(hub, &tip);
 
@@ -398,6 +410,7 @@ fn derive_task(
         alive,
         spike,
         flaky,
+        impure,
         conflict,
         agent,
     })
