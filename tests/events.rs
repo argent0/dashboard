@@ -13,7 +13,7 @@ use dashboard::events::{self, EventKind};
 use dashboard::git::Git;
 use dashboard::init;
 use dashboard::paths::{self, Home};
-use dashboard::player::{NullSessions, Player, Sessions};
+use dashboard::player::{self, NullSessions, Player, Sessions};
 use dashboard::records::Transition;
 use dashboard::state::{self, Status};
 use std::path::Path;
@@ -467,6 +467,134 @@ fn a_session_dead_before_any_tick_saw_it_is_reported_once_per_launch() {
     );
     player.tick().expect("tick");
     assert_eq!(events_for(&home, "sb", EventKind::SessionDied).len(), 2);
+}
+
+/// Plays the worker's `Stop`/`StopFailure` hook: `line` is what it writes.
+fn worker_stops(repo: &DirectorRepo, slug: &str, line: &str) -> std::path::PathBuf {
+    let marker = player::stop_marker(&paths::worker_clone(&repo.director_path(), slug))
+        .expect("stop marker path");
+    std::fs::write(&marker, format!("{line}\n")).expect("write stop marker");
+    marker
+}
+
+#[test]
+fn a_worker_stopped_while_it_owes_a_finish_is_reported_idle_once_per_stop() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan(
+        &repo,
+        &mut player,
+        "idl",
+        "title = \"Idl\"\nphase = \"p1\"\n",
+    );
+    post(&repo, &mut player, "idl");
+
+    // The launch installed the hooks without dirtying the worktree.
+    let clone = paths::worker_clone(&repo.director_path(), "idl");
+    let settings = std::fs::read_to_string(clone.join(".claude/settings.local.json"))
+        .expect("the launch writes the worktree's Claude Code settings");
+    let marker = player::stop_marker(&clone).expect("stop marker path");
+    for event in ["\"Stop\"", "\"StopFailure\"", "\"UserPromptSubmit\""] {
+        assert!(settings.contains(event), "{settings}");
+    }
+    assert!(settings.contains(&*marker.to_string_lossy()), "{settings}");
+    assert_eq!(
+        Git::new(&clone).run(&["status", "--porcelain"]).unwrap(),
+        "",
+        "the settings file is invisible to git"
+    );
+    let exclude = Git::new(&clone)
+        .run(&["rev-parse", "--git-path", "info/exclude"])
+        .unwrap();
+    let exclude = std::fs::read_to_string(clone.join(exclude)).unwrap();
+    assert!(
+        exclude.lines().any(|l| l == "/.claude/settings.local.json"),
+        "not just a host's global excludes: {exclude}"
+    );
+
+    player.tick().expect("tick");
+    assert!(events_for(&home, "idl", EventKind::SessionIdle).is_empty());
+
+    // It ends its turn without a finish: reported once, not again on later
+    // ticks or after a player restart.
+    worker_stops(&repo, "idl", "stop 100 1");
+    player.tick().expect("tick");
+    let idle = events_for(&home, "idl", EventKind::SessionIdle);
+    assert_eq!(idle.len(), 1, "{:?}", events::read_all(&home));
+    assert!(
+        idle[0].message.contains("dash-proj-idl"),
+        "{}",
+        idle[0].message
+    );
+    player.tick().expect("tick");
+    drop(player);
+    let mut player = open_player(&home);
+    // Its session outlived the player.
+    player.sessions_mut().alive.insert("idl".to_string());
+    player.tick().expect("tick after a restart");
+    assert_eq!(events_for(&home, "idl", EventKind::SessionIdle).len(), 1);
+
+    // A relay (here, a failing finish's rejection) re-arms it: the agent
+    // resumes, and its next stop is a new one.
+    commit_in_clone(&repo, "idl", "other.txt", "x\n", "finish: not really");
+    player.tick().expect("rejection tick");
+    assert!(player.sessions().sent.iter().any(|(k, _)| k == "idl"));
+    assert!(!marker.exists(), "a relay clears the stop");
+    worker_stops(&repo, "idl", "error 101 2");
+    player.tick().expect("tick");
+    let idle = events_for(&home, "idl", EventKind::SessionIdle);
+    assert_eq!(idle.len(), 2, "{:?}", events::read_all(&home));
+    assert!(idle[1].message.contains("API error"), "{}", idle[1].message);
+
+    // Stopping after a finish is waiting for review: nothing to report.
+    commit_in_clone(&repo, "idl", "feature-idl.txt", "done\n", "finish work");
+    player.tick().expect("finish tick");
+    assert_eq!(task_status(&hub, "idl"), Status::Tested);
+    worker_stops(&repo, "idl", "stop 102 3");
+    player.tick().expect("tick");
+    assert_eq!(events_for(&home, "idl", EventKind::SessionIdle).len(), 2);
+}
+
+#[test]
+fn the_stop_hook_merges_into_existing_settings() {
+    let repo = director_repo();
+    // A project that tracks its own local settings, with a hook of its own.
+    write_file(
+        repo.path(),
+        ".claude/settings.local.json",
+        r#"{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "true"}]}]}}"#,
+    );
+    // Forced: a host's global excludes may ignore it (Claude Code's do).
+    repo.git()
+        .run(&["add", "-f", ".claude/settings.local.json"])
+        .expect("git add -f");
+    commit(repo.path(), "project settings");
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(&repo, &mut player, "mg", "title = \"Mg\"\nphase = \"p1\"\n");
+    post(&repo, &mut player, "mg");
+
+    let clone = paths::worker_clone(&repo.director_path(), "mg");
+    let text = std::fs::read_to_string(clone.join(".claude/settings.local.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).expect("still JSON");
+    assert_eq!(json["model"], "opus");
+    let stop = json["hooks"]["Stop"].as_array().expect("Stop hooks");
+    assert_eq!(stop.len(), 2, "theirs kept, ours added: {text}");
+    assert_eq!(stop[0]["hooks"][0]["command"], "true");
+    assert_eq!(
+        Git::new(&clone).run(&["status", "--porcelain"]).unwrap(),
+        "",
+        "a tracked settings file is skipped, not shown as modified"
+    );
+
+    // A relaunch replaces our hooks instead of adding a second copy.
+    player.sessions_mut().alive.remove("mg");
+    player.relaunch("mg").expect("relaunch");
+    let text = std::fs::read_to_string(clone.join(".claude/settings.local.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["hooks"]["Stop"].as_array().unwrap().len(), 2, "{text}");
 }
 
 #[test]

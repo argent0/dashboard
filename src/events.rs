@@ -46,12 +46,18 @@ pub enum EventKind {
     Explored,
     Retired,
     SessionDied,
+    /// A live worker ended its turn while it still owes a finish (or hit an
+    /// API error): only the director or operator can get it going again.
+    SessionIdle,
     /// A task agent was launched to post (or review) a task (spec §17).
     AgentLaunched,
     /// A task agent's report: its verdict on a post, review or question.
     AgentReport,
     /// A task agent's session died before its task finished.
     AgentDied,
+    /// A live task agent ended its turn while it still owes a post, review
+    /// or contest reply, without a report (or hit an API error).
+    AgentIdle,
     PlayerError,
 }
 
@@ -71,9 +77,11 @@ impl EventKind {
             EventKind::Explored => "explored",
             EventKind::Retired => "retired",
             EventKind::SessionDied => "session_died",
+            EventKind::SessionIdle => "session_idle",
             EventKind::AgentLaunched => "agent_launched",
             EventKind::AgentReport => "agent_report",
             EventKind::AgentDied => "agent_died",
+            EventKind::AgentIdle => "agent_idle",
             EventKind::PlayerError => "player_error",
         }
     }
@@ -151,6 +159,12 @@ impl Event {
                 "accept: commit `accept: {slug}` with its why as the body; unsure: `dashboard ask {slug} \"...\"` or take it to the operator; posted, sent-back, answer: nothing to do"
             )),
             EventKind::AgentDied => Some(format!("dashboard relaunch {slug} --agent")),
+            EventKind::SessionIdle => Some(format!(
+                "tmux attach to that session to see why and nudge it there; an API/usage limit: wait, then nudge; wedged: tmux kill-session it, then dashboard relaunch {slug}"
+            )),
+            EventKind::AgentIdle => Some(format!(
+                "nudge it: dashboard ask {slug} \"...\" (or tmux attach to that session to see why); wedged: tmux kill-session it, then dashboard relaunch {slug} --agent"
+            )),
             EventKind::PlayerError => None, // the message is the whole story
         }
     }

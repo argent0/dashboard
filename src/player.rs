@@ -256,6 +256,141 @@ fn shell_quote(s: &str) -> String {
 }
 
 // --------------------------------------------------------------------------
+// Idle detection: a Claude Code `Stop` hook in every session's worktree
+// --------------------------------------------------------------------------
+
+/// Written by the session's hooks into its worktree's git dir (beside
+/// `dashboard-prompt.md`) when the agent ends a turn: `stop <unix> <pid>`,
+/// or `error <unix> <pid>` when the turn ended on an API error (a usage
+/// limit, an overload). Removed when a prompt is submitted (the agent's
+/// `UserPromptSubmit` hook) and by the player before every launch or relay,
+/// so it only ever exists while the agent sits waiting for input. The whole
+/// line identifies one stop.
+pub const STOPPED_FILE: &str = "dashboard-stopped";
+/// Written by the player beside it when it collects a task agent's report:
+/// the agent answered, so its stop is the expected wait for the director.
+/// Removed with `STOPPED_FILE`.
+const REPORTED_FILE: &str = "dashboard-reported";
+/// Where the hooks go: the worktree's own, never-committed Claude Code
+/// settings (`hide_from_git`). Another `agent_cmd` just ignores the file.
+const SETTINGS_FILE: &str = ".claude/settings.local.json";
+
+/// One stop, as `read_stop` found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stop {
+    /// `STOPPED_FILE`'s line, unique per stop.
+    id: String,
+    /// The turn ended on an API error rather than by the agent's choice.
+    error: bool,
+}
+
+fn read_stop(git_dir: &Path) -> Option<Stop> {
+    let text = std::fs::read_to_string(git_dir.join(STOPPED_FILE)).ok()?;
+    let id = text.trim().to_string();
+    (!id.is_empty()).then(|| Stop {
+        error: id.starts_with("error"),
+        id,
+    })
+}
+
+/// Re-arms idle detection for a session about to be (re)launched or to get
+/// a message: whatever stop came before is answered by it.
+fn clear_stop(git_dir: &Path) {
+    let _ = std::fs::remove_file(git_dir.join(STOPPED_FILE));
+    let _ = std::fs::remove_file(git_dir.join(REPORTED_FILE));
+}
+
+/// The stop marker path of the agent working in `clone_dir`, for tests and
+/// tools that want to play the hook's part.
+pub fn stop_marker(clone_dir: &Path) -> Result<PathBuf, String> {
+    Ok(Player::<NullSessions>::git_dir(clone_dir)?.join(STOPPED_FILE))
+}
+
+/// Merges the dashboard's `Stop`/`StopFailure`/`UserPromptSubmit` hooks
+/// into `clone_dir`'s `.claude/settings.local.json`, keeping whatever else
+/// is there (an earlier launch's copies of these hooks are replaced, not
+/// duplicated). A file that isn't a JSON object is left alone: an error.
+fn install_stop_hook(clone_dir: &Path, git_dir: &Path) -> Result<(), String> {
+    use serde_json::{Value, json};
+    let marker = shell_quote(path_str(&git_dir.join(STOPPED_FILE))?);
+    let file = clone_dir.join(SETTINGS_FILE);
+    let mut settings: Value = match std::fs::read_to_string(&file) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(e) => return Err(format!("{}: {e}", file.display())),
+    };
+    let not_object = || {
+        format!(
+            "{}: not the JSON object Claude Code expects",
+            file.display()
+        )
+    };
+    let hooks = settings
+        .as_object_mut()
+        .ok_or_else(not_object)?
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(not_object)?;
+    for (event, command) in [
+        ("Stop", format!("echo \"stop $(date +%s) $$\" > {marker}")),
+        (
+            "StopFailure",
+            format!("echo \"error $(date +%s) $$\" > {marker}"),
+        ),
+        ("UserPromptSubmit", format!("rm -f {marker}")),
+    ] {
+        let groups = hooks
+            .entry(event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(not_object)?;
+        groups.retain(|g| !g.to_string().contains(STOPPED_FILE));
+        groups.push(json!({"hooks": [{"type": "command", "command": command}]}));
+    }
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&file, text + "\n").map_err(|e| format!("{}: {e}", file.display()))?;
+    hide_from_git(clone_dir)
+}
+
+/// Keeps the settings file out of anything the agent could commit: an
+/// untracked one goes in the repository's `info/exclude` (shared by every
+/// worktree of the workspace), a tracked one is marked `--skip-worktree` in
+/// this worktree's index. Either way `git status` and `git add -A` never
+/// see it, and nothing the player validates (commits only) does either.
+fn hide_from_git(clone_dir: &Path) -> Result<(), String> {
+    let git = Git::new(clone_dir);
+    if git.run_ok(&["ls-files", "--error-unmatch", "--", SETTINGS_FILE]) {
+        return git
+            .run(&["update-index", "--skip-worktree", "--", SETTINGS_FILE])
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
+    let out = git
+        .run(&["rev-parse", "--git-path", "info/exclude"])
+        .map_err(|e| e.to_string())?;
+    let exclude = clone_dir.join(out);
+    let line = format!("/{SETTINGS_FILE}");
+    let text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if text.lines().any(|l| l.trim() == line) {
+        return Ok(());
+    }
+    if let Some(parent) = exclude.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let sep = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    std::fs::write(&exclude, format!("{text}{sep}{line}\n"))
+        .map_err(|e| format!("{}: {e}", exclude.display()))
+}
+
+// --------------------------------------------------------------------------
 // TickReport
 // --------------------------------------------------------------------------
 
@@ -390,6 +525,10 @@ pub struct Player<S: Sessions> {
     /// under any other launch id is reported, so one that died before any
     /// tick saw it alive still is, and a relaunch re-arms it.
     deaths_told: BTreeMap<String, String>,
+    /// Per session key, the stop (`Stop::id`) already reported idle (or, on
+    /// a first run, found), persisted alongside `last`. Dropped once the
+    /// marker is gone, so every later stop is new.
+    idle_told: BTreeMap<String, String>,
     /// True until the first `emit_events` call completes: with no state file
     /// on disk at `open` time, that first call only initializes `last` (spec:
     /// "The very first run with no state file initializes silently, without
@@ -441,6 +580,7 @@ impl<S: Sessions> Player<S> {
             sessions,
             last: saved.status,
             deaths_told: saved.deaths_told,
+            idle_told: saved.idle_told,
             first_run,
             agent_rebase_told: BTreeMap::new(),
             sandbox_preflighted: None,
@@ -578,7 +718,7 @@ impl<S: Sessions> Player<S> {
             let text = self
                 .prompts()?
                 .render("worker.released", &[("slug", &slug)]);
-            self.sessions.send(&slug, &text);
+            self.relay(&slug, &text);
         }
         Ok(())
     }
@@ -654,7 +794,9 @@ impl<S: Sessions> Player<S> {
     /// from this tick's report, then diffs every task's status against
     /// `self.last` to emit `Tested`/`Escalated`/`Ready`/`Accepted`/
     /// `Retired`, and reports each dead session once per launch
-    /// (`SessionDied`/`AgentDied`, `report_death`). The persisted state (and
+    /// (`SessionDied`/`AgentDied`, `report_death`) and each live one idle
+    /// while it owes work once per stop (`SessionIdle`/`AgentIdle`,
+    /// `report_idle`). The persisted state (and
     /// the "first run" silence) is what makes this idempotent across player
     /// restarts.
     fn emit_events(&mut self, report: &TickReport) -> Result<(), String> {
@@ -740,6 +882,10 @@ impl<S: Sessions> Player<S> {
                 &task.slug,
                 &format!("task/{}'s worker session died", task.slug),
             )?;
+            self.report_idle(task, false)?;
+            if task.agent.is_some() {
+                self.report_idle(task, true)?;
+            }
 
             if self.first_run {
                 continue;
@@ -760,6 +906,7 @@ impl<S: Sessions> Player<S> {
             &PlayerState {
                 status: self.last.clone(),
                 deaths_told: self.deaths_told.clone(),
+                idle_told: self.idle_told.clone(),
             },
         )?;
         Ok(())
@@ -807,8 +954,119 @@ impl<S: Sessions> Player<S> {
         cmd: &str,
         prompt_file: &Path,
     ) -> Result<(), String> {
+        // The prompt file lives in the worktree's git dir, as does the stop
+        // marker. A hook that won't install only costs idle detection.
+        if let Some(git_dir) = prompt_file.parent() {
+            clear_stop(git_dir);
+            if let Err(e) = install_stop_hook(dir, git_dir) {
+                eprintln!("dashboard: {key}: no idle detection: {e}");
+            }
+        }
         self.sessions.launch(key, dir, cmd, prompt_file)?;
         record_launch(&self.home, key)
+    }
+
+    /// Every message into a session goes through here: the agent resumes
+    /// on it, so whatever stop it sat at is answered (`clear_stop`) before
+    /// the paste. On disk, since `dashboard ask` runs in its own process.
+    fn relay(&mut self, key: &str, text: &str) {
+        if let Some(git_dir) = self.session_git_dir(key) {
+            clear_stop(&git_dir);
+        }
+        self.sessions.send(key, text);
+    }
+
+    /// The git dir of session `key`'s worktree, if it has one.
+    fn session_git_dir(&self, key: &str) -> Option<PathBuf> {
+        let dir = match key.strip_suffix("_agent") {
+            Some(slug) => paths::agent_clone(&self.director, slug),
+            None => paths::worker_clone(&self.director, key),
+        };
+        if !dir.exists() {
+            return None;
+        }
+        Self::git_dir(&dir).ok()
+    }
+
+    /// Whether `task`'s worker (or, with `agent`, its task agent) owes the
+    /// hub something right now, i.e. nobody but that agent is holding the
+    /// task up, so its sitting idle is worth reporting. The worker: pinned
+    /// (launched), `posted`/`in_progress`/`in_revision`, and no finish held
+    /// on `main`'s impure checks — a finish, block or contest moves the task
+    /// past these. A task agent: launched, the task `ready` (it owes the
+    /// post), `tested` (a review) or `contested` (a reply), and no report
+    /// collected since its last launch or message (`REPORTED_FILE` in
+    /// `git_dir`, its worktree's git dir) — a report hands the turn to the
+    /// director. A commit of its own moves the task on; a rejected one is
+    /// relayed, which owes the fix. Liveness is the caller's business.
+    pub fn owes_work(&self, task: &state::TaskState, agent: bool, git_dir: &Path) -> bool {
+        if agent {
+            task.agent.is_some()
+                && matches!(
+                    task.status,
+                    Status::Ready | Status::Tested | Status::Contested
+                )
+                && !git_dir.join(REPORTED_FILE).exists()
+        } else {
+            matches!(
+                task.status,
+                Status::Posted | Status::InProgress | Status::InRevision
+            ) && records::has_pins(&self.hub, &task.slug)
+                && records::held_commit(&self.hub, &task.slug).is_none()
+        }
+    }
+
+    /// Reports a live session sitting at a stop (its `Stop`/`StopFailure`
+    /// hook's marker) while it `owes_work`, once per stop: the director is
+    /// the only one who can get it going again. A first run records what it
+    /// finds without emitting; a stop that isn't owed anything isn't
+    /// recorded, so it's reported if the task comes back to it unprompted.
+    fn report_idle(&mut self, task: &state::TaskState, agent: bool) -> Result<(), String> {
+        let (key, alive) = if agent {
+            let alive = task.agent.as_ref().is_some_and(|a| a.alive);
+            (state::agent_key(&task.slug), alive)
+        } else {
+            (task.slug.clone(), self.sessions.alive(&task.slug))
+        };
+        let found = alive
+            .then(|| self.session_git_dir(&key))
+            .flatten()
+            .and_then(|dir| read_stop(&dir).map(|stop| (dir, stop)));
+        let Some((git_dir, stop)) = found else {
+            self.idle_told.remove(&key);
+            return Ok(());
+        };
+        if self.idle_told.get(&key) == Some(&stop.id) || !self.owes_work(task, agent, &git_dir) {
+            return Ok(());
+        }
+        if !self.first_run {
+            let who = if agent { "task agent" } else { "worker" };
+            let session = state::tmux_session_name(&self.project, &key);
+            let why = if stop.error {
+                "stopped on an API error (a usage limit or an overload?)".to_string()
+            } else if agent {
+                format!(
+                    "ended its turn without a commit or report while the task is {}",
+                    task.status.as_str()
+                )
+            } else {
+                "ended its turn without a finish, block: or contest: commit".to_string()
+            };
+            let (kind, message) = (
+                if agent {
+                    EventKind::AgentIdle
+                } else {
+                    EventKind::SessionIdle
+                },
+                format!(
+                    "task/{}'s {who} {why} and is waiting for input (tmux session {session})",
+                    task.slug
+                ),
+            );
+            events::append(&self.home, kind, Some(&task.slug), &message)?;
+        }
+        self.idle_told.insert(key, stop.id);
+        Ok(())
     }
 
     // ---- fetch ----
@@ -1470,7 +1728,7 @@ impl<S: Sessions> Player<S> {
                 _ => "task-agent.recovery-other",
             };
             let recovery = prompts.render(recovery, &[("slug", slug)]);
-            self.sessions.send(
+            self.relay(
                 &state::agent_key(slug),
                 &prompts.render(
                     "task-agent.rejected",
@@ -1894,7 +2152,7 @@ impl<S: Sessions> Player<S> {
                 ("review", &review_body),
             ],
         );
-        self.sessions.send(slug, &text);
+        self.relay(slug, &text);
         Ok(())
     }
 
@@ -1958,7 +2216,7 @@ impl<S: Sessions> Player<S> {
         let text = self
             .prompts()?
             .render("worker.contest-recorded", &[("n", &n.to_string())]);
-        self.sessions.send(slug, &text);
+        self.relay(slug, &text);
         Ok(())
     }
 
@@ -2028,7 +2286,7 @@ impl<S: Sessions> Player<S> {
             "worker.contest-reply",
             &[("n", &n.to_string()), ("slug", slug), ("reply", &reply)],
         );
-        self.sessions.send(slug, &text);
+        self.relay(slug, &text);
         Ok(())
     }
 
@@ -2229,7 +2487,7 @@ impl<S: Sessions> Player<S> {
                 "worker.merge-failed",
                 &[("slug", slug), ("summary", &suite.summary())],
             );
-            self.sessions.send(slug, &text);
+            self.relay(slug, &text);
             return Ok(());
         }
 
@@ -2487,7 +2745,7 @@ impl<S: Sessions> Player<S> {
                 let text = self
                     .prompts()?
                     .render("spike.finish-accepted", &[("answer", &ev.answer)]);
-                self.sessions.send(slug, &text);
+                self.relay(slug, &text);
                 Ok(())
             }
         }
@@ -3484,7 +3742,7 @@ impl<S: Sessions> Player<S> {
                     let text = self
                         .prompts()?
                         .render("worker.held", &[("checks", &checks)]);
-                    self.sessions.send(slug, &text);
+                    self.relay(slug, &text);
                 }
                 return Ok(());
             }
@@ -3512,7 +3770,7 @@ impl<S: Sessions> Player<S> {
             .imported
             .push((hub_ref, candidate.to_string(), Transition::Finish));
         let text = self.prompts()?.render("worker.finish-accepted", &[]);
-        self.sessions.send(slug, &text);
+        self.relay(slug, &text);
         Ok(())
     }
 
@@ -3641,7 +3899,7 @@ impl<S: Sessions> Player<S> {
             _ => "worker.recovery-other",
         };
         let recovery = prompts.render(recovery, &[("slug", slug)]);
-        self.sessions.send(
+        self.relay(
             slug,
             &prompts.render(
                 "worker.rejected",
@@ -3746,7 +4004,7 @@ impl<S: Sessions> Player<S> {
                 let text = self
                     .prompts()?
                     .render("task-agent.rebase", &[("slug", slug)]);
-                self.sessions.send(&state::agent_key(slug), &text);
+                self.relay(&state::agent_key(slug), &text);
                 self.agent_rebase_told.insert(slug.to_string(), incoming);
             }
             return Ok(());
@@ -3895,12 +4153,12 @@ impl<S: Sessions> Player<S> {
             let text = self
                 .prompts()?
                 .render(template, &[("commit", short(candidate))]);
-            self.sessions.send(&key, &text);
+            self.relay(&key, &text);
         } else if let Some((_, cause)) = report.escalated.iter().find(|(s, _)| s == slug) {
             let text = self
                 .prompts()?
                 .render("task-agent.escalated", &[("slug", slug), ("cause", cause)]);
-            self.sessions.send(&key, &text);
+            self.relay(&key, &text);
         }
         Ok(())
     }
@@ -3979,7 +4237,7 @@ impl<S: Sessions> Player<S> {
                     records::set_agent_asked(&self.hub, &task.slug, &task.tip)?;
                     let text =
                         self.agent_step_text(&self.prompts()?, task, step, &hub_state.roadmap);
-                    self.sessions.send(&state::agent_key(&task.slug), &text);
+                    self.relay(&state::agent_key(&task.slug), &text);
                 }
             }
             if !matches!(
@@ -4185,6 +4443,10 @@ impl<S: Sessions> Player<S> {
             return Ok(());
         };
         let _ = std::fs::remove_file(&file);
+        // Its stop after this is the wait for the director (`owes_work`).
+        if let Some(git_dir) = file.parent() {
+            let _ = std::fs::write(git_dir.join(REPORTED_FILE), "");
+        }
         let rec = records::record_agent_report(
             &self.hub,
             tip,
@@ -4277,7 +4539,7 @@ impl<S: Sessions> Player<S> {
             "task-agent.question",
             &[("question", question), ("report_file", &file)],
         );
-        self.sessions.send(&key, &text);
+        self.relay(&key, &text);
         Ok(())
     }
 
@@ -4379,6 +4641,9 @@ struct PlayerState {
     /// `Player::deaths_told`.
     #[serde(default)]
     deaths_told: BTreeMap<String, String>,
+    /// `Player::idle_told`.
+    #[serde(default)]
+    idle_told: BTreeMap<String, String>,
 }
 
 /// Loads the state from `home.player_state()`. The bool is `first_run`: true
@@ -4392,6 +4657,7 @@ fn load_player_state(home: &Home) -> (PlayerState, bool) {
     };
     if let Ok(old) = serde_json::from_str::<BTreeMap<String, (Status, bool)>>(&text) {
         let state = PlayerState {
+            idle_told: BTreeMap::new(),
             deaths_told: old
                 .iter()
                 .filter(|(_, (_, alive))| !alive)

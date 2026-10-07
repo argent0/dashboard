@@ -14,7 +14,7 @@ use dashboard::events::{self, EventKind};
 use dashboard::git::Git;
 use dashboard::init;
 use dashboard::paths::{self, Home};
-use dashboard::player::{NullSessions, Player, Sessions, TickReport};
+use dashboard::player::{self, NullSessions, Player, Sessions, TickReport};
 use dashboard::records::{self, Actor, Transition};
 use dashboard::state::{self, Status};
 use std::path::{Path, PathBuf};
@@ -617,6 +617,65 @@ fn ask_relaunch_and_death_of_a_task_agent() {
         "{prompt}"
     );
     assert!(player.sessions().alive("s_agent"));
+}
+
+#[test]
+fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    let idle = || {
+        events::read_all(&home)
+            .into_iter()
+            .filter(|e| e.kind == EventKind::AgentIdle)
+            .collect::<Vec<_>>()
+    };
+    plan(&repo, &mut player);
+    let marker = player::stop_marker(&agent_dir(&repo)).expect("stop marker path");
+    assert!(
+        agent_dir(&repo)
+            .join(".claude/settings.local.json")
+            .exists()
+    );
+
+    // Ready, it owes the post: a stop without one is reported, once.
+    std::fs::write(&marker, "stop 100 1\n").unwrap();
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 1, "{:?}", events::read_all(&home));
+    assert!(idle()[0].message.contains("ready"), "{}", idle()[0].message);
+    player.tick().expect("tick");
+    drop(player);
+    let mut player = open_player(&home);
+    // Its session outlived the player.
+    player.sessions_mut().alive.insert("s_agent".to_string());
+    player.tick().expect("tick after a restart");
+    assert_eq!(idle().len(), 1);
+
+    // A stop after leaving a report is the wait for the director.
+    std::fs::write(
+        report_file(&repo),
+        "verdict: question\nwhy: which widget?\n",
+    )
+    .unwrap();
+    std::fs::write(&marker, "stop 101 2\n").unwrap();
+    let report = player.tick().expect("tick");
+    assert_eq!(report.agent_reports.len(), 1, "{report}");
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 1, "a report answers it");
+
+    // The director's ask re-arms it; stopping without an answer is idle.
+    player.ask("s", "the cached one; post it").expect("ask");
+    assert!(!marker.exists(), "a relay clears the stop");
+    std::fs::write(&marker, "stop 102 3\n").unwrap();
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 2);
+
+    // Its post imported, the task waits on the worker: no longer owed.
+    agent_post(&repo);
+    player.tick().expect("post tick");
+    std::fs::write(&marker, "stop 103 4\n").unwrap();
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 2, "{:?}", events::read_all(&home));
 }
 
 #[test]

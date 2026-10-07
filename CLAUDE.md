@@ -59,7 +59,8 @@ work/               the player's own scratch worktree for running checks
 events.jsonl        append-only, JSON per line — the director-event log
 director.cursor     the director's last-read event seq (dashboard wait)
 player-state.json   last-seen status per slug, and per session the launch
-                     id whose death was reported, so a restarted player
+                     id whose death was reported and the stop reported
+                     idle (`idle_told`), so a restarted player
                      doesn't re-emit old events (an older bare
                      {slug: [status, alive]} map is migrated on load)
 launches/<key>      the latest launch id of a session (<slug>, or
@@ -79,7 +80,12 @@ working tree** instead (`paths::workers_root`/`worker_clone`):
 
 The player writes each agent's prompt to `dashboard-prompt.md` in that
 worktree's git directory; a task agent leaves its report there as
-`dashboard-report.md`, which the player reads and removes.
+`dashboard-report.md`, which the player reads and removes (leaving an
+empty `dashboard-reported` behind). Every launch also merges Claude Code
+hooks into the worktree's `.claude/settings.local.json` (hidden from git:
+`info/exclude`, or `--skip-worktree` if the project tracks it): `Stop` /
+`StopFailure` write `stop|error <unix> <pid>` to `dashboard-stopped` in
+the git dir, `UserPromptSubmit` removes it. See "Idle sessions" below.
 
 A worker clone is a fresh directory the player creates with nobody present
 to click through an agent CLI's first-run workspace-trust dialog. Nesting it
@@ -360,6 +366,22 @@ back here):
   told is reported, so one that crashed before any tick saw it alive still
   is. Every launch (`Player::launch_session`, including `relaunch` in its
   own process) writes a fresh id to `launches/<key>`, re-arming it.
+- **Idle sessions**: a live Claude Code session that ends its turn
+  without the commit or report it owes (or on an API error / usage
+  limit) is otherwise invisible. The launch-installed hooks (see On-disk
+  layout) leave `dashboard-stopped` while the agent waits for input; the
+  player removes it (and `dashboard-reported`) before every launch and
+  every relay (`Player::relay`, which every paste goes through, `ask`
+  included), so a stop is always newer than the last thing sent. Each
+  tick, a live session with a stop is reported once per stop
+  (`session_idle` / `agent_idle`, `Player::report_idle`, `idle_told`) if
+  it `owes_work`: a worker while pinned and `posted`/`in_progress`/
+  `in_revision` with no held finish (a finish, block: or contest: moves
+  it past these); a task agent while its task is `ready` (the post),
+  `tested` (a review) or `contested` (a reply) and no report was collected
+  since its last launch/relay. Anything else is waiting on someone else.
+  `owes_work` is the reusable "supposed to be working" rule. Another
+  `agent_cmd` just ignores the settings file and is never reported idle.
 - **`agent_cmd`**: `[player] agent_cmd` in `roadmap.toml`, default `claude
   --dangerously-skip-permissions`. Launched as `tmux new-session -d -s
   dash-<project>-<slug> -c <clone> sh -c '<agent_cmd> "$(cat
