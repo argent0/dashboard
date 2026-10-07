@@ -153,17 +153,21 @@ impl Event {
             }
             EventKind::Explored => None, // informational: the spike is concluded
             EventKind::Retired => None,  // informational
-            EventKind::SessionDied => Some(format!("dashboard relaunch {slug} or retire")),
+            EventKind::SessionDied => Some(format!(
+                "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug}; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug}; one that keeps failing may be worth retiring"
+            )),
             EventKind::AgentLaunched => None, // informational: the task agent posts or reviews it
             EventKind::AgentReport => Some(format!(
                 "accept: commit `accept: {slug}` with its why as the body; unsure: `dashboard ask {slug} \"...\"` or take it to the operator; posted, sent-back, answer: nothing to do"
             )),
-            EventKind::AgentDied => Some(format!("dashboard relaunch {slug} --agent")),
+            EventKind::AgentDied => Some(format!(
+                "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug} --agent; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug} --agent"
+            )),
             EventKind::SessionIdle => Some(format!(
-                "tmux attach to that session to see why and nudge it there; an API/usage limit: wait, then nudge; wedged: tmux kill-session it, then dashboard relaunch {slug}"
+                "diagnose from the last screen, don't just relaunch: a usage/rate limit or API error: wait for the reset, then the operator nudges it or you kill and relaunch it; a question or confusion: nothing you commit reaches a worker mid-work, so pass it to its task agent (dashboard ask {slug} \"...\") if the brief or tests are wrong, and to the operator to answer in the session; a dialog or auth failure: the operator; an unexplained hang: tmux kill-session -t <that session>, then dashboard relaunch {slug}"
             )),
             EventKind::AgentIdle => Some(format!(
-                "nudge it: dashboard ask {slug} \"...\" (or tmux attach to that session to see why); wedged: tmux kill-session it, then dashboard relaunch {slug} --agent"
+                "diagnose from the last screen, don't just relaunch: a usage/rate limit or API error: wait for the reset, then nudge it (dashboard ask {slug} \"...\"); a question or confusion: answer it with dashboard ask {slug} \"...\"; a dialog or auth failure: the operator; an unexplained hang: tmux kill-session -t <that session>, then dashboard relaunch {slug} --agent"
             )),
             EventKind::PlayerError => None, // the message is the whole story
         }
@@ -369,5 +373,31 @@ mod tests {
             message: "didn't pan out".to_string(),
         };
         assert_eq!(retired.human(), "#1 retired  dead — didn't pan out");
+    }
+
+    #[test]
+    fn session_health_hints_diagnose_first_and_never_say_tmux_attach() {
+        for kind in [
+            EventKind::SessionDied,
+            EventKind::AgentDied,
+            EventKind::SessionIdle,
+            EventKind::AgentIdle,
+        ] {
+            let e = Event {
+                seq: 1,
+                at: 1,
+                kind,
+                slug: Some("s".to_string()),
+                message: "task/s's session died\nlast screen:\n  boom".to_string(),
+            };
+            let hint = e.hint().expect("a session-health event has a hint");
+            assert!(hint.starts_with("diagnose from"), "{hint}");
+            assert!(hint.contains("last screen"), "{hint}");
+            assert!(hint.contains("usage/rate limit"), "{hint}");
+            assert!(hint.contains("operator"), "{hint}");
+            assert!(hint.contains("dashboard relaunch s"), "{hint}");
+            assert!(!hint.contains("tmux attach"), "{hint}");
+            assert!(e.human().ends_with(&format!("\n{hint}")), "{}", e.human());
+        }
     }
 }

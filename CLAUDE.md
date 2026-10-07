@@ -400,6 +400,21 @@ back here):
   trimmed and indented under "last screen:", cut from the front to 2 KiB),
   or "no screen captured", so a director that can't `tmux attach` sees
   why it stopped. Idle: `Sessions::capture`; death: `Sessions::reap`.
+- **Diagnose before relaunching**: the `wait` hints for these four
+  events (`Event::hint`) send the director to the screen tail (and exit
+  status) first, never to `tmux attach` (an LLM director can't; the
+  operator can). By cause: a usage/rate limit or API error waits for the
+  reset; a task agent's question gets `dashboard ask`; a permission/trust
+  dialog, auth failure, bad `agent_cmd` or crash at startup goes to the
+  operator (a relaunch would die the same way); only an unexplained hang
+  (kill the session first) or a one-off mid-work crash is relaunched.
+  Retire is a judgement for a task that keeps failing, not the default.
+  A worker's question has no director route mid-work: a send-back needs
+  `tested`, a contest reply `contested`, and every relay to a worker is
+  triggered by its own commit. So it goes to its task agent (`dashboard
+  ask`) when it shows the brief or tests are wrong, and to the operator,
+  who can answer in the session (ideally: turn it into a `contest:` or
+  `block:`, which the hub can then answer).
 - **Stale screens** (any agent): each tick, a live session that
   `owes_work` has its pane captured (`Sessions::capture`, `tmux
   capture-pane -p -t =<name>:`) and hashed (`pane_hash`, trailing
