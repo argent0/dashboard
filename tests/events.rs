@@ -557,6 +557,161 @@ fn a_worker_stopped_while_it_owes_a_finish_is_reported_idle_once_per_stop() {
     assert_eq!(events_for(&home, "idl", EventKind::SessionIdle).len(), 2);
 }
 
+/// Shows `screen` as session `key`'s pane.
+fn show(player: &mut Player<NullSessions>, key: &str, screen: &str) {
+    player
+        .sessions_mut()
+        .panes
+        .insert(key.to_string(), screen.to_string());
+}
+
+#[test]
+fn a_worker_whose_screen_goes_stale_while_it_owes_a_finish_is_reported_idle_once() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan(
+        &repo,
+        &mut player,
+        "stl",
+        "title = \"Stl\"\nphase = \"p1\"\n",
+    );
+    post(&repo, &mut player, "stl");
+    let idle = || events_for(&home, "stl", EventKind::SessionIdle);
+
+    // The default `idle_after` is 900 s: not before, once at it.
+    show(&mut player, "stl", "* Working (3s)\n\n\n");
+    player.set_clock(1000);
+    player.tick().expect("tick");
+    player.set_clock(1899);
+    player.tick().expect("tick");
+    assert!(idle().is_empty());
+    player.set_clock(1900);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 1, "{:?}", events::read_all(&home));
+    assert!(
+        idle()[0].message.contains("no new output for 15 min"),
+        "{}",
+        idle()[0].message
+    );
+    assert!(idle()[0].message.contains("dash-proj-stl"));
+    player.set_clock(5000);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 1);
+
+    // A restart keeps both the report and the clock.
+    drop(player);
+    let mut player = open_player(&home);
+    player.sessions_mut().alive.insert("stl".to_string());
+    show(&mut player, "stl", "* Working (3s)");
+    player.set_clock(6000);
+    player.tick().expect("tick after a restart");
+    assert_eq!(idle().len(), 1, "trailing blank lines don't count");
+
+    // New output re-arms it, and the clock starts over.
+    show(&mut player, "stl", "* Working (4s)");
+    player.tick().expect("tick");
+    player.set_clock(6899);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 1);
+    player.set_clock(6900);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 2);
+
+    // So does a relay, even onto an identical screen.
+    commit_in_clone(&repo, "stl", "other.txt", "x\n", "finish: not really");
+    player.tick().expect("rejection tick");
+    player.set_clock(7799);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 2);
+    player.set_clock(7800);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 3);
+
+    // Finished, it's waiting for review: a still screen is no news.
+    commit_in_clone(&repo, "stl", "feature-stl.txt", "done\n", "finish work");
+    player.tick().expect("finish tick");
+    assert_eq!(task_status(&hub, "stl"), Status::Tested);
+    player.set_clock(20_000);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 3, "{:?}", events::read_all(&home));
+}
+
+#[test]
+fn a_stale_screen_and_a_stop_are_one_idle_report() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(
+        &repo,
+        &mut player,
+        "one",
+        "title = \"One\"\nphase = \"p1\"\n",
+    );
+    post(&repo, &mut player, "one");
+    let idle = || events_for(&home, "one", EventKind::SessionIdle);
+
+    // A stop is reported by the hook; its screen going stale isn't news.
+    show(&mut player, "one", "> ");
+    player.set_clock(1000);
+    worker_stops(&repo, "one", "stop 1000 1");
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 1);
+    assert!(idle()[0].message.contains("ended its turn"));
+    player.set_clock(5000);
+    player.tick().expect("tick");
+    // Not even if an idle clock redraws it while it sits there.
+    show(&mut player, "one", "> 12:00");
+    player.tick().expect("tick");
+    player.set_clock(9000);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 1, "{:?}", events::read_all(&home));
+
+    // The other way round: stale first (a hang), then a stop on that same
+    // screen. Reported once.
+    let clone = paths::worker_clone(&repo.director_path(), "one");
+    std::fs::remove_file(player::stop_marker(&clone).unwrap()).unwrap();
+    show(&mut player, "one", "* Working");
+    player.tick().expect("tick");
+    player.set_clock(9900);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 2);
+    assert!(idle()[1].message.contains("no new output"));
+    worker_stops(&repo, "one", "stop 9950 2");
+    player.set_clock(9950);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 2, "{:?}", events::read_all(&home));
+}
+
+#[test]
+fn idle_after_zero_turns_stale_screen_detection_off() {
+    let repo = director_repo();
+    let roadmap = std::fs::read_to_string(repo.path().join("roadmap.toml")).unwrap();
+    write_file(
+        repo.path(),
+        "roadmap.toml",
+        &format!("{roadmap}idle_after = 0\n"),
+    );
+    commit(repo.path(), "no stale-screen detection");
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(
+        &repo,
+        &mut player,
+        "off",
+        "title = \"Off\"\nphase = \"p1\"\n",
+    );
+    post(&repo, &mut player, "off");
+
+    show(&mut player, "off", "* Working");
+    player.set_clock(1000);
+    player.tick().expect("tick");
+    player.set_clock(100_000);
+    player.tick().expect("tick");
+    assert!(events_for(&home, "off", EventKind::SessionIdle).is_empty());
+}
+
 #[test]
 fn the_stop_hook_merges_into_existing_settings() {
     let repo = director_repo();

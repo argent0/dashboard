@@ -59,8 +59,9 @@ work/               the player's own scratch worktree for running checks
 events.jsonl        append-only, JSON per line — the director-event log
 director.cursor     the director's last-read event seq (dashboard wait)
 player-state.json   last-seen status per slug, and per session the launch
-                     id whose death was reported and the stop reported
-                     idle (`idle_told`), so a restarted player
+                     id whose death was reported, the stop reported
+                     idle (`idle_told`) and its last screen hash, since
+                     when and whether told (`panes`), so a restarted player
                      doesn't re-emit old events (an older bare
                      {slug: [status, alive]} map is migrated on load)
 launches/<key>      the latest launch id of a session (<slug>, or
@@ -180,6 +181,8 @@ evidence = 1                     # a flaky-test-fix post whose flake doesn't rep
 agent_cmd = "claude --dangerously-skip-permissions"        # the worker; default
 task_agent_cmd = "claude --dangerously-skip-permissions"   # the task agent (spec §17); default.
                                                            # "" turns task agents off
+idle_after = 900                 # default: a session owing work whose tmux pane hasn't
+                                 # changed for this many seconds is reported idle; 0: off
 
 [sandbox]                        # the check jail (spec §20)
 enabled = true                   # default; false runs checks as plain `sh -c`
@@ -381,7 +384,23 @@ back here):
   `tested` (a review) or `contested` (a reply) and no report was collected
   since its last launch/relay. Anything else is waiting on someone else.
   `owes_work` is the reusable "supposed to be working" rule. Another
-  `agent_cmd` just ignores the settings file and is never reported idle.
+  `agent_cmd` just ignores the settings file.
+- **Stale screens** (any agent): each tick, a live session that
+  `owes_work` has its pane captured (`Sessions::capture`, `tmux
+  capture-pane -p -t =<name>:`) and hashed (`pane_hash`, trailing
+  whitespace ignored). Unchanged for `[player] idle_after` seconds
+  (default 900, 0 off), it's the same `session_idle` / `agent_idle`
+  ("no new output for N min": hung, or on a dialog), once per unchanged
+  screen (`Player::watch_pane`, `panes` in player-state.json, keyed by
+  launch id). A pane change, a relay or a launch re-arms it, as does the
+  session no longer owing work. A stop marker covers its whole wait (no
+  stale report while it's there), and a stop on a screen already
+  reported stale isn't reported again. A capture failure is no data
+  (death is `report_death`'s). Limits: anything that moves counts as
+  output, so a working Claude Code (spinner, timer) is never stale, a
+  turn hung with the spinner still going isn't caught, and a TUI that
+  redraws a clock while idle is never stale either. Tests pin the clock
+  with `Player::set_clock`.
 - **`agent_cmd`**: `[player] agent_cmd` in `roadmap.toml`, default `claude
   --dangerously-skip-permissions`. Launched as `tmux new-session -d -s
   dash-<project>-<slug> -c <clone> sh -c '<agent_cmd> "$(cat

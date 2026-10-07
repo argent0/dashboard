@@ -153,6 +153,10 @@ pub struct PlayerConfig {
     /// reviews it (spec §17). Empty turns task agents off: the director
     /// posts and sends back itself.
     pub task_agent_cmd: String,
+    /// Seconds a live session that owes work may show the same screen
+    /// before it's reported idle (its tmux pane unchanged: hung, or sitting
+    /// on a dialog), whatever the agent. 0 turns this off.
+    pub idle_after: u64,
 }
 
 impl Default for PlayerConfig {
@@ -160,6 +164,7 @@ impl Default for PlayerConfig {
         Self {
             agent_cmd: "claude --dangerously-skip-permissions".to_string(),
             task_agent_cmd: "claude --dangerously-skip-permissions".to_string(),
+            idle_after: 900,
         }
     }
 }
@@ -802,6 +807,7 @@ mod tests {
             cfg.player.agent_cmd,
             "claude --dangerously-skip-permissions"
         );
+        assert_eq!(cfg.player.idle_after, 900);
     }
 
     #[test]
@@ -824,6 +830,7 @@ mod tests {
 
             [player]
             agent_cmd = "codex run"
+            idle_after = 0
         "#;
         let cfg = roadmap_config_from_str(toml).unwrap();
         assert_eq!(cfg.title.as_deref(), Some("My Project"));
@@ -837,6 +844,7 @@ mod tests {
         // Untouched strike reasons keep their default.
         assert_eq!(cfg.limits.strikes.history, 2);
         assert_eq!(cfg.player.agent_cmd, "codex run");
+        assert_eq!(cfg.player.idle_after, 0);
     }
 
     #[test]

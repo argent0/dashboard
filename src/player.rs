@@ -53,6 +53,9 @@ pub trait Sessions {
     ) -> Result<(), String>;
     fn send(&mut self, slug: &str, message: &str);
     fn kill(&mut self, slug: &str);
+    /// The session's visible screen, or `None` when it can't be read (the
+    /// session is gone): what pane-staleness idle detection hashes.
+    fn capture(&self, slug: &str) -> Option<String>;
 }
 
 /// A `Sessions` that records every `launch`/`send`/`kill` call so tests can
@@ -61,7 +64,8 @@ pub trait Sessions {
 /// the relaunch/no-relaunch paths. `launch` inserts the slug into `alive`
 /// (unless it's in `stillborn`: a session that dies before any tick sees
 /// it); `kill` removes it — a test after that point can remove it directly
-/// too, to simulate a session dying on its own.
+/// too, to simulate a session dying on its own. `panes` is what `capture`
+/// returns per live session (a live one missing from it shows "").
 #[derive(Debug, Default)]
 pub struct NullSessions {
     pub sent: Vec<(String, String)>,
@@ -69,6 +73,7 @@ pub struct NullSessions {
     pub launched: Vec<LaunchCall>,
     pub alive: BTreeSet<String>,
     pub stillborn: BTreeSet<String>,
+    pub panes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +115,12 @@ impl Sessions for NullSessions {
     fn kill(&mut self, slug: &str) {
         self.killed.push(slug.to_string());
         self.alive.remove(slug);
+    }
+
+    fn capture(&self, slug: &str) -> Option<String> {
+        self.alive
+            .contains(slug)
+            .then(|| self.panes.get(slug).cloned().unwrap_or_default())
     }
 }
 
@@ -246,6 +257,20 @@ impl Sessions for TmuxSessions {
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", &format!("={name}")])
             .output();
+    }
+
+    /// `tmux capture-pane -p -t =<name>:` (like `send`, a pane target: a
+    /// bare `=<name>` doesn't resolve to a pane here either). Only the
+    /// visible screen, no scrollback, no escape sequences.
+    fn capture(&self, slug: &str) -> Option<String> {
+        let name = state::tmux_session_name(&self.project, slug);
+        let out = Command::new("tmux")
+            .args(["capture-pane", "-p", "-t", &format!("={name}:")])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     }
 }
 
@@ -529,6 +554,12 @@ pub struct Player<S: Sessions> {
     /// a first run, found), persisted alongside `last`. Dropped once the
     /// marker is gone, so every later stop is new.
     idle_told: BTreeMap<String, String>,
+    /// Per session key, its screen as of the last tick it owed work
+    /// (`watch_pane`), persisted alongside `last` so a restart neither
+    /// resets the idle clock nor repeats the report.
+    panes: BTreeMap<String, PaneSeen>,
+    /// The time `now` returns instead of the system clock, for tests.
+    clock: Option<u64>,
     /// True until the first `emit_events` call completes: with no state file
     /// on disk at `open` time, that first call only initializes `last` (spec:
     /// "The very first run with no state file initializes silently, without
@@ -581,6 +612,8 @@ impl<S: Sessions> Player<S> {
             last: saved.status,
             deaths_told: saved.deaths_told,
             idle_told: saved.idle_told,
+            panes: saved.panes,
+            clock: None,
             first_run,
             agent_rebase_told: BTreeMap::new(),
             sandbox_preflighted: None,
@@ -760,6 +793,16 @@ impl<S: Sessions> Player<S> {
         &mut self.sessions
     }
 
+    /// Pins the player's clock (unix seconds) for idle detection, so tests
+    /// can move time without sleeping.
+    pub fn set_clock(&mut self, unix: u64) {
+        self.clock = Some(unix);
+    }
+
+    fn now(&self) -> u64 {
+        self.clock.unwrap_or_else(unix_now)
+    }
+
     /// One pass: fetch, import director `main`, import director `task/*`
     /// branches, then run the player's own unblock merges (spec §5, §9, §11,
     /// in that order — see CLAUDE.md/spec.md for why the order matters:
@@ -795,8 +838,8 @@ impl<S: Sessions> Player<S> {
     /// `self.last` to emit `Tested`/`Escalated`/`Ready`/`Accepted`/
     /// `Retired`, and reports each dead session once per launch
     /// (`SessionDied`/`AgentDied`, `report_death`) and each live one idle
-    /// while it owes work once per stop (`SessionIdle`/`AgentIdle`,
-    /// `report_idle`). The persisted state (and
+    /// while it owes work once per stop or stale screen (`SessionIdle`/
+    /// `AgentIdle`, `report_idle`). The persisted state (and
     /// the "first run" silence) is what makes this idempotent across player
     /// restarts.
     fn emit_events(&mut self, report: &TickReport) -> Result<(), String> {
@@ -882,9 +925,10 @@ impl<S: Sessions> Player<S> {
                 &task.slug,
                 &format!("task/{}'s worker session died", task.slug),
             )?;
-            self.report_idle(task, false)?;
+            let idle_after = hub_state.roadmap.player.idle_after;
+            self.report_idle(task, false, idle_after)?;
             if task.agent.is_some() {
-                self.report_idle(task, true)?;
+                self.report_idle(task, true, idle_after)?;
             }
 
             if self.first_run {
@@ -907,6 +951,7 @@ impl<S: Sessions> Player<S> {
                 status: self.last.clone(),
                 deaths_told: self.deaths_told.clone(),
                 idle_told: self.idle_told.clone(),
+                panes: self.panes.clone(),
             },
         )?;
         Ok(())
@@ -962,6 +1007,7 @@ impl<S: Sessions> Player<S> {
                 eprintln!("dashboard: {key}: no idle detection: {e}");
             }
         }
+        self.panes.remove(key);
         self.sessions.launch(key, dir, cmd, prompt_file)?;
         record_launch(&self.home, key)
     }
@@ -973,6 +1019,7 @@ impl<S: Sessions> Player<S> {
         if let Some(git_dir) = self.session_git_dir(key) {
             clear_stop(&git_dir);
         }
+        self.panes.remove(key);
         self.sessions.send(key, text);
     }
 
@@ -1016,57 +1063,129 @@ impl<S: Sessions> Player<S> {
         }
     }
 
-    /// Reports a live session sitting at a stop (its `Stop`/`StopFailure`
-    /// hook's marker) while it `owes_work`, once per stop: the director is
-    /// the only one who can get it going again. A first run records what it
-    /// finds without emitting; a stop that isn't owed anything isn't
-    /// recorded, so it's reported if the task comes back to it unprompted.
-    fn report_idle(&mut self, task: &state::TaskState, agent: bool) -> Result<(), String> {
+    /// Reports a live session idle while it `owes_work`: the director is
+    /// the only one who can get it going again. Two ways, one event kind:
+    /// sitting at a stop (its `Stop`/`StopFailure` hook's marker), once per
+    /// stop; or, for any agent, a screen unchanged for `idle_after` seconds
+    /// (`watch_pane`: hung, or on a dialog), once per unchanged screen. A
+    /// stop covers its whole wait: no stale report while the marker is
+    /// there, and a stop on a screen already reported stale isn't reported
+    /// again. A first run records what it finds without emitting; a stop
+    /// that isn't owed anything isn't recorded, so it's reported if the
+    /// task comes back to it unprompted.
+    fn report_idle(
+        &mut self,
+        task: &state::TaskState,
+        agent: bool,
+        idle_after: u64,
+    ) -> Result<(), String> {
         let (key, alive) = if agent {
             let alive = task.agent.as_ref().is_some_and(|a| a.alive);
             (state::agent_key(&task.slug), alive)
         } else {
             (task.slug.clone(), self.sessions.alive(&task.slug))
         };
-        let found = alive
-            .then(|| self.session_git_dir(&key))
-            .flatten()
-            .and_then(|dir| read_stop(&dir).map(|stop| (dir, stop)));
-        let Some((git_dir, stop)) = found else {
+        let Some(git_dir) = alive.then(|| self.session_git_dir(&key)).flatten() else {
             self.idle_told.remove(&key);
+            self.panes.remove(&key);
             return Ok(());
         };
-        if self.idle_told.get(&key) == Some(&stop.id) || !self.owes_work(task, agent, &git_dir) {
-            return Ok(());
-        }
+        let owes = self.owes_work(task, agent, &git_dir);
+        let stale = if owes {
+            self.watch_pane(&key, idle_after)
+        } else {
+            // Its clock starts when it next owes something.
+            self.panes.remove(&key);
+            None
+        };
+        let why = match read_stop(&git_dir) {
+            Some(stop) => {
+                if self.idle_told.get(&key) == Some(&stop.id) || !owes {
+                    return Ok(());
+                }
+                let seen = self.panes.get_mut(&key);
+                let told_stale = seen.as_ref().is_some_and(|p| p.told);
+                if let Some(seen) = seen {
+                    seen.told = true;
+                }
+                self.idle_told.insert(key.clone(), stop.id);
+                if told_stale {
+                    return Ok(());
+                }
+                if stop.error {
+                    "stopped on an API error (a usage limit or an overload?) and is waiting for input".to_string()
+                } else if agent {
+                    format!(
+                        "ended its turn without a commit or report while the task is {} and is waiting for input",
+                        task.status.as_str()
+                    )
+                } else {
+                    "ended its turn without a finish, block: or contest: commit and is waiting for input".to_string()
+                }
+            }
+            None => {
+                self.idle_told.remove(&key);
+                let Some(secs) = stale else {
+                    return Ok(());
+                };
+                if let Some(seen) = self.panes.get_mut(&key) {
+                    seen.told = true;
+                }
+                let owed = if agent {
+                    format!("while the task is {}", task.status.as_str())
+                } else {
+                    "while it owes a finish".to_string()
+                };
+                format!(
+                    "has shown no new output for {} {owed} (hung, or waiting at a dialog or permission prompt?)",
+                    duration_text(secs)
+                )
+            }
+        };
         if !self.first_run {
             let who = if agent { "task agent" } else { "worker" };
             let session = state::tmux_session_name(&self.project, &key);
-            let why = if stop.error {
-                "stopped on an API error (a usage limit or an overload?)".to_string()
-            } else if agent {
-                format!(
-                    "ended its turn without a commit or report while the task is {}",
-                    task.status.as_str()
-                )
+            let kind = if agent {
+                EventKind::AgentIdle
             } else {
-                "ended its turn without a finish, block: or contest: commit".to_string()
+                EventKind::SessionIdle
             };
-            let (kind, message) = (
-                if agent {
-                    EventKind::AgentIdle
-                } else {
-                    EventKind::SessionIdle
-                },
-                format!(
-                    "task/{}'s {who} {why} and is waiting for input (tmux session {session})",
-                    task.slug
-                ),
-            );
+            let message = format!("task/{}'s {who} {why} (tmux session {session})", task.slug);
             events::append(&self.home, kind, Some(&task.slug), &message)?;
         }
-        self.idle_told.insert(key, stop.id);
         Ok(())
+    }
+
+    /// Captures session `key`'s screen and tracks how long it's been the
+    /// same (`panes`): a change, a relay or a (re)launch restarts the
+    /// clock. Returns how long it's been unchanged once that's at least
+    /// `idle_after` seconds and it wasn't reported yet. A failed capture
+    /// (the session just died) is no data: nothing changes. `idle_after`
+    /// 0 turns it off.
+    fn watch_pane(&mut self, key: &str, idle_after: u64) -> Option<u64> {
+        if idle_after == 0 {
+            self.panes.remove(key);
+            return None;
+        }
+        let hash = pane_hash(&self.sessions.capture(key)?);
+        let launch = launch_id(&self.home, key);
+        let now = self.now();
+        match self.panes.get(key) {
+            Some(seen) if seen.hash == hash && seen.launch == launch => {
+                let secs = now.saturating_sub(seen.since);
+                (!seen.told && secs >= idle_after).then_some(secs)
+            }
+            _ => {
+                let seen = PaneSeen {
+                    hash,
+                    launch,
+                    since: now,
+                    told: false,
+                };
+                self.panes.insert(key.to_string(), seen);
+                None
+            }
+        }
     }
 
     // ---- fetch ----
@@ -4644,6 +4763,58 @@ struct PlayerState {
     /// `Player::idle_told`.
     #[serde(default)]
     idle_told: BTreeMap<String, String>,
+    /// `Player::panes`.
+    #[serde(default)]
+    panes: BTreeMap<String, PaneSeen>,
+}
+
+/// What a session's screen last looked like (`Player::watch_pane`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct PaneSeen {
+    /// `pane_hash` of the captured screen.
+    hash: u64,
+    /// The session's launch id when it was captured: a relaunch (in any
+    /// process) starts a new watch even if the screen happens to match.
+    launch: String,
+    /// Unix time the screen was first seen like this.
+    since: u64,
+    /// This unchanged screen was already reported idle (or a stop it sat at
+    /// was): nothing more until it changes.
+    told: bool,
+}
+
+/// A stable (FNV-1a) hash of a captured screen, persisted across restarts,
+/// ignoring trailing whitespace and blank lines (tmux pads the capture to
+/// the pane's height). Anything else that moves counts as output: a
+/// working agent's spinner or timer, but also an idle TUI's clock, which
+/// keeps such a session from ever looking stale.
+fn pane_hash(screen: &str) -> u64 {
+    let mut lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in lines.join("\n").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+/// "15 min", or "40 s" under a minute: how long a pane sat unchanged.
+fn duration_text(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs} s")
+    } else {
+        format!("{} min", secs / 60)
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Loads the state from `home.player_state()`. The bool is `first_run`: true
@@ -4658,6 +4829,7 @@ fn load_player_state(home: &Home) -> (PlayerState, bool) {
     if let Ok(old) = serde_json::from_str::<BTreeMap<String, (Status, bool)>>(&text) {
         let state = PlayerState {
             idle_told: BTreeMap::new(),
+            panes: BTreeMap::new(),
             deaths_told: old
                 .iter()
                 .filter(|(_, (_, alive))| !alive)

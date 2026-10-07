@@ -679,6 +679,46 @@ fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
 }
 
 #[test]
+fn a_task_agent_whose_screen_goes_stale_while_it_owes_work_is_reported_idle() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    let idle = || {
+        events::read_all(&home)
+            .into_iter()
+            .filter(|e| e.kind == EventKind::AgentIdle)
+            .collect::<Vec<_>>()
+    };
+    plan(&repo, &mut player);
+    player.sessions_mut().panes.insert(
+        "s_agent".to_string(),
+        "Do you trust this folder? [y/n]".to_string(),
+    );
+
+    // Ready, it owes the post; a screen stuck on a dialog is reported once.
+    player.set_clock(1000);
+    player.tick().expect("tick");
+    player.set_clock(1900);
+    player.tick().expect("tick");
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 1, "{:?}", events::read_all(&home));
+    assert!(
+        idle()[0]
+            .message
+            .contains("no new output for 15 min while the task is ready"),
+        "{}",
+        idle()[0].message
+    );
+
+    // Its post imported, the task waits on the worker: no longer owed.
+    agent_post(&repo);
+    player.tick().expect("post tick");
+    player.set_clock(10_000);
+    player.tick().expect("tick");
+    assert_eq!(idle().len(), 1, "{:?}", events::read_all(&home));
+}
+
+#[test]
 fn a_task_agent_dead_before_any_tick_saw_it_is_reported_once_per_launch() {
     let repo = repo_with_task_agents();
     let (_home_dir, home) = init_hub(&repo);
