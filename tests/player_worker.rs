@@ -967,6 +967,144 @@ fn relaunches_past_max_relaunches_are_refused_and_escalate() {
     assert_eq!(task_status(&hub, "r"), Status::Retired);
 }
 
+/// Relaunches `slug`'s worker until `max_relaunches = 2` escalates it.
+fn relaunch_until_escalated(home: &Home, player: &mut Player<NullSessions>, slug: &str) {
+    player.sessions_mut().alive.remove(slug);
+    while open_player(home).relaunch(slug).is_ok() {}
+    assert_eq!(task_status(&Git::new(home.hub()), slug), Status::Escalated);
+}
+
+fn events_of(home: &Home, kind: dashboard::events::EventKind) -> Vec<dashboard::events::Event> {
+    dashboard::events::read_all(home)
+        .into_iter()
+        .filter(|e| e.kind == kind)
+        .collect()
+}
+
+#[test]
+fn reset_clears_a_relaunch_limit_escalation_and_the_cap_applies_again() {
+    use dashboard::events::EventKind;
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan_and_post(&repo, &mut player, "r");
+    relaunch_until_escalated(&home, &mut player, "r");
+    player.tick().expect("tick");
+    assert_eq!(events_of(&home, EventKind::Escalated).len(), 1);
+
+    // Refused while the session is alive, and for the task agent's limit.
+    player.sessions_mut().alive.insert("r".to_string());
+    let err = player.reset_relaunch("r", false).expect_err("alive");
+    assert!(err.contains("already alive"), "{err}");
+    player.sessions_mut().alive.remove("r");
+    let err = player.reset_relaunch("r", true).expect_err("wrong session");
+    assert!(err.contains("worker's relaunch limit"), "{err}");
+    assert!(err.contains("dashboard relaunch r --reset"), "{err}");
+    assert_eq!(task_status(&hub, "r"), Status::Escalated);
+
+    // `dashboard relaunch --reset` runs in its own process.
+    let mut cli = open_player(&home);
+    cli.reset_relaunch("r", false).expect("reset");
+    assert_eq!(cli.sessions().launched.len(), 1, "relaunched");
+    assert_eq!(task_status(&hub, "r"), Status::Posted);
+    assert_eq!(relaunches(&hub, "r"), 1, "the count starts over");
+
+    // The escalation is kept as evidence, out of the way of `status`.
+    assert!(!hub.ref_exists("refs/dashboard/escalated/r"));
+    let cleared = hub.rev_parse("refs/dashboard/escalation-cleared/r/1");
+    assert!(cleared.is_some());
+    let records = records::cleared_escalations(&hub, "r");
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].session, "worker");
+    assert!(
+        records[0]
+            .cause
+            .starts_with("relaunch limit (2) reached: the worker"),
+        "{records:?}"
+    );
+
+    // A restarted player tells the director once, and nothing else.
+    drop(player);
+    let mut player = open_player(&home);
+    player.tick().expect("tick after a restart");
+    player.tick().expect("another tick");
+    let resumed = events_of(&home, EventKind::Resumed);
+    assert_eq!(resumed.len(), 1, "{resumed:?}");
+    assert!(
+        resumed[0]
+            .message
+            .contains("(was: relaunch limit (2) reached"),
+        "{resumed:?}"
+    );
+    assert!(resumed[0].message.contains("posted again"), "{resumed:?}");
+    assert_eq!(events_of(&home, EventKind::Escalated).len(), 1);
+    assert_eq!(relaunches(&hub, "r"), 1);
+
+    // The cap applies again: one more relaunch, then the next escalates.
+    open_player(&home).relaunch("r").expect("within the limit");
+    assert_eq!(relaunches(&hub, "r"), 2);
+    let err = open_player(&home).relaunch("r").expect_err("capped again");
+    assert!(err.contains("dashboard relaunch r --reset"), "{err}");
+    assert_eq!(task_status(&hub, "r"), Status::Escalated);
+    player.tick().expect("tick");
+    assert_eq!(events_of(&home, EventKind::Escalated).len(), 2);
+
+    // And may be reset again; both clears stay on record.
+    open_player(&home)
+        .reset_relaunch("r", false)
+        .expect("second reset");
+    assert_eq!(task_status(&hub, "r"), Status::Posted);
+    assert!(hub.ref_exists("refs/dashboard/escalation-cleared/r/2"));
+    assert_eq!(records::cleared_escalations(&hub, "r").len(), 2);
+}
+
+#[test]
+fn reset_refuses_every_other_escalation_and_a_task_not_escalated() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    plan_and_post(&repo, &mut player, "n");
+    player.sessions_mut().alive.remove("n");
+    let err = player
+        .reset_relaunch("n", false)
+        .expect_err("not escalated");
+    assert!(err.contains("not escalated"), "{err}");
+
+    // A record-based escalation of another cause (e.g. review rounds).
+    let tip = hub.rev_parse("refs/heads/task/n").unwrap();
+    records::record_escalation(&hub, "n", &tip, "review rounds exceeded (2)").unwrap();
+    let err = player
+        .reset_relaunch("n", false)
+        .expect_err("review rounds");
+    assert!(
+        err.contains("escalated for review rounds exceeded (2)")
+            && err.contains("only a relaunch-limit escalation can be reset"),
+        "{err}"
+    );
+    assert!(hub.ref_exists("refs/dashboard/escalated/n"), "untouched");
+
+    // Strikes at their limit outrank even a relaunch-limit record.
+    plan_and_post(&repo, &mut player, "s");
+    for n in 1..=2 {
+        commit_in_clone(&repo, "s", &format!("a{n}.txt"), "no\n", "suite fails");
+        player.tick().expect("tick");
+    }
+    assert_eq!(task_status(&hub, "s"), Status::Escalated);
+    player.sessions_mut().alive.remove("s");
+    let err = player.reset_relaunch("s", false).expect_err("strikes");
+    assert!(err.contains("strike limit: suite 2/2"), "{err}");
+    let tip = hub.rev_parse("refs/heads/task/s").unwrap();
+    records::record_relaunch_escalation(&hub, "s", &tip, "relaunch limit (2) reached: the worker was relaunched 2 times since its last progress and died again", false).unwrap();
+    let err = player
+        .reset_relaunch("s", false)
+        .expect_err("strikes first");
+    assert!(err.contains("strike limit"), "{err}");
+    assert!(records::cleared_escalations(&hub, "s").is_empty());
+}
+
 #[test]
 fn progress_on_the_task_branch_starts_the_relaunch_count_over() {
     let repo = director_repo();

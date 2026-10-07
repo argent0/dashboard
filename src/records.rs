@@ -449,6 +449,31 @@ pub struct EscalationRecord {
     pub slug: String,
     pub cause: String,
     pub at: u64,
+    /// Set on a `[limits] max_relaunches` escalation: the session whose
+    /// relaunches ran out, `"worker"` or `"agent"`. Only such an escalation
+    /// can be cleared (`clear_escalation`, `dashboard relaunch --reset`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relaunch_limit: Option<String>,
+}
+
+impl EscalationRecord {
+    /// The session a relaunch-limit escalation is for (`Some(true)`: the
+    /// task agent), or `None` for any other cause. A record written before
+    /// `relaunch_limit` existed is read off its cause text.
+    pub fn relaunch_session(&self) -> Option<bool> {
+        match self.relaunch_limit.as_deref() {
+            Some(s) => Some(s == session_name(true)),
+            None if self.cause.starts_with("relaunch limit (") => {
+                Some(self.cause.contains("the task agent was relaunched"))
+            }
+            None => None,
+        }
+    }
+}
+
+/// The name a relaunch-limit record gives a session.
+pub fn session_name(agent: bool) -> &'static str {
+    if agent { "agent" } else { "worker" }
 }
 
 /// Records an escalation whose cause isn't a strike limit or a block (e.g. a
@@ -461,12 +486,35 @@ pub fn record_escalation(
     commit: &str,
     cause: &str,
 ) -> Result<EscalationRecord, String> {
+    write_escalation(hub, slug, commit, cause, None)
+}
+
+/// `record_escalation` for a session past `[limits] max_relaunches`: the
+/// one kind of escalation `clear_escalation` may undo.
+pub fn record_relaunch_escalation(
+    hub: &Git,
+    slug: &str,
+    commit: &str,
+    cause: &str,
+    agent: bool,
+) -> Result<EscalationRecord, String> {
+    write_escalation(hub, slug, commit, cause, Some(agent))
+}
+
+fn write_escalation(
+    hub: &Git,
+    slug: &str,
+    commit: &str,
+    cause: &str,
+    relaunch_agent: Option<bool>,
+) -> Result<EscalationRecord, String> {
     hub.update_ref(&format!("refs/dashboard/escalated/{slug}"), commit)
         .map_err(|e| e.to_string())?;
     let record = EscalationRecord {
         slug: slug.to_string(),
         cause: cause.to_string(),
         at: now_unix(),
+        relaunch_limit: relaunch_agent.map(|a| session_name(a).to_string()),
     };
     let json = serde_json::to_string(&record).map_err(|e| e.to_string())?;
     hub.notes_add(ESCALATIONS_NOTES_REF, commit, &json)
@@ -479,6 +527,106 @@ pub fn escalation(hub: &Git, slug: &str) -> Option<EscalationRecord> {
     let sha = hub.rev_parse(&format!("refs/dashboard/escalated/{slug}"))?;
     let text = hub.notes_show(ESCALATIONS_NOTES_REF, &sha)?;
     serde_json::from_str(&text).ok()
+}
+
+// --------------------------------------------------------------------------
+// Cleared escalations: refs/dashboard/escalation-cleared/<slug>/<n>
+// --------------------------------------------------------------------------
+
+const CLEARED_NOTES_REF: &str = "refs/notes/dashboard-escalations-cleared";
+
+/// An escalation the operator cleared (`dashboard relaunch --reset`), kept
+/// as evidence: the escalation ref moves to
+/// `refs/dashboard/escalation-cleared/<slug>/<n>`, and this record goes in a
+/// list note on the commit it pointed at. A list, and its own notes ref,
+/// because the same tip may escalate again and overwrite its
+/// `dashboard-escalations` note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearedEscalation {
+    pub slug: String,
+    /// Which `refs/dashboard/escalation-cleared/<slug>/<n>` this is.
+    pub n: u32,
+    pub cause: String,
+    /// The session whose relaunch limit it was, `"worker"` or `"agent"`.
+    pub session: String,
+    #[serde(default)]
+    pub escalated_at: u64,
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// Clears `slug`'s escalation, which must be a relaunch-limit one for the
+/// worker (or, with `agent`, the task agent): the escalation ref moves to
+/// `refs/dashboard/escalation-cleared/<slug>/<n>` in one transaction with
+/// old-value checks (so an escalation the player records meanwhile is never
+/// lost), then a `ClearedEscalation` is noted on its commit. The caller
+/// checks it's also the task's *current* cause (`state::escalation_cause`
+/// ranks strikes and `block:` above a record).
+pub fn clear_escalation(hub: &Git, slug: &str, agent: bool) -> Result<ClearedEscalation, String> {
+    let escalated = format!("refs/dashboard/escalated/{slug}");
+    let sha = hub
+        .rev_parse(&escalated)
+        .ok_or_else(|| format!("task/{slug} has no escalation record"))?;
+    let rec = escalation(hub, slug)
+        .ok_or_else(|| format!("task/{slug}'s escalation record is unreadable"))?;
+    if rec.relaunch_session() != Some(agent) {
+        return Err(format!(
+            "task/{slug} is escalated for {}, not the {}'s relaunch limit",
+            rec.cause,
+            session_name(agent)
+        ));
+    }
+    let n = cleared_refs(hub, slug)
+        .iter()
+        .map(|(n, _)| *n)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    hub.move_ref_cas(
+        &escalated,
+        &format!("refs/dashboard/escalation-cleared/{slug}/{n}"),
+        &sha,
+    )
+    .map_err(|e| format!("task/{slug}'s escalation changed meanwhile: {e}"))?;
+    let cleared = ClearedEscalation {
+        slug: slug.to_string(),
+        n,
+        cause: rec.cause,
+        session: session_name(agent).to_string(),
+        escalated_at: rec.at,
+        at: now_unix(),
+    };
+    hub.notes_modify(CLEARED_NOTES_REF, &sha, |old| {
+        let mut all: Vec<ClearedEscalation> = old
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        all.push(cleared.clone());
+        serde_json::to_string(&all).unwrap_or_default()
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(cleared)
+}
+
+fn cleared_refs(hub: &Git, slug: &str) -> Vec<(u32, String)> {
+    let prefix = format!("refs/dashboard/escalation-cleared/{slug}/");
+    hub.for_each_ref(&format!("{prefix}*"))
+        .into_iter()
+        .filter_map(|(r, sha)| Some((r.strip_prefix(&prefix)?.parse().ok()?, sha)))
+        .collect()
+}
+
+/// Every escalation of `slug` the operator cleared, oldest first.
+pub fn cleared_escalations(hub: &Git, slug: &str) -> Vec<ClearedEscalation> {
+    let mut out: Vec<ClearedEscalation> = cleared_refs(hub, slug)
+        .into_iter()
+        .filter_map(|(n, sha)| {
+            let all: Vec<ClearedEscalation> =
+                serde_json::from_str(&hub.notes_show(CLEARED_NOTES_REF, &sha)?).ok()?;
+            all.into_iter().find(|c| c.slug == slug && c.n == n)
+        })
+        .collect();
+    out.sort_by_key(|c| c.n);
+    out
 }
 
 // --------------------------------------------------------------------------
@@ -499,6 +647,11 @@ pub struct RelaunchRecord {
     /// count toward the task agent's limit.
     #[serde(default)]
     pub reports: usize,
+    /// Not a relaunch: the operator cleared this session's relaunch-limit
+    /// escalation (`dashboard relaunch --reset`), so its count starts over
+    /// from here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reset: bool,
     #[serde(default)]
     pub at: u64,
 }
@@ -510,22 +663,37 @@ fn relaunch_records(hub: &Git, tip: &str) -> Vec<RelaunchRecord> {
 }
 
 /// Relaunches of the worker (or, with `agent`, the task agent) since that
-/// session's last progress: noted on `tip` and, for the task agent, with no
-/// report collected since.
+/// session's last progress: noted on `tip` after its last reset and, for
+/// the task agent, with no report collected since.
 pub fn relaunch_count(hub: &Git, tip: &str, agent: bool) -> u32 {
     let reports = agent_reports(hub, tip).len();
-    relaunch_records(hub, tip)
+    let records = relaunch_records(hub, tip);
+    let start = records
         .iter()
-        .filter(|r| r.agent == agent && (!agent || r.reports == reports))
+        .rposition(|r| r.reset && r.agent == agent)
+        .map_or(0, |i| i + 1);
+    records[start..]
+        .iter()
+        .filter(|r| !r.reset && r.agent == agent && (!agent || r.reports == reports))
         .count() as u32
 }
 
 /// Notes one relaunch on `tip`. `dashboard relaunch` runs beside the
 /// player, so the append is a `notes_modify` (a re-read on a race).
 pub fn record_relaunch(hub: &Git, tip: &str, agent: bool) -> Result<(), String> {
+    append_relaunch_record(hub, tip, agent, false)
+}
+
+/// Notes a reset on `tip`: the session's relaunches before it stop counting.
+pub fn record_relaunch_reset(hub: &Git, tip: &str, agent: bool) -> Result<(), String> {
+    append_relaunch_record(hub, tip, agent, true)
+}
+
+fn append_relaunch_record(hub: &Git, tip: &str, agent: bool, reset: bool) -> Result<(), String> {
     let record = RelaunchRecord {
         agent,
         reports: agent_reports(hub, tip).len(),
+        reset,
         at: now_unix(),
     };
     hub.notes_modify(RELAUNCHES_NOTES_REF, tip, |old| {

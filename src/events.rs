@@ -30,6 +30,9 @@ pub enum EventKind {
     DirectorRejected,
     Tested,
     Escalated,
+    /// An escalated task back in flight: the operator cleared its
+    /// relaunch-limit escalation (`dashboard relaunch --reset`).
+    Resumed,
     /// An accept the player couldn't land: merging `main` conflicts.
     Conflict,
     /// An accept whose merge with `main` failed the suite: back to the worker.
@@ -67,6 +70,7 @@ impl EventKind {
             EventKind::DirectorRejected => "director_rejected",
             EventKind::Tested => "tested",
             EventKind::Escalated => "escalated",
+            EventKind::Resumed => "resumed",
             EventKind::Conflict => "conflict",
             EventKind::MergeFailed => "merge_failed",
             EventKind::Contested => "contested",
@@ -125,9 +129,20 @@ impl Event {
             EventKind::Tested => Some(format!(
                 "review it: git fetch hub && git log hub/task/{slug}, then send back or accept"
             )),
+            EventKind::Escalated if self.message.starts_with("relaunch limit (") => {
+                let flag = if self.message.contains("the task agent was relaunched") {
+                    " --agent"
+                } else {
+                    ""
+                };
+                Some(format!(
+                    "take it to the operator: once they've fixed what keeps killing it (agent_cmd, login, a dialog, a usage limit), dashboard relaunch {slug}{flag} --reset resumes the task; else retire and replan"
+                ))
+            }
             EventKind::Escalated => {
                 Some("discuss with the operator, then retire and replan".to_string())
             }
+            EventKind::Resumed => None, // informational: back in flight
             EventKind::Conflict => Some(format!(
                 "git fetch hub && git checkout task/{slug} && git merge --ff-only hub/task/{slug}, then git merge <that main commit>, resolve only those paths, commit"
             )),
@@ -401,5 +416,26 @@ mod tests {
             assert!(!hint.contains("tmux attach"), "{hint}");
             assert!(e.human().ends_with(&format!("\n{hint}")), "{}", e.human());
         }
+    }
+
+    #[test]
+    fn only_a_relaunch_limit_escalation_hints_at_reset() {
+        let escalated = |message: &str| Event {
+            seq: 1,
+            at: 1,
+            kind: EventKind::Escalated,
+            slug: Some("s".to_string()),
+            message: message.to_string(),
+        };
+        let hint = escalated("relaunch limit (2) reached: the task agent was relaunched 2 times since its last progress and died again").hint().unwrap();
+        assert!(
+            hint.contains("dashboard relaunch s --agent --reset"),
+            "{hint}"
+        );
+        let hint = escalated("relaunch limit (2) reached: the worker was relaunched 2 times since its last progress and died again").hint().unwrap();
+        assert!(hint.contains("dashboard relaunch s --reset"), "{hint}");
+        let hint = escalated("strike limit: suite 2/2").hint().unwrap();
+        assert!(!hint.contains("--reset"), "{hint}");
+        assert!(hint.contains("retire"), "{hint}");
     }
 }

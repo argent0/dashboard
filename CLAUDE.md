@@ -119,6 +119,8 @@ refs/dashboard/escalated/<slug>  set when a send-back would exceed
                             or a relaunch max_relaunches (the other escalation causes —
                             a strike limit, a block: marker — are read
                             straight off strikes/notes, no separate ref)
+refs/dashboard/escalation-cleared/<slug>/<n>  a relaunch-limit escalation the
+                            operator cleared (`relaunch --reset`), moved here
 refs/dashboard/held/<slug> a worker finish held, not judged: it fails only on
                             checks already impure on main (spec §20)
 refs/dashboard/released/<slug>  a held finish the player merged main under on
@@ -134,6 +136,9 @@ refs/notes/dashboard             check-result cache: {"checks": {name: CheckResu
 refs/notes/dashboard-imports     provenance per imported commit (actor, transition, slug, at)
 refs/notes/dashboard-rejections  reason/actor/message/at per refs/rejected/* commit
 refs/notes/dashboard-escalations cause/at per refs/dashboard/escalated/<slug>
+                                 (+ relaunch_limit: "worker"|"agent" for a relaunch-limit one)
+refs/notes/dashboard-escalations-cleared  per escalation-cleared commit:
+                                 [{slug, n, cause, session, escalated_at, at}]
 refs/notes/dashboard-flakes       the flake ledger: checks that passed only on a retry (refs/flakes/<scope>/<n>)
 refs/notes/dashboard-impurities   the impurity ledger: checks found impure (refs/impure/<scope>/<n>, spec §20)
 refs/notes/dashboard-explorations a spike round's verified answer + claim results, on each validated
@@ -142,7 +147,8 @@ refs/notes/dashboard-conflicts   on a conflicted task's tip: the exact main comm
                                  merge in, and the conflicted paths ({main, paths, at})
 refs/notes/dashboard-agent-reports  task agent reports read at a task tip: [{verdict, text, at}]
 refs/notes/dashboard-relaunches  `dashboard relaunch`es at a task tip: [{agent, reports, at}]
-                                 (`reports`: the agent reports noted there at the time)
+                                 (`reports`: the agent reports noted there at the time;
+                                 `reset: true`: a `--reset`, the session's count restarts after it)
 ```
 
 Every note write (`Git::notes_modify`) goes through a private
@@ -320,14 +326,17 @@ ignored — no `deny_unknown_fields` anywhere.
   interval 2s). `--once` runs a single tick, prints its report, and exits;
   this is what drives `scripts/e2e.sh` and what a supervisor (systemd timer,
   cron, a loop) should call if you don't want a long-running process.
-- `dashboard relaunch <slug> [--agent]` — manually restarts a dead worker
+- `dashboard relaunch <slug> [--agent] [--reset]` — manually restarts a dead worker
   session with the same clone and prompt file; `--agent` restarts the task
   agent instead, with a fresh prompt for the task's current step. There is
   no automatic relaunch (see Decisions below); a dead session just shows up
   in `status` and as a `session_died` / `agent_died` event. Capped at
   `[limits] max_relaunches` per session since its last progress: one more
   is refused (exit 1) and escalates the task instead. `status` shows
-  `relaunched n/max` beside a session's liveness.
+  `relaunched n/max` beside a session's liveness. `--reset` clears that
+  escalation once the operator has fixed its cause, starts the session's
+  count over and relaunches it; refused for any other escalation (see
+  "Relaunch cap" below).
 - `dashboard ask <slug> <question…>` — pastes the director's question into
   the task agent's session; the answer comes back as an `agent_report`
   event.
@@ -448,9 +457,33 @@ back here):
   refuses and records an ordinary escalation (`refs/dashboard/escalated/
   <slug>` at the tip, cause `relaunch limit (N) reached: the <worker|task
   agent> ...`): `state` derives `escalated`, `status` shows it and the
-  player emits `escalated` on its next tick. It resolves like any
-  escalation, by a retire; an escalated task's task agent past its cap
-  is just refused. The session-health hints mention the cap.
+  player emits `escalated` on its next tick. An escalated task's task
+  agent past its cap is just refused. The session-health hints mention
+  the cap.
+- **Resetting a relaunch-limit escalation**: the cap mostly catches the
+  environment (a bad `agent_cmd`, an expired login, a trust dialog, a
+  usage limit), which the operator can fix, so this one escalation, unlike
+  review rounds, strikes and `block:`, isn't retire-only. The record says
+  whose cap it was (`EscalationRecord::relaunch_limit`; read off the cause
+  text for an older record). `dashboard relaunch <slug> [--agent] --reset`
+  (`Player::reset_relaunch`) refuses while that session is alive, unless
+  the task is escalated, and unless its *current* cause
+  (`state::escalation_cause`, where strikes and `block:` outrank a record)
+  is that record and for that session. Then `records::clear_escalation`
+  moves `refs/dashboard/escalated/<slug>` to `refs/dashboard/
+  escalation-cleared/<slug>/<n>` in one `update-ref --stdin` transaction
+  with old values (`Git::move_ref_cas`: an escalation the player records
+  meanwhile is never lost) and notes a `ClearedEscalation` on its commit
+  (its own list note, since the same tip may escalate again and overwrite
+  its escalations note); a `{reset: true}` relaunch record restarts that
+  session's count (`relaunch_count` counts only after a session's last
+  reset); then the ordinary relaunch runs, so the count reads 1 and the cap
+  applies again. On its next tick the player sees the task leave
+  `escalated` (its `last` status) for anything but a terminal status and
+  emits an informational `resumed` (the cleared cause, the new status),
+  instead of the new status's own event; persisted like every status, so a
+  player restarted in between still tells it once. The `escalated` hint
+  for a relaunch-limit cause names the exact `--reset` command.
 - **Stale screens** (any agent): each tick, a live session that
   `owes_work` has its pane captured (`Sessions::capture`, `tmux
   capture-pane -p -t =<name>:`) and hashed (`pane_hash`, trailing

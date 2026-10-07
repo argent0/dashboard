@@ -151,6 +151,17 @@ impl Git {
         self.run(&["update-ref", "-d", name, old]).map(|_| ())
     }
 
+    /// Moves `from` to `to` in one `update-ref --stdin` transaction: `to`
+    /// must not exist yet and `from` must still point at `sha`, else
+    /// neither changes.
+    pub fn move_ref_cas(&self, from: &str, to: &str, sha: &str) -> Result<(), GitError> {
+        self.run_with_stdin(
+            &["update-ref", "--stdin"],
+            &format!("create {to} {sha}\ndelete {from} {sha}\n"),
+        )
+        .map(|_| ())
+    }
+
     /// Returns `(refname, sha)` pairs for every ref matching `pattern`.
     pub fn for_each_ref(&self, pattern: &str) -> Vec<(String, String)> {
         match self.run(&["for-each-ref", "--format=%(objectname) %(refname)", pattern]) {
@@ -524,6 +535,22 @@ mod tests {
             git.notes_show("refs/notes/dashboard", &sha).as_deref(),
             Some("updated note")
         );
+    }
+
+    #[test]
+    fn move_ref_cas_moves_only_from_the_expected_value() {
+        let (dir, git) = init_repo();
+        let a = commit_file(&dir, &git, "a.txt", "1\n", "first");
+        let b = commit_file(&dir, &git, "a.txt", "2\n", "second");
+        git.update_ref("refs/x/from", &a).unwrap();
+        assert!(git.move_ref_cas("refs/x/from", "refs/x/to", &b).is_err());
+        assert!(!git.ref_exists("refs/x/to"), "nothing moved");
+        git.update_ref("refs/x/taken", &a).unwrap();
+        assert!(git.move_ref_cas("refs/x/from", "refs/x/taken", &a).is_err());
+        assert_eq!(git.rev_parse("refs/x/from").as_deref(), Some(a.as_str()));
+        git.move_ref_cas("refs/x/from", "refs/x/to", &a).unwrap();
+        assert!(!git.ref_exists("refs/x/from"));
+        assert_eq!(git.rev_parse("refs/x/to").as_deref(), Some(a.as_str()));
     }
 
     #[test]

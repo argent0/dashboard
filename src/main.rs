@@ -75,13 +75,20 @@ enum Command {
     /// Manually restart a task's worker tmux session after it died (spec.md
     /// §9's launch row leaves automatic relaunch deferred). Capped at
     /// `[limits] max_relaunches` since its last progress; past it the task
-    /// escalates instead.
+    /// escalates instead, and `--reset` resumes it once the operator has
+    /// fixed the cause.
     Relaunch {
         /// The task's slug.
         slug: String,
         /// Restart the task's task agent (spec.md §17) instead of its worker.
         #[arg(long)]
         agent: bool,
+        /// Clear a relaunch-limit escalation for this session (worker, or
+        /// task agent with --agent), start its relaunch count over and
+        /// relaunch it. Only for that cause: every other escalation is
+        /// retire-only. The cleared escalation stays in the hub as evidence.
+        #[arg(long)]
+        reset: bool,
     },
     /// Paste a question from the director into a task agent's session
     /// (spec.md §17); its answer arrives as an `agent_report` event.
@@ -116,7 +123,9 @@ fn main() {
             run_watch(args.home, args.no_color, args.width, interval)
         }
         Some(Command::Player { once, interval }) => run_player(args.home, once, interval),
-        Some(Command::Relaunch { slug, agent }) => run_relaunch(args.home, &slug, agent),
+        Some(Command::Relaunch { slug, agent, reset }) => {
+            run_relaunch(args.home, &slug, agent, reset)
+        }
         Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
     }
@@ -382,16 +391,23 @@ fn run_player(home: Option<PathBuf>, once: bool, interval: u64) {
 // dashboard relaunch
 // --------------------------------------------------------------------------
 
-fn run_relaunch(home: Option<PathBuf>, slug: &str, agent: bool) {
+fn run_relaunch(home: Option<PathBuf>, slug: &str, agent: bool, reset: bool) {
     let mut player = open_player(home);
-    let result = if agent {
+    let result = if reset {
+        player.reset_relaunch(slug, agent)
+    } else if agent {
         player.relaunch_agent(slug)
     } else {
         player.relaunch(slug)
     };
+    let cleared = if reset {
+        format!("cleared task/{slug}'s relaunch-limit escalation and ")
+    } else {
+        String::new()
+    };
     match result {
-        Ok(()) if agent => println!("relaunched task/{slug}'s task agent"),
-        Ok(()) => println!("relaunched task/{slug}"),
+        Ok(()) if agent => println!("{cleared}relaunched task/{slug}'s task agent"),
+        Ok(()) => println!("{cleared}relaunched task/{slug}"),
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);

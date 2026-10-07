@@ -673,6 +673,34 @@ fn worker_and_task_agent_relaunches_are_capped_apart() {
     // Already escalated, another try is refused without a new escalation.
     let err = player.relaunch_agent("s").expect_err("still capped");
     assert!(err.contains("already escalated"), "{err}");
+
+    // `--reset` must name the session that hit its limit.
+    player.sessions_mut().alive.remove("s");
+    let err = player
+        .reset_relaunch("s", false)
+        .expect_err("not the worker's");
+    assert!(
+        err.contains("dashboard relaunch s --agent --reset"),
+        "{err}"
+    );
+    let launched = player.sessions().launched.len();
+    player.reset_relaunch("s", true).expect("reset --agent");
+    assert_eq!(player.sessions().launched.len(), launched + 1);
+    assert!(player.sessions().alive("s_agent"));
+    let t = task(&hub, "s");
+    assert_ne!(t.status, Status::Escalated);
+    assert_eq!(counts(), (1, 1), "only the task agent's count starts over");
+    let cleared = records::cleared_escalations(&hub, "s");
+    assert_eq!(cleared.len(), 1, "{cleared:?}");
+    assert_eq!(cleared[0].session, "agent");
+    player.tick().expect("tick");
+    assert!(
+        events::read_all(&home)
+            .iter()
+            .any(|e| e.kind == EventKind::Resumed),
+        "{:?}",
+        events::read_all(&home)
+    );
 }
 
 #[test]

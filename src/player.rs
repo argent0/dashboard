@@ -1079,7 +1079,28 @@ impl<S: Sessions> Player<S> {
             }
 
             let managed = state::task_agent_managed(&hub_state.roadmap, &task.config);
-            if prev != Some(task.status) {
+            let left_escalation = prev == Some(Status::Escalated)
+                && !matches!(
+                    task.status,
+                    Status::Escalated | Status::Accepted | Status::Retired | Status::Explored
+                );
+            if left_escalation {
+                // Only `dashboard relaunch --reset` takes a task back out.
+                let was = records::cleared_escalations(&self.hub, &task.slug)
+                    .pop()
+                    .map(|c| format!(" (was: {})", c.cause))
+                    .unwrap_or_default();
+                events::append(
+                    &self.home,
+                    EventKind::Resumed,
+                    Some(&task.slug),
+                    &format!(
+                        "escalation cleared by the operator{was}; task/{} is {} again",
+                        task.slug,
+                        task.status.as_str()
+                    ),
+                )?;
+            } else if prev != Some(task.status) {
                 if let Some((kind, message)) = status_event(task, managed) {
                     events::append(&self.home, kind, Some(&task.slug), &message)?;
                 }
@@ -3847,8 +3868,9 @@ impl<S: Sessions> Player<S> {
     /// task agent) may be relaunched that many times since its last
     /// progress (`records::relaunch_count`, at the task tip). One more is
     /// refused and escalates the task instead (unless it already is), the
-    /// ordinary way: an escalation record at the tip, which only a retire
-    /// resolves (spec §10).
+    /// ordinary way: an escalation record at the tip. Unlike any other
+    /// escalation, the operator may clear it once they've fixed the cause
+    /// (`reset_relaunch`); otherwise a retire resolves it (spec §10).
     fn check_relaunch_limit(
         &self,
         task: &state::TaskState,
@@ -3871,12 +3893,77 @@ impl<S: Sessions> Player<S> {
             let cause = format!(
                 "relaunch limit ({limit}) reached: the {who} was relaunched {count} times since its last progress and died again"
             );
-            records::record_escalation(&self.hub, slug, &task.tip, &cause)?;
+            records::record_relaunch_escalation(&self.hub, slug, &task.tip, &cause, agent)?;
             "the task is escalated to the operator instead".to_string()
         };
+        let flag = if agent { " --agent" } else { "" };
         Err(format!(
-            "relaunch: task/{slug}'s {who} was already relaunched {count} times since its last progress ([limits] max_relaunches = {limit}) — not relaunched; {outcome} (resolve it as any escalation: retire, then replan)"
+            "relaunch: task/{slug}'s {who} was already relaunched {count} times since its last progress ([limits] max_relaunches = {limit}) — not relaunched; {outcome} (once the operator has fixed what keeps killing it: dashboard relaunch {slug}{flag} --reset; or retire, then replan)"
         ))
+    }
+
+    /// `dashboard relaunch --reset`: clears `slug`'s relaunch-limit
+    /// escalation for its worker (or, with `agent`, its task agent), starts
+    /// that session's relaunch count over and relaunches it. The cap mostly
+    /// catches the environment (a bad `agent_cmd`, an expired login, a
+    /// dialog, a usage limit), which the operator can fix; every other
+    /// escalation stays retire-only. Refused unless the task's current
+    /// escalation cause is that session's relaunch limit, or while the
+    /// session is alive. The escalation is kept as evidence
+    /// (`records::clear_escalation`).
+    pub fn reset_relaunch(&mut self, slug: &str, agent: bool) -> Result<(), String> {
+        let (key, who) = if agent {
+            (state::agent_key(slug), "task agent")
+        } else {
+            (slug.to_string(), "session")
+        };
+        if self.sessions.alive(&key) {
+            return Err(format!("relaunch: task/{slug}'s {who} is already alive"));
+        }
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        let task = hub_state
+            .tasks
+            .iter()
+            .find(|t| t.slug == slug)
+            .ok_or_else(|| format!("relaunch: no task {slug}"))?;
+        if task.status != Status::Escalated {
+            return Err(format!(
+                "relaunch --reset: task/{slug} is {}, not escalated — nothing to reset",
+                task.status.as_str()
+            ));
+        }
+        let cause = task.escalation.clone().unwrap_or_default();
+        // The current cause must be the record's: strikes at their limit or
+        // a `block:` marker outrank it (`state::escalation_cause`).
+        let session = records::escalation(&self.hub, slug)
+            .filter(|r| r.cause == cause)
+            .and_then(|r| r.relaunch_session());
+        match session {
+            Some(s) if s == agent => {}
+            Some(s) => {
+                let flag = if s { " --agent" } else { "" };
+                return Err(format!(
+                    "relaunch --reset: task/{slug} is escalated for {cause}; that's the {}'s relaunch limit: dashboard relaunch {slug}{flag} --reset",
+                    if s { "task agent" } else { "worker" }
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "relaunch --reset: task/{slug} is escalated for {cause}; only a relaunch-limit escalation can be reset (retire, then replan)"
+                ));
+            }
+        }
+        records::clear_escalation(&self.hub, slug, agent)
+            .map_err(|e| format!("relaunch --reset: {e}"))?;
+        records::record_relaunch_reset(&self.hub, &task.tip, agent)
+            .map_err(|e| format!("relaunch --reset: escalation cleared, but {e}"))?;
+        let relaunched = if agent {
+            self.relaunch_agent(slug)
+        } else {
+            self.relaunch(slug)
+        };
+        relaunched
+            .map_err(|e| format!("relaunch --reset: task/{slug}'s escalation is cleared, but {e}"))
     }
 
     // ---- worker import (spec §5, §7, §9) ----
