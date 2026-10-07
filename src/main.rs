@@ -325,6 +325,32 @@ fn run_player(home: Option<PathBuf>, once: bool, interval: u64) {
             std::process::exit(1);
         }
     }
+    // Then main's suite under that jail: a cache hit unless main, the
+    // policy or the player changed, in which case it's one full run. Impure
+    // checks there don't stop the player (only a task can fix them); work
+    // failing only on them is held instead of struck.
+    if !once {
+        eprintln!("checking main's suite under the sandbox…");
+    }
+    match player.verify_main() {
+        Ok(impure) if impure.is_empty() => {
+            if !once {
+                eprintln!("main's suite: clean");
+            }
+        }
+        Ok(impure) => {
+            eprintln!(
+                "warning: main has impure checks; work failing only on them is held until a task fixes them:"
+            );
+            for why in impure.values() {
+                eprintln!("  {why}");
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
 
     if once {
         match player.tick() {

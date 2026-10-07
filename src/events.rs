@@ -36,6 +36,11 @@ pub enum EventKind {
     MergeFailed,
     /// A worker contested a test and task agents are off: the director replies.
     Contested,
+    /// `main`'s suite has impure checks under the current sandbox (spec §20).
+    MainImpure,
+    /// A finish or accept held, not judged, because it fails only on checks
+    /// that are already impure on `main`.
+    Held,
     Ready,
     Accepted,
     Explored,
@@ -59,6 +64,8 @@ impl EventKind {
             EventKind::Conflict => "conflict",
             EventKind::MergeFailed => "merge_failed",
             EventKind::Contested => "contested",
+            EventKind::MainImpure => "main_impure",
+            EventKind::Held => "held",
             EventKind::Ready => "ready",
             EventKind::Accepted => "accepted",
             EventKind::Explored => "explored",
@@ -121,6 +128,12 @@ impl Event {
             EventKind::Contested => Some(format!(
                 "reply on task/{slug} in one commit adding tasks/{slug}/contests/c<N>.md (plus fixed tests if it's right), or retire"
             )),
+            EventKind::MainImpure => Some(
+                "plan a task that makes these checks leave their worktree clean; until it lands, work failing only on them is held".to_string(),
+            ),
+            EventKind::Held => Some(
+                "nothing to do on this task: it's re-judged once main's impure checks are fixed".to_string(),
+            ),
             EventKind::Ready => Some(format!(
                 "git fetch hub && git merge (or checkout) hub/task/{slug} before posting"
             )),

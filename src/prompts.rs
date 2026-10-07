@@ -26,6 +26,8 @@ const TEMPLATES: &[(&str, &[&str])] = &[
     ("worker.contest-recorded", &["n"]),
     ("worker.contest-reply", &["n", "slug", "reply"]),
     ("worker.merge-failed", &["slug", "summary"]),
+    ("worker.held", &["checks"]),
+    ("worker.released", &["slug"]),
     ("spike.launch", &["slug", "project", "pinned"]),
     ("spike.question", &["round", "question"]),
     ("spike.finish-accepted", &["answer"]),

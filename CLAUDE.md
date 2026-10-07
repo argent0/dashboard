@@ -107,6 +107,10 @@ refs/dashboard/escalated/<slug>  set when a send-back would exceed
                             max_review_rounds (the other escalation causes —
                             a strike limit, a block: marker — are read
                             straight off strikes/notes, no separate ref)
+refs/dashboard/held/<slug> a worker finish held, not judged: it fails only on
+                            checks already impure on main (spec §20)
+refs/dashboard/released/<slug>  a held finish the player merged main under on
+                            release; ignored (not "diverged") until rebased
 refs/rejected/<scope>/<n>  every rejected commit, kept as evidence
                             (scope is a task slug, or `_main`)
 ```
@@ -442,6 +446,21 @@ back here):
   fingerprint) is part of the cache key. Tests need a working `bwrap`;
   `tests/sandbox.rs` covers the jail, and `tests/flaky.rs`'s fixture adds a
   `writable` dir for its counter files.
+- **An impure `main`** (spec §20): `Player::verify_main` runs main's suite
+  under the current sandbox every tick (a cache hit unless main, the
+  policy or the leak check changed) — before and after `import_main` —
+  and at `dashboard player` startup, where it prints the result. Impure
+  checks there don't stop the player (only a task can fix a test on
+  main); they're a `main_impure` event once per (tip, policy, set) and a
+  `status` section. `held_by_main`: a suite failing *only* on checks
+  impure both here and on main is main's problem. A director main commit
+  then imports anyway; a worker finish is held (`refs/dashboard/held`,
+  `worker.held`, a `held` event, no strike); an accept is held in memory
+  (`held_accepts`, keyed by main tip, so it isn't re-merged every tick).
+  `release_held` un-holds a finish once those checks are clean on main by
+  merging main into the branch (a `sync_revision`, re-pinned,
+  `worker.released`: rebase); a merge conflict there just un-holds it.
+  Tests: `tests/main_impure.rs`.
 
 Still undecided (spec §13): timeout/crash handling beyond manual relaunch,
 scope enforcement beyond pins, and suite-runtime cost at scale.

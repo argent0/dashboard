@@ -130,6 +130,12 @@ pub struct HubState {
     pub rejections: Vec<RejectionRecord>,
     /// Checks that passed only on a retry (the flake ledger).
     pub flakes: Vec<FlakeRecord>,
+    /// Checks cached as impure on `main`'s tip under main's own `[sandbox]`
+    /// policy (spec §20): (check, what it left in the worktree). Until a
+    /// task fixes them, work failing only on these is held.
+    pub main_impure: Vec<(String, Vec<String>)>,
+    /// Tasks whose finish is held on those checks (`refs/dashboard/held/*`).
+    pub held: Vec<String>,
     /// `dashboard.project` from the hub's git config — used to name tmux
     /// sessions for display, and as the header's fallback title.
     pub project: String,
@@ -156,6 +162,14 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
     let retired: Vec<String> = records::retired_slugs(hub);
     let rejections = records::rejections(hub);
     let flakes = records::flakes(hub);
+    let isolation = crate::sandbox::Sandbox::from_config(&roadmap.sandbox)
+        .map(|s| s.fingerprint())
+        .unwrap_or_default();
+    let main_impure = checks::cached(hub, &main_tip)
+        .into_iter()
+        .filter(|r| !r.leaked.is_empty() && r.isolation == isolation)
+        .map(|r| (r.name, r.leaked))
+        .collect();
     let project = hub.config_get("dashboard.project").unwrap_or_default();
 
     // Every slug we know about: a live task branch, a retirement, or an
@@ -205,6 +219,8 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         tasks,
         rejections,
         flakes,
+        main_impure,
+        held: records::held_slugs(hub),
         project,
     })
 }

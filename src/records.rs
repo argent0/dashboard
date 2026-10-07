@@ -603,6 +603,49 @@ pub fn check_pins(hub: &Git, slug: &str, candidate_commit: &str) -> Vec<String> 
 }
 
 // --------------------------------------------------------------------------
+// Held finishes: refs/dashboard/held/<slug>, refs/dashboard/released/<slug>
+// (spec §20)
+// --------------------------------------------------------------------------
+
+/// Marks `commit`, a worker's finish failing only on checks impure on
+/// `main`, as held: neither imported nor rejected.
+pub fn set_held(hub: &Git, slug: &str, commit: &str) -> Result<(), String> {
+    hub.update_ref(&format!("refs/dashboard/held/{slug}"), commit)
+        .map_err(|e| e.to_string())
+}
+
+pub fn held_commit(hub: &Git, slug: &str) -> Option<String> {
+    hub.rev_parse(&format!("refs/dashboard/held/{slug}"))
+}
+
+pub fn held_slugs(hub: &Git) -> Vec<String> {
+    hub.for_each_ref("refs/dashboard/held/*")
+        .into_iter()
+        .filter_map(|(r, _)| r.strip_prefix("refs/dashboard/held/").map(str::to_string))
+        .collect()
+}
+
+/// Releases `slug`'s hold. With `superseded`, the held commit is left
+/// behind by a player merge of `main` into the branch: the worker rebases
+/// it, and until then that exact commit is ignored rather than rejected
+/// for diverging (`released_commit`).
+pub fn release_held(hub: &Git, slug: &str, superseded: bool) -> Result<(), String> {
+    if let Some(commit) = held_commit(hub, slug) {
+        if superseded {
+            hub.update_ref(&format!("refs/dashboard/released/{slug}"), &commit)
+                .map_err(|e| e.to_string())?;
+        }
+        hub.delete_ref(&format!("refs/dashboard/held/{slug}"))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn released_commit(hub: &Git, slug: &str) -> Option<String> {
+    hub.rev_parse(&format!("refs/dashboard/released/{slug}"))
+}
+
+// --------------------------------------------------------------------------
 // Spike base commit: refs/dashboard/base/<slug> (spec §14)
 // --------------------------------------------------------------------------
 

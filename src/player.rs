@@ -285,6 +285,11 @@ pub struct TickReport {
     pub agents_launched: Vec<String>,
     /// Reports task agents handed the player this tick: (slug, report).
     pub agent_reports: Vec<(String, records::AgentReport)>,
+    /// `main`'s impure checks, when newly found (spec §20): one line each.
+    pub main_impure: Vec<String>,
+    /// Finishes and accepts held because they fail only on checks already
+    /// impure on `main`: (slug, message).
+    pub held: Vec<(String, String)>,
     pub errors: Vec<String>,
 }
 
@@ -299,6 +304,8 @@ impl TickReport {
             && self.launched.is_empty()
             && self.agents_launched.is_empty()
             && self.agent_reports.is_empty()
+            && self.main_impure.is_empty()
+            && self.held.is_empty()
             && self.errors.is_empty()
     }
 }
@@ -337,6 +344,12 @@ impl fmt::Display for TickReport {
         }
         for (slug, r) in &self.agent_reports {
             lines.push(format!("task agent {slug} reported: {}", r.verdict));
+        }
+        for line in &self.main_impure {
+            lines.push(format!("main impure: {line}"));
+        }
+        for (slug, msg) in &self.held {
+            lines.push(format!("held {slug}: {msg}"));
         }
         lines.extend(self.merges.iter().cloned());
         for err in &self.errors {
@@ -377,6 +390,19 @@ pub struct Player<S: Sessions> {
     /// The fingerprint of the last sandbox policy that passed its
     /// preflight, so a tick re-runs it only when `[sandbox]` changes.
     sandbox_preflighted: Option<String>,
+    /// `main`'s impure checks under the current sandbox, by name, as of
+    /// this tick's `verify_main`: work failing only on these is held.
+    main_impure: BTreeMap<String, String>,
+    /// The main tip `verify_main` last ran the suite on.
+    main_verified: String,
+    /// What `main`'s suite verdict was last reported for (tip, policy and
+    /// impure checks), so it's reported once, not every tick.
+    main_told: Option<String>,
+    /// Per slug, the (accept candidate, main tip) last held in `land`: the
+    /// director hears about it once, and it isn't re-merged and re-run every
+    /// tick while `main` stays the same. (Held finishes live in the hub:
+    /// `records::held_commit`.)
+    held_accepts: BTreeMap<String, (String, String)>,
 }
 
 impl<S: Sessions> Player<S> {
@@ -403,7 +429,142 @@ impl<S: Sessions> Player<S> {
             first_run,
             agent_rebase_told: BTreeMap::new(),
             sandbox_preflighted: None,
+            main_impure: BTreeMap::new(),
+            main_verified: String::new(),
+            main_told: None,
+            held_accepts: BTreeMap::new(),
         })
+    }
+
+    /// Runs the suite on `main`'s tip under the current sandbox (a cache
+    /// hit unless main, the policy or the player's leak check changed) and
+    /// remembers which checks are impure there (spec §20). Returns them,
+    /// check name to why.
+    pub fn verify_main(&mut self) -> Result<&BTreeMap<String, String>, String> {
+        let main_tip = self
+            .hub
+            .rev_parse("refs/heads/main")
+            .ok_or("hub has no main")?;
+        let suite = self.runner.run_suite(&main_tip);
+        self.note_flakes("_main", &main_tip, &suite);
+        self.main_impure = suite
+            .checks
+            .iter()
+            .filter_map(|c| c.impurity().map(|why| (c.name.clone(), why)))
+            .collect();
+        self.main_verified = main_tip;
+        Ok(&self.main_impure)
+    }
+
+    /// Puts `main`'s impure checks in the report once per (tip, policy,
+    /// impure set), for the director's `main_impure` event.
+    fn report_main(&mut self, report: &mut TickReport) {
+        if self.main_impure.is_empty() {
+            self.main_told = None;
+            return;
+        }
+        let names: Vec<&str> = self.main_impure.keys().map(String::as_str).collect();
+        let key = format!(
+            "{} {} {}",
+            self.main_verified,
+            self.runner.sandbox().fingerprint(),
+            names.join(",")
+        );
+        if self.main_told.as_ref() == Some(&key) {
+            return;
+        }
+        self.main_told = Some(key);
+        report
+            .main_impure
+            .extend(self.main_impure.values().cloned());
+    }
+
+    /// The failing checks' names if the suite fails only on checks that are
+    /// impure here *and* already impure on `main`: not the work's fault.
+    fn held_by_main(&self, suite: &checks::SuiteResult) -> Option<Vec<String>> {
+        let failing: Vec<&checks::CheckResult> = suite.checks.iter().filter(|c| !c.pass).collect();
+        if suite.error.is_some() || failing.is_empty() {
+            return None;
+        }
+        failing
+            .iter()
+            .all(|c| c.impurity().is_some() && self.main_impure.contains_key(&c.name))
+            .then(|| failing.iter().map(|c| c.name.clone()).collect())
+    }
+
+    /// Releases every held finish whose checks are no longer impure on
+    /// `main` (spec §20). The branch still carries main's old copy of them,
+    /// so the player merges `main` in (a `sync_revision`, re-pinned) and
+    /// tells the worker to rebase its finish onto it. A branch that already
+    /// has `main` is just un-held: its finish is judged normally.
+    fn release_held(&mut self, report: &mut TickReport) -> Result<(), String> {
+        for slug in records::held_slugs(&self.hub) {
+            let Some(candidate) = records::held_commit(&self.hub, &slug) else {
+                continue;
+            };
+            if self
+                .held_by_main(&self.runner.run_suite(&candidate))
+                .is_some()
+            {
+                continue;
+            }
+            let hub_ref = format!("refs/heads/task/{slug}");
+            let Some(tip) = self.hub.rev_parse(&hub_ref) else {
+                records::release_held(&self.hub, &slug, false)?;
+                continue;
+            };
+            let main_tip = self.main_verified.clone();
+            if self.hub.is_ancestor(&main_tip, &tip) {
+                records::release_held(&self.hub, &slug, false)?;
+                continue;
+            }
+            let (tree, conflicts) = self
+                .hub
+                .merge_tree_conflicts(&tip, &main_tip)
+                .map_err(|e| e.to_string())?;
+            if !conflicts.is_empty() {
+                // Judged as it stands from the next tick on; the worker can
+                // contest what fails.
+                records::release_held(&self.hub, &slug, false)?;
+                report.errors.push(format!(
+                    "task/{slug}: main is clean again, but merging it in to release the held finish conflicts in {}",
+                    conflicts.join(", ")
+                ));
+                continue;
+            }
+            let sync = self
+                .hub
+                .commit_tree(
+                    &tree,
+                    &[&tip, &main_tip],
+                    &format!("Merge main into task/{slug}"),
+                )
+                .map_err(|e| e.to_string())?;
+            self.hub
+                .update_ref_cas(&hub_ref, &sync, &tip)
+                .map_err(|e| e.to_string())?;
+            records::record_import(
+                &self.hub,
+                &sync,
+                Actor::Player,
+                Transition::SyncRevision,
+                Some(&slug),
+            )?;
+            records::set_pins(&self.hub, &slug, &sync)?;
+            records::release_held(&self.hub, &slug, true)?;
+            report
+                .imported
+                .push((hub_ref, sync.clone(), Transition::SyncRevision));
+            report.held.push((
+                slug.clone(),
+                format!("released: main is clean and merged into task/{slug}; the worker rebases its finish"),
+            ));
+            let text = self
+                .prompts()?
+                .render("worker.released", &[("slug", &slug)]);
+            self.sessions.send(&slug, &text);
+        }
+        Ok(())
     }
 
     /// Reads `[sandbox]` from the hub's `main` and runs every check from
@@ -453,7 +614,14 @@ impl<S: Sessions> Player<S> {
         let mut report = TickReport::default();
         self.fetch()?;
         self.check_sandbox()?;
+        // Before importing main (a director commit on an impure main is
+        // judged against it) and again after (a cache hit unless main just
+        // moved), so a fix that lands now releases held work this tick.
+        self.verify_main()?;
         self.import_main(&mut report)?;
+        self.verify_main()?;
+        self.report_main(&mut report);
+        self.release_held(&mut report)?;
         self.import_task_branches(&mut report)?;
         self.import_task_agents(&mut report)?;
         self.launch_workers(&mut report)?;
@@ -494,6 +662,17 @@ impl<S: Sessions> Player<S> {
         }
         for (slug, msg) in &report.merge_failed {
             events::append(&self.home, EventKind::MergeFailed, Some(slug), msg)?;
+        }
+        if !report.main_impure.is_empty() {
+            events::append(
+                &self.home,
+                EventKind::MainImpure,
+                None,
+                &report.main_impure.join("\n"),
+            )?;
+        }
+        for (slug, msg) in &report.held {
+            events::append(&self.home, EventKind::Held, Some(slug), msg)?;
         }
         for slug in &report.agents_launched {
             let session = state::tmux_session_name(&self.project, &state::agent_key(slug));
@@ -728,7 +907,10 @@ impl<S: Sessions> Player<S> {
         }
         let suite = self.runner.run_suite(candidate);
         self.note_flakes("_main", candidate, &suite);
-        if !suite.pass {
+        // Failing only where main already fails impurely is main's old
+        // problem, not this commit's: it mustn't block the director (who may
+        // be here to change `[sandbox]`).
+        if !suite.pass && self.held_by_main(&suite).is_none() {
             return Err((Reason::Suite, format!("suite: {}", suite.summary())));
         }
         Ok(())
@@ -1836,6 +2018,11 @@ impl<S: Sessions> Player<S> {
             .hub
             .rev_parse("refs/heads/main")
             .ok_or_else(|| "hub has no main".to_string())?;
+        // Held on this very main already: merging again would only build a
+        // new merge commit and run the whole suite on it for nothing.
+        if self.held_accepts.get(slug) == Some(&(candidate.to_string(), main_tip.clone())) {
+            return Ok(());
+        }
 
         let mut sync: Option<String> = None;
         if !self.hub.is_ancestor(&main_tip, candidate) {
@@ -1899,6 +2086,23 @@ impl<S: Sessions> Player<S> {
         let suite = self.runner.run_suite(&merge_sha);
         self.note_flakes(slug, &merge_sha, &suite);
         if !suite.pass {
+            // Not the work's fault, nor the merge's: leave the marker
+            // unimported (no strike, no sync_revision) until main is clean.
+            if let Some(names) = self.held_by_main(&suite) {
+                let key = (candidate.to_string(), main_tip.clone());
+                if self.held_accepts.insert(slug.to_string(), key.clone()) != Some(key) {
+                    report.held.push((
+                        slug.to_string(),
+                        format!(
+                            "{} {} fails only on checks impure on main: {}",
+                            transition.as_str(),
+                            short(candidate),
+                            names.join(", ")
+                        ),
+                    ));
+                }
+                return Ok(());
+            }
             if sync.is_none() && transition == Transition::Accept {
                 // Nothing was merged in: this is the code that passed at
                 // finish, so the failure isn't the merge's.
@@ -3074,6 +3278,11 @@ impl<S: Sessions> Player<S> {
             Some(sha) => sha,
             None => return Ok(()),
         };
+        // A held finish the player has since merged main under: the worker
+        // is rebasing it (`release_held`), so it's not a diverged clone.
+        if records::released_commit(&self.hub, slug).as_deref() == Some(incoming.as_str()) {
+            return Ok(());
+        }
 
         if self.hub.is_ancestor(&incoming, hub_tip) {
             return Ok(()); // behind or caught up
@@ -3101,6 +3310,10 @@ impl<S: Sessions> Player<S> {
             return Ok(());
         }
 
+        // A newer commit than the held one: the hold is over either way.
+        if records::held_commit(&self.hub, slug).is_some_and(|h| h != incoming) {
+            records::release_held(&self.hub, slug, false)?;
+        }
         self.validate_finish_claim(slug, hub_tip, &incoming, report)
     }
 
@@ -3171,6 +3384,27 @@ impl<S: Sessions> Player<S> {
         let suite = self.runner.run_suite(candidate);
         self.note_flakes(slug, candidate, &suite);
         if !suite.pass {
+            // Failing only where main already fails impurely: not the
+            // worker's doing. Left unimported, it's re-judged every tick
+            // (a cache hit) and goes through once main is clean.
+            if let Some(names) = self.held_by_main(&suite) {
+                if records::held_commit(&self.hub, slug).as_deref() != Some(candidate) {
+                    records::set_held(&self.hub, slug, candidate)?;
+                    let checks = names.join(", ");
+                    report.held.push((
+                        slug.to_string(),
+                        format!(
+                            "finish {} fails only on checks impure on main: {checks}",
+                            short(candidate)
+                        ),
+                    ));
+                    let text = self
+                        .prompts()?
+                        .render("worker.held", &[("checks", &checks)]);
+                    self.sessions.send(slug, &text);
+                }
+                return Ok(());
+            }
             let msg = format!("suite: task/{slug}: {}", suite.summary());
             return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
         }

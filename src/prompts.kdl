@@ -105,6 +105,20 @@ worker max-bytes=512 {
 
         {summary}
         """#
+
+    // {checks}
+    held #"""
+        Your finish fails only on checks that already leave their worktree dirty on main, which isn't
+        your doing: {checks}. It is held, not rejected. Don't commit; it's judged again once main is
+        fixed.
+        """#
+
+    // {slug}
+    released #"""
+        main's impure checks are fixed, and the player merged main into task/{slug}. Rebase your held
+        finish onto it: git pull --rebase origin task/{slug}. Make the whole suite pass, then commit
+        as usual.
+        """#
 }
 
 spike max-bytes=512 {

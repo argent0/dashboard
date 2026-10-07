@@ -466,6 +466,28 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     }
     out.push(String::new());
 
+    // ---- impure checks on main (spec §20) ----
+    if !state.main_impure.is_empty() {
+        out.push(style(
+            &format!(
+                "Impure on main ({}) — work failing only on these is held",
+                state.main_impure.len()
+            ),
+            &[c::BOLD, c::RED],
+            color,
+        ));
+        for (check, leaked) in &state.main_impure {
+            out.push(format!(
+                "  {check} leaves {}",
+                truncate(&leaked.join(", "), width.saturating_sub(10).max(10))
+            ));
+        }
+        if !state.held.is_empty() {
+            out.push(format!("  held: {}", state.held.join(", ")));
+        }
+        out.push(String::new());
+    }
+
     // ---- flaky checks (the flake ledger) ----
     if !state.flakes.is_empty() {
         out.push(style(
@@ -852,6 +874,8 @@ mod tests {
             tasks,
             rejections: vec![],
             flakes: vec![],
+            main_impure: vec![],
+            held: vec![],
             project: "widget".to_string(),
         }
     }

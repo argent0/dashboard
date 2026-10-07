@@ -797,6 +797,21 @@ guarantee.
 - **The cache.** A cached result records the policy it ran under and is
   only reused under the same one.
 
+**An impure `main`.** Impurity that's already on `main` (older than
+this check, or surfacing under a new policy) is nobody's current work, so
+it mustn't strike anyone. The player runs `main`'s suite under the current
+sandbox at start and every tick (a cache hit until main, the policy or the
+leak check changes). Impure checks there are reported to the director once
+(`main_impure`) and shown in `status`; the player keeps running, since only
+a task can fix a test on `main`. Until then, a suite that fails *only* on
+checks impure both on `main` and on the commit at hand is main's problem:
+a director commit on `main` imports anyway (it may be the `[sandbox]` fix),
+and a worker's finish or a director's accept is *held* — neither imported
+nor rejected, no strike, said once. When those checks are clean on `main`,
+a held accept is simply re-landed; a held finish's branch still carries the
+old check, so the player merges `main` into it (a `sync_revision`,
+re-pinned) and the worker rebases its finish onto that.
+
 Not enforced: determinism and order independence (a clock, unseeded
 randomness, state shared through a `writable` path). The task agent's review
 still reads for those.
