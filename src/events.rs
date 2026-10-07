@@ -119,6 +119,7 @@ impl Event {
     }
 
     fn hint(&self) -> Option<String> {
+        const RELAUNCH_CAP: &str = " (relaunches are capped at [limits] max_relaunches since its last progress; one more escalates the task)";
         let slug = self.slug.as_deref().unwrap_or("<slug>");
         match self.kind {
             EventKind::Tested => Some(format!(
@@ -154,20 +155,20 @@ impl Event {
             EventKind::Explored => None, // informational: the spike is concluded
             EventKind::Retired => None,  // informational
             EventKind::SessionDied => Some(format!(
-                "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug}; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug}; one that keeps failing may be worth retiring"
+                "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug}; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug}{RELAUNCH_CAP}"
             )),
             EventKind::AgentLaunched => None, // informational: the task agent posts or reviews it
             EventKind::AgentReport => Some(format!(
                 "accept: commit `accept: {slug}` with its why as the body; unsure: `dashboard ask {slug} \"...\"` or take it to the operator; posted, sent-back, answer: nothing to do"
             )),
             EventKind::AgentDied => Some(format!(
-                "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug} --agent; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug} --agent"
+                "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug} --agent; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug} --agent{RELAUNCH_CAP}"
             )),
             EventKind::SessionIdle => Some(format!(
-                "diagnose from the last screen, don't just relaunch: a usage/rate limit or API error: wait for the reset, then the operator nudges it or you kill and relaunch it; a question or confusion: nothing you commit reaches a worker mid-work, so pass it to its task agent (dashboard ask {slug} \"...\") if the brief or tests are wrong, and to the operator to answer in the session; a dialog or auth failure: the operator; an unexplained hang: tmux kill-session -t <that session>, then dashboard relaunch {slug}"
+                "diagnose from the last screen, don't just relaunch: a usage/rate limit or API error: wait for the reset, then the operator nudges it or you kill and relaunch it; a question or confusion: nothing you commit reaches a worker mid-work, so pass it to its task agent (dashboard ask {slug} \"...\") if the brief or tests are wrong, and to the operator to answer in the session; a dialog or auth failure: the operator; an unexplained hang: tmux kill-session -t <that session>, then dashboard relaunch {slug}{RELAUNCH_CAP}"
             )),
             EventKind::AgentIdle => Some(format!(
-                "diagnose from the last screen, don't just relaunch: a usage/rate limit or API error: wait for the reset, then nudge it (dashboard ask {slug} \"...\"); a question or confusion: answer it with dashboard ask {slug} \"...\"; a dialog or auth failure: the operator; an unexplained hang: tmux kill-session -t <that session>, then dashboard relaunch {slug} --agent"
+                "diagnose from the last screen, don't just relaunch: a usage/rate limit or API error: wait for the reset, then nudge it (dashboard ask {slug} \"...\"); a question or confusion: answer it with dashboard ask {slug} \"...\"; a dialog or auth failure: the operator; an unexplained hang: tmux kill-session -t <that session>, then dashboard relaunch {slug} --agent{RELAUNCH_CAP}"
             )),
             EventKind::PlayerError => None, // the message is the whole story
         }
@@ -396,6 +397,7 @@ mod tests {
             assert!(hint.contains("usage/rate limit"), "{hint}");
             assert!(hint.contains("operator"), "{hint}");
             assert!(hint.contains("dashboard relaunch s"), "{hint}");
+            assert!(hint.contains("max_relaunches"), "{hint}");
             assert!(!hint.contains("tmux attach"), "{hint}");
             assert!(e.human().ends_with(&format!("\n{hint}")), "{}", e.human());
         }

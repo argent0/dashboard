@@ -881,6 +881,127 @@ fn relaunch_refuses_when_the_session_is_already_alive() {
     assert!(err.contains("already alive"), "{err}");
 }
 
+/// `slug`'s worker relaunches since its last progress, as `status` sees them.
+fn relaunches(hub: &Git, slug: &str) -> u32 {
+    state::derive(hub, &|_| false)
+        .expect("derive")
+        .tasks
+        .into_iter()
+        .find(|t| t.slug == slug)
+        .expect("task")
+        .relaunches
+}
+
+#[test]
+fn relaunches_past_max_relaunches_are_refused_and_escalate() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan_and_post(&repo, &mut player, "r");
+    assert_eq!(
+        relaunches(&hub, "r"),
+        0,
+        "the launch itself isn't a relaunch"
+    );
+
+    // `dashboard relaunch` runs in its own process; each one is counted.
+    for n in 1..=2 {
+        player.sessions_mut().alive.remove("r");
+        open_player(&home)
+            .relaunch("r")
+            .expect("relaunch within the limit");
+        assert_eq!(relaunches(&hub, "r"), n);
+    }
+
+    // The count is in the hub, not in the player's local state.
+    drop(player);
+    std::fs::remove_dir_all(home.launches()).expect("drop local launch ids");
+    let mut player = open_player(&home);
+    player.tick().expect("tick after a restart");
+    assert_eq!(relaunches(&hub, "r"), 2);
+
+    let launched = player.sessions().launched.len();
+    let err = player
+        .relaunch("r")
+        .expect_err("a third relaunch is past max_relaunches = 2");
+    assert!(err.contains("max_relaunches = 2"), "{err}");
+    assert!(err.contains("escalated"), "{err}");
+    assert_eq!(player.sessions().launched.len(), launched, "not launched");
+    let t = state::derive(&hub, &|_| false)
+        .unwrap()
+        .tasks
+        .into_iter()
+        .find(|t| t.slug == "r")
+        .unwrap();
+    assert_eq!(t.status, Status::Escalated);
+    assert!(
+        t.escalation
+            .as_deref()
+            .is_some_and(|c| c.starts_with("relaunch limit (2) reached")),
+        "{:?}",
+        t.escalation
+    );
+
+    // The director hears it as any escalation.
+    player.tick().expect("tick");
+    let escalated: Vec<_> = dashboard::events::read_all(&home)
+        .into_iter()
+        .filter(|e| e.kind == dashboard::events::EventKind::Escalated)
+        .collect();
+    assert_eq!(escalated.len(), 1, "{escalated:?}");
+    assert!(
+        escalated[0].message.contains("relaunch limit"),
+        "{escalated:?}"
+    );
+    assert!(
+        player.relaunch("r").is_err(),
+        "escalated: no more relaunches"
+    );
+
+    // And it resolves as any escalation: a retire.
+    director_pull_task_branch(repo.path(), "r");
+    commit_empty(repo.path(), "retire: keeps crashing");
+    let report = player.tick().expect("retire tick");
+    assert_eq!(report.imported[0].2, Transition::Retire, "{report}");
+    assert_eq!(task_status(&hub, "r"), Status::Retired);
+}
+
+#[test]
+fn progress_on_the_task_branch_starts_the_relaunch_count_over() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan_and_post(&repo, &mut player, "p");
+    for _ in 0..2 {
+        player.sessions_mut().alive.remove("p");
+        player.relaunch("p").expect("relaunch");
+    }
+    assert_eq!(relaunches(&hub, "p"), 2);
+
+    // The worker's finish is progress.
+    commit_in_clone(&repo, "p", "feature.txt", "done\n", "finish work");
+    player.tick().expect("finish tick");
+    assert_eq!(task_status(&hub, "p"), Status::Tested);
+    assert_eq!(relaunches(&hub, "p"), 0);
+
+    // Sent back, the worker may be relaunched afresh.
+    director_pull_task_branch(repo.path(), "p");
+    write_file(
+        repo.path(),
+        "tests.d/p.toml",
+        "[[check]]\nname = \"p-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n",
+    );
+    write_file(repo.path(), "tasks/p/reviews/r1.md", "add feature2.txt\n");
+    commit(repo.path(), "send-back: p r1");
+    player.tick().expect("send-back tick");
+    assert_eq!(task_status(&hub, "p"), Status::InRevision);
+    player.sessions_mut().alive.remove("p");
+    player.relaunch("p").expect("relaunch after progress");
+    assert_eq!(relaunches(&hub, "p"), 1);
+}
+
 // --------------------------------------------------------------------------
 // TmuxSessions smoke test (real tmux, no other test touches it)
 // --------------------------------------------------------------------------

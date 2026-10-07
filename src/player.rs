@@ -3809,11 +3809,8 @@ impl<S: Sessions> Player<S> {
             return Err(format!("relaunch: task/{slug}'s session is already alive"));
         }
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        let status = hub_state
-            .tasks
-            .iter()
-            .find(|t| t.slug == slug)
-            .map(|t| t.status);
+        let task = hub_state.tasks.iter().find(|t| t.slug == slug);
+        let status = task.map(|t| t.status);
         if !matches!(
             status,
             Some(Status::Posted | Status::InProgress | Status::InRevision | Status::Contested)
@@ -3839,8 +3836,47 @@ impl<S: Sessions> Player<S> {
             ));
         }
 
+        let task = task.expect("a status implies a task");
+        self.check_relaunch_limit(task, false, hub_state.roadmap.limits.max_relaunches)?;
         let agent_cmd = self.agent_cmd_at_main()?;
-        self.launch_session(slug, &clone_dir, &agent_cmd, &prompt_file)
+        self.launch_session(slug, &clone_dir, &agent_cmd, &prompt_file)?;
+        records::record_relaunch(&self.hub, &task.tip, false)
+    }
+
+    /// `[limits] max_relaunches`: `task`'s worker (or, with `agent`, its
+    /// task agent) may be relaunched that many times since its last
+    /// progress (`records::relaunch_count`, at the task tip). One more is
+    /// refused and escalates the task instead (unless it already is), the
+    /// ordinary way: an escalation record at the tip, which only a retire
+    /// resolves (spec §10).
+    fn check_relaunch_limit(
+        &self,
+        task: &state::TaskState,
+        agent: bool,
+        limit: u32,
+    ) -> Result<(), String> {
+        let count = if agent {
+            task.agent.as_ref().map_or(0, |a| a.relaunches)
+        } else {
+            task.relaunches
+        };
+        if count < limit {
+            return Ok(());
+        }
+        let who = if agent { "task agent" } else { "worker" };
+        let slug = &task.slug;
+        let outcome = if task.status == Status::Escalated {
+            "the task is already escalated".to_string()
+        } else {
+            let cause = format!(
+                "relaunch limit ({limit}) reached: the {who} was relaunched {count} times since its last progress and died again"
+            );
+            records::record_escalation(&self.hub, slug, &task.tip, &cause)?;
+            "the task is escalated to the operator instead".to_string()
+        };
+        Err(format!(
+            "relaunch: task/{slug}'s {who} was already relaunched {count} times since its last progress ([limits] max_relaunches = {limit}) — not relaunched; {outcome} (resolve it as any escalation: retire, then replan)"
+        ))
     }
 
     // ---- worker import (spec §5, §7, §9) ----
@@ -4788,6 +4824,7 @@ impl<S: Sessions> Player<S> {
             Status::Contested => AgentStep::Contest,
             _ => AgentStep::Wait,
         };
+        self.check_relaunch_limit(task, true, hub_state.roadmap.limits.max_relaunches)?;
         let prompt_file = Self::git_dir(&dir)?.join("dashboard-prompt.md");
         self.write_agent_prompt(task, step, &hub_state.roadmap, &dir, &prompt_file, true)?;
         if step != AgentStep::Post && step != AgentStep::Wait {
@@ -4798,7 +4835,8 @@ impl<S: Sessions> Player<S> {
             &dir,
             &hub_state.roadmap.player.task_agent_cmd,
             &prompt_file,
-        )
+        )?;
+        records::record_relaunch(&self.hub, &task.tip, true)
     }
 
     /// Pastes the director's `question` into `slug`'s task agent session

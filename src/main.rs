@@ -73,7 +73,9 @@ enum Command {
         interval: u64,
     },
     /// Manually restart a task's worker tmux session after it died (spec.md
-    /// §9's launch row leaves automatic relaunch deferred).
+    /// §9's launch row leaves automatic relaunch deferred). Capped at
+    /// `[limits] max_relaunches` since its last progress; past it the task
+    /// escalates instead.
     Relaunch {
         /// The task's slug.
         slug: String,

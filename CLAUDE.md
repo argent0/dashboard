@@ -115,7 +115,8 @@ refs/dashboard/agent-asked/<slug>  the tested tip its task agent was last asked 
 refs/dashboard/pins/<slug> the commit pins were computed from (spec §8.3)
 refs/dashboard/base/<slug> a spike's base commit (the tip at launch); never moved
 refs/dashboard/escalated/<slug>  set when a send-back would exceed
-                            max_review_rounds (the other escalation causes —
+                            max_review_rounds, a contest max_contest_rounds,
+                            or a relaunch max_relaunches (the other escalation causes —
                             a strike limit, a block: marker — are read
                             straight off strikes/notes, no separate ref)
 refs/dashboard/held/<slug> a worker finish held, not judged: it fails only on
@@ -140,6 +141,16 @@ refs/notes/dashboard-explorations a spike round's verified answer + claim result
 refs/notes/dashboard-conflicts   on a conflicted task's tip: the exact main commit an accept couldn't
                                  merge in, and the conflicted paths ({main, paths, at})
 refs/notes/dashboard-agent-reports  task agent reports read at a task tip: [{verdict, text, at}]
+refs/notes/dashboard-relaunches  `dashboard relaunch`es at a task tip: [{agent, reports, at}]
+                                 (`reports`: the agent reports noted there at the time)
+```
+
+Every note write (`Git::notes_modify`) goes through a private
+`refs/notes/scratch/<pid>-<n>` copy and a compare-and-swap of the notes ref,
+retried if it moved: `git notes` itself has no old-value check, and
+`dashboard relaunch` writes beside the player.
+
+```
 ```
 
 Git config: the director clone carries `dashboard.home`; the hub carries
@@ -163,6 +174,8 @@ hidden = false                   # true: left out of `status` (phase list + mile
 [limits]
 max_review_rounds = 2            # default 2
 max_contest_rounds = 2           # default 2: worker contests per task (spec §18)
+max_relaunches = 2               # default 2: `dashboard relaunch`es of a task's worker, and
+                                 # apart of its task agent, since that session's last progress
 
 [limits.strikes]                 # each defaults to 2 (spec §10)
 history = 2
@@ -311,7 +324,10 @@ ignored — no `deny_unknown_fields` anywhere.
   session with the same clone and prompt file; `--agent` restarts the task
   agent instead, with a fresh prompt for the task's current step. There is
   no automatic relaunch (see Decisions below); a dead session just shows up
-  in `status` and as a `session_died` / `agent_died` event.
+  in `status` and as a `session_died` / `agent_died` event. Capped at
+  `[limits] max_relaunches` per session since its last progress: one more
+  is refused (exit 1) and escalates the task instead. `status` shows
+  `relaunched n/max` beside a session's liveness.
 - `dashboard ask <slug> <question…>` — pastes the director's question into
   the task agent's session; the answer comes back as an `agent_report`
   event.
@@ -415,6 +431,26 @@ back here):
   ask`) when it shows the brief or tests are wrong, and to the operator,
   who can answer in the session (ideally: turn it into a `contest:` or
   `block:`, which the hub can then answer).
+- **Relaunch cap**: nothing else stops a director relaunching a failing
+  agent forever, so `[limits] max_relaunches` (default 2) caps it, with
+  the worker and the task agent counted apart (different sessions,
+  different failure modes; the agent's relaunches say nothing about the
+  worker's). Each `relaunch` notes `{agent, reports, at}` on the task tip
+  (`refs/notes/dashboard-relaunches`, `records::record_relaunch`, after
+  the launch succeeds), so the count is hub state, survives a player
+  restart and is derived (`TaskState::relaunches`, `AgentState::
+  relaunches`). Only relaunches since the session's last progress count:
+  any commit on task/<slug> moves the tip, so a note on an older tip no
+  longer counts (for the worker, its finish, block or contest; also a
+  send-back or sync, which hand it a new round); a task agent's note counts
+  only while the reports on the tip are as many as when it was taken, so a
+  collected report resets it too. Past the cap, `check_relaunch_limit`
+  refuses and records an ordinary escalation (`refs/dashboard/escalated/
+  <slug>` at the tip, cause `relaunch limit (N) reached: the <worker|task
+  agent> ...`): `state` derives `escalated`, `status` shows it and the
+  player emits `escalated` on its next tick. It resolves like any
+  escalation, by a retire; an escalated task's task agent past its cap
+  is just refused. The session-health hints mention the cap.
 - **Stale screens** (any agent): each tick, a live session that
   `owes_work` has its pane captured (`Sessions::capture`, `tmux
   capture-pane -p -t =<name>:`) and hashed (`pane_hash`, trailing

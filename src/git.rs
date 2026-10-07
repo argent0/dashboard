@@ -259,11 +259,50 @@ impl Git {
 
     /// Force-overwrites the note on `sha` under `notes_ref` with `content`.
     pub fn notes_add(&self, notes_ref: &str, sha: &str, content: &str) -> Result<(), GitError> {
-        self.run_with_stdin(
-            &["notes", "--ref", notes_ref, "add", "-f", "-F", "-", sha],
-            content,
-        )
-        .map(|_| ())
+        self.notes_modify(notes_ref, sha, |_| content.to_string())
+    }
+
+    /// Sets the note on `sha` under `notes_ref` to `f(its current text)`,
+    /// safe against another process writing the same notes ref: `git notes`
+    /// moves the ref without an old-value check, so the note is written on a
+    /// private copy of the ref and swapped in with one (`update_ref_cas`),
+    /// re-reading and retrying if the ref moved meanwhile. The player and
+    /// `dashboard relaunch` both write `refs/notes/dashboard-escalations`.
+    pub fn notes_modify(
+        &self,
+        notes_ref: &str,
+        sha: &str,
+        mut f: impl FnMut(Option<String>) -> String,
+    ) -> Result<(), GitError> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let scratch = format!("refs/notes/scratch/{}-{seq}", std::process::id());
+        let mut last = None;
+        for _ in 0..20 {
+            let old = self.rev_parse(notes_ref);
+            match &old {
+                Some(old) => self.update_ref(&scratch, old)?,
+                None => {
+                    let _ = self.delete_ref(&scratch);
+                }
+            }
+            let content = f(self.notes_show(&scratch, sha));
+            let written = self
+                .run_with_stdin(
+                    &["notes", "--ref", &scratch, "add", "-f", "-F", "-", sha],
+                    &content,
+                )
+                .and_then(|_| {
+                    let new = self.rev_parse(&scratch).unwrap_or_default();
+                    self.update_ref_cas(notes_ref, &new, old.as_deref().unwrap_or(""))
+                });
+            let _ = self.delete_ref(&scratch);
+            match written {
+                Ok(()) => return Ok(()),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.expect("at least one attempt"))
     }
 
     /// Runs `git <args>` with extra environment variables set (e.g. explicit
@@ -485,6 +524,34 @@ mod tests {
             git.notes_show("refs/notes/dashboard", &sha).as_deref(),
             Some("updated note")
         );
+    }
+
+    #[test]
+    fn notes_modify_never_loses_a_concurrent_write() {
+        let (dir, git) = init_repo();
+        let sha = commit_file(&dir, &git, "a.txt", "1\n", "first");
+        let path = dir.path().to_path_buf();
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                let path = path.clone();
+                let sha = sha.clone();
+                std::thread::spawn(move || {
+                    let git = Git::new(&path);
+                    for i in 0..5 {
+                        git.notes_modify("refs/notes/dashboard", &sha, |old| {
+                            format!("{}{w}.{i};", old.unwrap_or_default())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        let text = git.notes_show("refs/notes/dashboard", &sha).unwrap();
+        assert_eq!(text.matches(';').count(), 20, "{text}");
+        assert!(git.for_each_ref("refs/notes/scratch/*").is_empty());
     }
 
     #[test]

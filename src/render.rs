@@ -301,7 +301,14 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
         for t in &ready {
             let agent = match &t.agent {
                 Some(a) if a.alive => style("  (task agent posting)", &[c::DIM], color),
-                Some(_) => style("  (task agent dead)", &[c::RED], color),
+                Some(a) => style(
+                    &format!(
+                        "  (task agent dead{})",
+                        relaunched(a.relaunches, state.roadmap.limits.max_relaunches)
+                    ),
+                    &[c::RED],
+                    color,
+                ),
                 None => String::new(),
             };
             out.push(format!(
@@ -773,13 +780,15 @@ fn render_in_flight(
         }
     }
 
+    let max_relaunches = state.roadmap.limits.max_relaunches;
     let session = crate::state::tmux_session_name(&state.project, &t.slug);
     let alive = if t.alive {
         style("alive", &[c::GREEN], color)
     } else {
         style("dead", &[c::RED], color)
     };
-    out.push(format!("  session: {session} ({alive})"));
+    let relaunches = relaunched(t.relaunches, max_relaunches);
+    out.push(format!("  session: {session} ({alive}{relaunches})"));
 
     if let Some(agent) = &t.agent {
         let session =
@@ -794,7 +803,20 @@ fn render_in_flight(
             .as_ref()
             .map(|r| format!(", reported: {}", r.verdict))
             .unwrap_or_default();
-        out.push(format!("  task agent: {session} ({alive}){verdict}"));
+        let relaunches = relaunched(agent.relaunches, max_relaunches);
+        out.push(format!(
+            "  task agent: {session} ({alive}{relaunches}){verdict}"
+        ));
+    }
+}
+
+/// ", relaunched n/max" once a session was relaunched since its last
+/// progress, else nothing.
+fn relaunched(n: u32, max: u32) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        format!(", relaunched {n}/{max}")
     }
 }
 
@@ -852,6 +874,7 @@ mod tests {
             limits: Limits {
                 max_review_rounds: 2,
                 max_contest_rounds: 2,
+                max_relaunches: 2,
                 strikes: StrikeLimits::default(),
             },
             player: Default::default(),
@@ -881,6 +904,7 @@ mod tests {
             post_mortem: None,
             suite: None,
             alive: false,
+            relaunches: 0,
             spike: None,
             flaky: 0,
             impure: 0,
@@ -1056,11 +1080,13 @@ mod tests {
                 text: String::new(),
                 at: 0,
             }),
+            relaunches: 0,
         });
         let mut r = task("b", "p1", Status::Ready);
         r.agent = Some(crate::state::AgentState {
             alive: true,
             report: None,
+            relaunches: 0,
         });
         let out = render_plain(&hub_state(vec![t, r]));
         assert!(
@@ -1068,6 +1094,33 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("(task agent posting)"), "{out}");
+    }
+
+    #[test]
+    fn sessions_show_their_relaunch_count() {
+        let mut t = task("a", "p1", Status::InProgress);
+        t.relaunches = 1;
+        t.agent = Some(crate::state::AgentState {
+            alive: false,
+            report: None,
+            relaunches: 2,
+        });
+        let mut r = task("b", "p1", Status::Ready);
+        r.agent = Some(crate::state::AgentState {
+            alive: false,
+            report: None,
+            relaunches: 1,
+        });
+        let out = render_plain(&hub_state(vec![t, r]));
+        assert!(
+            out.contains("session: dash-widget-a (dead, relaunched 1/2)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("task agent: dash-widget-a_agent (dead, relaunched 2/2)"),
+            "{out}"
+        );
+        assert!(out.contains("(task agent dead, relaunched 1/2)"), "{out}");
     }
 
     #[test]

@@ -93,6 +93,9 @@ pub struct TaskState {
     /// it in the in-flight block even once the task has moved past `posted`
     /// (the session persists across send-backs, spec §9).
     pub alive: bool,
+    /// `dashboard relaunch`es of the worker since its last progress
+    /// (`records::relaunch_count`), against `[limits] max_relaunches`.
+    pub relaunches: u32,
     /// Only for `kind = "spike"` tasks.
     pub spike: Option<SpikeState>,
     /// How many flake-ledger entries this task has.
@@ -110,6 +113,8 @@ pub struct TaskState {
 pub struct AgentState {
     pub alive: bool,
     pub report: Option<records::AgentReport>,
+    /// Its relaunches since its last progress, counted apart from the worker's.
+    pub relaunches: u32,
 }
 
 /// A spike's progress, read from the hub (spec §14).
@@ -275,6 +280,7 @@ fn derive_task(
     let agent = records::agent_launched(hub, slug).then(|| AgentState {
         alive: live_session(&agent_key(slug)),
         report: None,
+        relaunches: 0,
     });
 
     let tip = task_tip(hub, slug, accepted, retired)
@@ -393,8 +399,10 @@ fn derive_task(
 
     let agent = agent.map(|a| AgentState {
         report: records::agent_reports(hub, &tip).pop(),
+        relaunches: records::relaunch_count(hub, &tip, true),
         ..a
     });
+    let relaunches = records::relaunch_count(hub, &tip, false);
     Ok(TaskState {
         slug: slug.to_string(),
         config: task_config,
@@ -408,6 +416,7 @@ fn derive_task(
         post_mortem,
         suite,
         alive,
+        relaunches,
         spike,
         flaky,
         impure,

@@ -620,6 +620,88 @@ fn ask_relaunch_and_death_of_a_task_agent() {
 }
 
 #[test]
+fn worker_and_task_agent_relaunches_are_capped_apart() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan(&repo, &mut player);
+    agent_post(&repo);
+    let report = player.tick().expect("post tick");
+    assert_eq!(report.launched, vec!["s".to_string()], "{report}");
+    let counts = || {
+        let t = task(&hub, "s");
+        (t.relaunches, t.agent.map(|a| a.relaunches).unwrap_or(99))
+    };
+
+    for n in 1..=2 {
+        player.sessions_mut().alive.remove("s_agent");
+        open_player(&home)
+            .relaunch_agent("s")
+            .expect("relaunch --agent");
+        assert_eq!(counts(), (0, n));
+    }
+    // The worker's own count is untouched by its task agent's.
+    player.sessions_mut().alive.remove("s");
+    player.relaunch("s").expect("worker relaunch");
+    assert_eq!(counts(), (1, 2));
+
+    let err = player
+        .relaunch_agent("s")
+        .expect_err("a third task agent relaunch");
+    assert!(
+        err.contains("task agent") && err.contains("max_relaunches"),
+        "{err}"
+    );
+    let t = task(&hub, "s");
+    assert_eq!(t.status, Status::Escalated);
+    assert!(
+        t.escalation
+            .as_deref()
+            .is_some_and(|c| c.contains("relaunch limit (2) reached: the task agent")),
+        "{:?}",
+        t.escalation
+    );
+    player.tick().expect("tick");
+    assert!(
+        events::read_all(&home)
+            .iter()
+            .any(|e| e.kind == EventKind::Escalated && e.message.contains("relaunch limit")),
+        "{:?}",
+        events::read_all(&home)
+    );
+    // Already escalated, another try is refused without a new escalation.
+    let err = player.relaunch_agent("s").expect_err("still capped");
+    assert!(err.contains("already escalated"), "{err}");
+}
+
+#[test]
+fn a_collected_report_starts_the_task_agents_relaunch_count_over() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan_post_finish(&repo, &mut player);
+    let agent_relaunches = || task(&hub, "s").agent.map(|a| a.relaunches).unwrap();
+
+    for _ in 0..2 {
+        player.sessions_mut().alive.remove("s_agent");
+        player.relaunch_agent("s").expect("relaunch --agent");
+    }
+    assert_eq!(agent_relaunches(), 2);
+
+    std::fs::write(report_file(&repo), "slug: s\nverdict: unsure\nwhy: hm.\n").unwrap();
+    let report = player.tick().expect("tick");
+    assert_eq!(report.agent_reports.len(), 1, "{report}");
+    assert_eq!(agent_relaunches(), 0, "a report is progress");
+
+    player.sessions_mut().alive.remove("s_agent");
+    player.relaunch_agent("s").expect("relaunch after progress");
+    assert_eq!(agent_relaunches(), 1);
+    assert_eq!(task(&hub, "s").status, Status::Tested);
+}
+
+#[test]
 fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
     let repo = repo_with_task_agents();
     let (_home_dir, home) = init_hub(&repo);

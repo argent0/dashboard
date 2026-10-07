@@ -77,6 +77,10 @@ pub struct Limits {
     /// How many times a worker may contest the tests it must pass
     /// (spec §18); one more escalates.
     pub max_contest_rounds: u32,
+    /// How many times `dashboard relaunch` may restart a task's worker, and
+    /// separately its task agent, since that session last made progress;
+    /// one more escalates.
+    pub max_relaunches: u32,
     pub strikes: StrikeLimits,
 }
 
@@ -85,6 +89,7 @@ impl Default for Limits {
         Self {
             max_review_rounds: 2,
             max_contest_rounds: 2,
+            max_relaunches: 2,
             strikes: StrikeLimits::default(),
         }
     }
@@ -801,6 +806,7 @@ mod tests {
         assert!(cfg.docs_paths.is_empty());
         assert_eq!(cfg.limits.max_review_rounds, 2);
         assert_eq!(cfg.limits.max_contest_rounds, 2);
+        assert_eq!(cfg.limits.max_relaunches, 2);
         assert_eq!(cfg.limits.strikes.history, 2);
         assert_eq!(cfg.limits.strikes.suite, 2);
         assert_eq!(
@@ -823,6 +829,7 @@ mod tests {
 
             [limits]
             max_review_rounds = 3
+            max_relaunches = 4
 
             [limits.strikes]
             suite = 5
@@ -839,6 +846,7 @@ mod tests {
         assert_eq!(cfg.phases[0].id, "p1");
         assert_eq!(cfg.phases[0].title.as_deref(), Some("Phase One"));
         assert_eq!(cfg.limits.max_review_rounds, 3);
+        assert_eq!(cfg.limits.max_relaunches, 4);
         assert_eq!(cfg.limits.strikes.suite, 5);
         assert_eq!(cfg.limits.strikes.pins, 1);
         // Untouched strike reasons keep their default.

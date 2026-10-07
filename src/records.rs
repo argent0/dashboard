@@ -482,6 +482,63 @@ pub fn escalation(hub: &Git, slug: &str) -> Option<EscalationRecord> {
 }
 
 // --------------------------------------------------------------------------
+// Relaunches: refs/notes/dashboard-relaunches
+// --------------------------------------------------------------------------
+
+const RELAUNCHES_NOTES_REF: &str = "refs/notes/dashboard-relaunches";
+
+/// One `dashboard relaunch`, noted on the task tip it happened at: a commit
+/// on the task branch is progress, so a moved tip starts both counts over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelaunchRecord {
+    /// The task agent's session (`--agent`), else the worker's.
+    #[serde(default)]
+    pub agent: bool,
+    /// Task agent reports noted on the tip at the time: a report collected
+    /// since is progress too, so only records matching the current count
+    /// count toward the task agent's limit.
+    #[serde(default)]
+    pub reports: usize,
+    #[serde(default)]
+    pub at: u64,
+}
+
+fn relaunch_records(hub: &Git, tip: &str) -> Vec<RelaunchRecord> {
+    hub.notes_show(RELAUNCHES_NOTES_REF, tip)
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Relaunches of the worker (or, with `agent`, the task agent) since that
+/// session's last progress: noted on `tip` and, for the task agent, with no
+/// report collected since.
+pub fn relaunch_count(hub: &Git, tip: &str, agent: bool) -> u32 {
+    let reports = agent_reports(hub, tip).len();
+    relaunch_records(hub, tip)
+        .iter()
+        .filter(|r| r.agent == agent && (!agent || r.reports == reports))
+        .count() as u32
+}
+
+/// Notes one relaunch on `tip`. `dashboard relaunch` runs beside the
+/// player, so the append is a `notes_modify` (a re-read on a race).
+pub fn record_relaunch(hub: &Git, tip: &str, agent: bool) -> Result<(), String> {
+    let record = RelaunchRecord {
+        agent,
+        reports: agent_reports(hub, tip).len(),
+        at: now_unix(),
+    };
+    hub.notes_modify(RELAUNCHES_NOTES_REF, tip, |old| {
+        let mut all: Vec<RelaunchRecord> = old
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        all.push(record.clone());
+        serde_json::to_string(&all).unwrap_or_default()
+    })
+    .map_err(|e| e.to_string())
+}
+
+// --------------------------------------------------------------------------
 // Merge conflicts: refs/notes/dashboard-conflicts (spec §11)
 // --------------------------------------------------------------------------
 
