@@ -27,6 +27,7 @@ use crate::records::{self, Actor, RejectionRecord, Transition};
 use crate::sandbox::Sandbox;
 use crate::spike;
 use crate::state::{self, Status};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Write;
@@ -57,15 +58,17 @@ pub trait Sessions {
 /// A `Sessions` that records every `launch`/`send`/`kill` call so tests can
 /// assert on them instead of touching tmux, with a configurable `alive` set
 /// so a test can mark a session dead again (or never alive at all) to drive
-/// the relaunch/no-relaunch paths. `launch` inserts the slug into `alive`;
-/// `kill` removes it — a test after that point can remove it directly too,
-/// to simulate a session dying on its own.
+/// the relaunch/no-relaunch paths. `launch` inserts the slug into `alive`
+/// (unless it's in `stillborn`: a session that dies before any tick sees
+/// it); `kill` removes it — a test after that point can remove it directly
+/// too, to simulate a session dying on its own.
 #[derive(Debug, Default)]
 pub struct NullSessions {
     pub sent: Vec<(String, String)>,
     pub killed: Vec<String>,
     pub launched: Vec<LaunchCall>,
     pub alive: BTreeSet<String>,
+    pub stillborn: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +97,9 @@ impl Sessions for NullSessions {
             agent_cmd: agent_cmd.to_string(),
             prompt_file: prompt_file.to_path_buf(),
         });
-        self.alive.insert(slug.to_string());
+        if !self.stillborn.contains(slug) {
+            self.alive.insert(slug.to_string());
+        }
         Ok(())
     }
 
@@ -374,11 +379,17 @@ pub struct Player<S: Sessions> {
     project: String,
     runner: checks::Runner,
     sessions: S,
-    /// Every slug's status and session-liveness as of the end of the last
-    /// tick that ran `emit_events`, persisted to `home.player_state()` so a
-    /// restart doesn't re-emit events for statuses the director has already
-    /// been told about (step 7).
-    last: BTreeMap<String, (Status, bool)>,
+    /// Every slug's status as of the end of the last tick that ran
+    /// `emit_events`, persisted to `home.player_state()` so a restart
+    /// doesn't re-emit events for statuses the director has already been
+    /// told about (step 7).
+    last: BTreeMap<String, Status>,
+    /// Per session key, the launch id (`launch_id`) whose death was already
+    /// reported (or, on a first run, found dead), persisted alongside
+    /// `last`. Death is level-triggered: a watched session that's dead
+    /// under any other launch id is reported, so one that died before any
+    /// tick saw it alive still is, and a relaunch re-arms it.
+    deaths_told: BTreeMap<String, String>,
     /// True until the first `emit_events` call completes: with no state file
     /// on disk at `open` time, that first call only initializes `last` (spec:
     /// "The very first run with no state file initializes silently, without
@@ -420,7 +431,7 @@ impl<S: Sessions> Player<S> {
             .config_get("dashboard.project")
             .ok_or_else(|| "hub is missing dashboard.project — run `dashboard init`".to_string())?;
         let runner = checks::Runner::new(&home);
-        let (last, first_run) = load_player_state(&home);
+        let (saved, first_run) = load_player_state(&home);
         Ok(Self {
             home,
             hub,
@@ -428,7 +439,8 @@ impl<S: Sessions> Player<S> {
             project,
             runner,
             sessions,
-            last,
+            last: saved.status,
+            deaths_told: saved.deaths_told,
             first_run,
             agent_rebase_told: BTreeMap::new(),
             sandbox_preflighted: None,
@@ -639,10 +651,12 @@ impl<S: Sessions> Player<S> {
     // ---- events (spec's "the director must not poll"; step 7) ----
 
     /// Writes the heartbeat, emits `DirectorRejected`/`PlayerError` straight
-    /// from this tick's report, then diffs every task's (status, session
-    /// alive) against `self.last` to emit `Tested`/`Escalated`/`Ready`/
-    /// `Accepted`/`Retired`/`SessionDied`. `self.last` (and the "first run"
-    /// silence) is what makes this idempotent across player restarts.
+    /// from this tick's report, then diffs every task's status against
+    /// `self.last` to emit `Tested`/`Escalated`/`Ready`/`Accepted`/
+    /// `Retired`, and reports each dead session once per launch
+    /// (`SessionDied`/`AgentDied`, `report_death`). The persisted state (and
+    /// the "first run" silence) is what makes this idempotent across player
+    /// restarts.
     fn emit_events(&mut self, report: &TickReport) -> Result<(), String> {
         events::write_heartbeat(&self.home)?;
 
@@ -692,11 +706,10 @@ impl<S: Sessions> Player<S> {
         }
 
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        let mut next: BTreeMap<String, (Status, bool)> = BTreeMap::new();
+        let mut next: BTreeMap<String, Status> = BTreeMap::new();
         for task in &hub_state.tasks {
-            let alive = self.sessions.alive(&task.slug);
             let prev = self.last.get(&task.slug).copied();
-            next.insert(task.slug.clone(), (task.status, alive));
+            next.insert(task.slug.clone(), task.status);
 
             // A task agent's liveness is tracked under its own key.
             let finished = matches!(
@@ -704,49 +717,98 @@ impl<S: Sessions> Player<S> {
                 Status::Accepted | Status::Retired | Status::Explored
             );
             if let Some(agent) = &task.agent {
-                let key = state::agent_key(&task.slug);
-                let agent_was_alive = matches!(self.last.get(&key), Some((_, true)));
-                next.insert(key, (task.status, agent.alive));
-                if !self.first_run && agent_was_alive && !agent.alive && !finished {
-                    events::append(
-                        &self.home,
-                        EventKind::AgentDied,
-                        Some(&task.slug),
-                        &format!("task/{}'s task agent session died", task.slug),
-                    )?;
-                }
+                self.report_death(
+                    &state::agent_key(&task.slug),
+                    agent.alive,
+                    !finished,
+                    EventKind::AgentDied,
+                    &task.slug,
+                    &format!("task/{}'s task agent session died", task.slug),
+                )?;
             }
+
+            // Pins are taken at launch: without them there's no worker yet.
+            let still_in_flight = matches!(
+                task.status,
+                Status::Posted | Status::InProgress | Status::InRevision | Status::Contested
+            );
+            self.report_death(
+                &task.slug,
+                self.sessions.alive(&task.slug),
+                still_in_flight && records::has_pins(&self.hub, &task.slug),
+                EventKind::SessionDied,
+                &task.slug,
+                &format!("task/{}'s worker session died", task.slug),
+            )?;
 
             if self.first_run {
                 continue;
             }
 
             let managed = state::task_agent_managed(&hub_state.roadmap, &task.config);
-            if prev.map(|(s, _)| s) != Some(task.status) {
+            if prev != Some(task.status) {
                 if let Some((kind, message)) = status_event(task, managed) {
                     events::append(&self.home, kind, Some(&task.slug), &message)?;
                 }
-            }
-
-            let session_just_died = matches!(prev, Some((_, true))) && !alive;
-            let still_in_flight = matches!(
-                task.status,
-                Status::Posted | Status::InProgress | Status::InRevision | Status::Contested
-            );
-            if session_just_died && still_in_flight {
-                events::append(
-                    &self.home,
-                    EventKind::SessionDied,
-                    Some(&task.slug),
-                    &format!("task/{}'s worker session died", task.slug),
-                )?;
             }
         }
 
         self.last = next;
         self.first_run = false;
-        save_player_state(&self.home, &self.last)?;
+        save_player_state(
+            &self.home,
+            &PlayerState {
+                status: self.last.clone(),
+                deaths_told: self.deaths_told.clone(),
+            },
+        )?;
         Ok(())
+    }
+
+    /// Reports session `key` dead once per launch: when it's `watched` (it
+    /// was launched and should still be running), dead, and its current
+    /// launch id isn't the one already told. Seen alive, it's re-armed. A
+    /// first run records what it finds without emitting. A kill by
+    /// accept/retire is never reported: the task is no longer watched.
+    fn report_death(
+        &mut self,
+        key: &str,
+        alive: bool,
+        watched: bool,
+        kind: EventKind,
+        slug: &str,
+        message: &str,
+    ) -> Result<(), String> {
+        if alive {
+            self.deaths_told.remove(key);
+            return Ok(());
+        }
+        if !watched {
+            return Ok(());
+        }
+        let launch = launch_id(&self.home, key);
+        if self.deaths_told.get(key) == Some(&launch) {
+            return Ok(());
+        }
+        if !self.first_run {
+            events::append(&self.home, kind, Some(slug), message)?;
+        }
+        self.deaths_told.insert(key.to_string(), launch);
+        Ok(())
+    }
+
+    /// Every session launch goes through here: on success it records a
+    /// fresh launch id for `key`, which re-arms death reporting for it —
+    /// on disk, since `dashboard relaunch` runs in another process.
+    fn launch_session(
+        &mut self,
+        key: &str,
+        dir: &Path,
+        cmd: &str,
+        prompt_file: &Path,
+    ) -> Result<(), String> {
+        self.sessions.launch(key, dir, cmd, prompt_file)?;
+        record_launch(&self.home, key)
     }
 
     // ---- fetch ----
@@ -2965,13 +3027,12 @@ impl<S: Sessions> Player<S> {
         }
 
         match self.agent_cmd_at_main() {
-            Ok(agent_cmd) => match self
-                .sessions
-                .launch(slug, &clone_dir, &agent_cmd, &prompt_file)
-            {
-                Ok(()) => report.launched.push(slug.to_string()),
-                Err(e) => report.errors.push(format!("launch: task/{slug}: {e}")),
-            },
+            Ok(agent_cmd) => {
+                match self.launch_session(slug, &clone_dir, &agent_cmd, &prompt_file) {
+                    Ok(()) => report.launched.push(slug.to_string()),
+                    Err(e) => report.errors.push(format!("launch: task/{slug}: {e}")),
+                }
+            }
             Err(e) => report.errors.push(format!("launch: task/{slug}: {e}")),
         }
         Ok(())
@@ -3240,8 +3301,7 @@ impl<S: Sessions> Player<S> {
         }
 
         let agent_cmd = self.agent_cmd_at_main()?;
-        self.sessions
-            .launch(slug, &clone_dir, &agent_cmd, &prompt_file)
+        self.launch_session(slug, &clone_dir, &agent_cmd, &prompt_file)
     }
 
     // ---- worker import (spec §5, §7, §9) ----
@@ -3967,7 +4027,7 @@ impl<S: Sessions> Player<S> {
             report.errors.push(format!("task agent: task/{slug}: {e}"));
             return Ok(());
         }
-        match self.sessions.launch(
+        match self.launch_session(
             &state::agent_key(slug),
             &dir,
             &roadmap.player.task_agent_cmd,
@@ -4190,7 +4250,7 @@ impl<S: Sessions> Player<S> {
         if step != AgentStep::Post && step != AgentStep::Wait {
             records::set_agent_asked(&self.hub, slug, &task.tip)?;
         }
-        self.sessions.launch(
+        self.launch_session(
             &key,
             &dir,
             &hub_state.roadmap.player.task_agent_cmd,
@@ -4310,21 +4370,69 @@ impl<S: Sessions> Player<S> {
 // Player state persistence (step 7: `home.root/player-state.json`)
 // --------------------------------------------------------------------------
 
-/// Loads `last` from `home.player_state()`. The bool is `first_run`: true
-/// when no file was found at all (as opposed to a file that happens to parse
-/// to an empty map), which is the "very first run" spec's event emission
-/// stays silent for.
-fn load_player_state(home: &Home) -> (BTreeMap<String, (Status, bool)>, bool) {
-    match std::fs::read_to_string(home.player_state()) {
-        Ok(text) => (serde_json::from_str(&text).unwrap_or_default(), false),
-        Err(_) => (BTreeMap::new(), true),
-    }
+/// `player-state.json`: what `emit_events` has already told the director.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PlayerState {
+    /// `Player::last`.
+    #[serde(default)]
+    status: BTreeMap<String, Status>,
+    /// `Player::deaths_told`.
+    #[serde(default)]
+    deaths_told: BTreeMap<String, String>,
 }
 
-fn save_player_state(home: &Home, last: &BTreeMap<String, (Status, bool)>) -> Result<(), String> {
+/// Loads the state from `home.player_state()`. The bool is `first_run`: true
+/// when no file was found at all (as opposed to a file that happens to parse
+/// to nothing), which is the "very first run" spec's event emission stays
+/// silent for. The older format, a bare map of slug to (status, session
+/// alive), is migrated: a session it saw dead counts as already told.
+fn load_player_state(home: &Home) -> (PlayerState, bool) {
+    let Ok(text) = std::fs::read_to_string(home.player_state()) else {
+        return (PlayerState::default(), true);
+    };
+    if let Ok(old) = serde_json::from_str::<BTreeMap<String, (Status, bool)>>(&text) {
+        let state = PlayerState {
+            deaths_told: old
+                .iter()
+                .filter(|(_, (_, alive))| !alive)
+                .map(|(key, _)| (key.clone(), String::new()))
+                .collect(),
+            status: old
+                .into_iter()
+                .map(|(key, (status, _))| (key, status))
+                .collect(),
+        };
+        return (state, false);
+    }
+    (serde_json::from_str(&text).unwrap_or_default(), false)
+}
+
+fn save_player_state(home: &Home, state: &PlayerState) -> Result<(), String> {
     let path = home.player_state();
-    let json = serde_json::to_string(last).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string(state).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Session `key`'s latest launch id (`home.launches()`), or "" when none
+/// was recorded (a session launched before launch ids existed).
+fn launch_id(home: &Home, key: &str) -> String {
+    std::fs::read_to_string(home.launches().join(key))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Gives `key` a new launch id: the time and this process's pid, unique
+/// enough for two launches never to share one.
+fn record_launch(home: &Home, key: &str) -> Result<(), String> {
+    let dir = home.launches();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(key);
+    std::fs::write(&path, format!("{nanos}-{}\n", std::process::id()))
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// The event a task's *new* status is worth telling the director about, and

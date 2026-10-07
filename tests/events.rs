@@ -427,6 +427,83 @@ fn killing_a_session_via_accept_does_not_emit_session_died() {
     );
 }
 
+#[test]
+fn a_session_dead_before_any_tick_saw_it_is_reported_once_per_launch() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+
+    plan(&repo, &mut player, "sb", "title = \"Sb\"\nphase = \"p1\"\n");
+    // The worker's command crashes at startup: dead by the end of the very
+    // tick that launched it, never once seen alive.
+    player.sessions_mut().stillborn.insert("sb".to_string());
+    post(&repo, &mut player, "sb");
+    assert_eq!(player.sessions().launched.len(), 1);
+    assert_eq!(events_for(&home, "sb", EventKind::SessionDied).len(), 1);
+
+    player.tick().expect("tick");
+    assert_eq!(
+        events_for(&home, "sb", EventKind::SessionDied).len(),
+        1,
+        "the same death isn't reported again"
+    );
+    drop(player);
+    let mut player = open_player(&home);
+    player.tick().expect("tick after a restart");
+    assert_eq!(
+        events_for(&home, "sb", EventKind::SessionDied).len(),
+        1,
+        "nor after a player restart"
+    );
+
+    // `dashboard relaunch` runs in its own process: its session dies again
+    // before the long-running player ever sees it alive.
+    open_player(&home).relaunch("sb").expect("relaunch");
+    player.tick().expect("tick after the relaunch");
+    assert_eq!(
+        events_for(&home, "sb", EventKind::SessionDied).len(),
+        2,
+        "a relaunch that dies is a new death"
+    );
+    player.tick().expect("tick");
+    assert_eq!(events_for(&home, "sb", EventKind::SessionDied).len(), 2);
+}
+
+#[test]
+fn a_player_state_in_the_old_format_is_migrated() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(&repo, &mut player, "a", "title = \"A\"\nphase = \"p1\"\n");
+    post(&repo, &mut player, "a");
+    plan(&repo, &mut player, "b", "title = \"B\"\nphase = \"p1\"\n");
+    post(&repo, &mut player, "b");
+    drop(player);
+
+    // Written by a player from before launch ids: `a` last seen alive, `b`
+    // already dead (and so already reported, or never seen alive).
+    std::fs::remove_dir_all(home.launches()).expect("remove launch ids");
+    std::fs::write(
+        home.player_state(),
+        r#"{"a":["in_progress",true],"b":["posted",false]}"#,
+    )
+    .expect("write old player state");
+    let before = events::read_all(&home).len();
+    let mut player = open_player(&home);
+    player.tick().expect("tick");
+    assert_eq!(events_for(&home, "a", EventKind::SessionDied).len(), 1);
+    assert!(events_for(&home, "b", EventKind::SessionDied).is_empty());
+    let kinds: Vec<EventKind> = events::read_all(&home)[before..]
+        .iter()
+        .map(|e| e.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![EventKind::SessionDied],
+        "statuses carry over: nothing else is re-emitted"
+    );
+}
+
 // --------------------------------------------------------------------------
 // `dashboard wait` (the CLI): no director/hub needed — it only reads/writes
 // plain files under `home.root`.

@@ -619,6 +619,44 @@ fn ask_relaunch_and_death_of_a_task_agent() {
     assert!(player.sessions().alive("s_agent"));
 }
 
+#[test]
+fn a_task_agent_dead_before_any_tick_saw_it_is_reported_once_per_launch() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    let died = || {
+        events::read_all(&home)
+            .into_iter()
+            .filter(|e| e.kind == EventKind::AgentDied)
+            .count()
+    };
+
+    // Past the first run, which stays silent about whatever it finds.
+    player.tick().expect("first tick");
+    // `task_agent_cmd` crashes at startup: dead by the end of the tick that
+    // launched it.
+    player
+        .sessions_mut()
+        .stillborn
+        .insert("s_agent".to_string());
+    plan(&repo, &mut player);
+    assert!(task(&Git::new(home.hub()), "s").agent.is_some());
+    assert_eq!(died(), 1);
+    player.tick().expect("tick");
+    assert_eq!(died(), 1, "the same death isn't reported again");
+    drop(player);
+    let mut player = open_player(&home);
+    player.tick().expect("tick after a restart");
+    assert_eq!(died(), 1, "nor after a player restart");
+
+    // `dashboard relaunch --agent`, from its own process, dies again.
+    open_player(&home).relaunch_agent("s").expect("relaunch");
+    player.tick().expect("tick after the relaunch");
+    assert_eq!(died(), 2, "a relaunch that dies is a new death");
+    player.tick().expect("tick");
+    assert_eq!(died(), 2);
+}
+
 // --------------------------------------------------------------------------
 // Contests (spec §18)
 // --------------------------------------------------------------------------

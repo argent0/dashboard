@@ -54,6 +54,14 @@ impl Home {
         self.root.join("player-state.json")
     }
 
+    /// One file per session key (a worker's slug, or a task agent's
+    /// `<slug>_agent`) holding the id of its latest launch, written by
+    /// whichever process launched it (the player, or `dashboard relaunch`),
+    /// so the player can tell a new launch's death from one it reported.
+    pub fn launches(&self) -> PathBuf {
+        self.root.join("launches")
+    }
+
     /// Written every tick with the current unix time, so `dashboard wait`
     /// can tell the director when the player itself looks dead.
     pub fn heartbeat(&self) -> PathBuf {
@@ -188,6 +196,10 @@ mod tests {
         assert_eq!(
             home.player_state(),
             PathBuf::from("/data/dashboard/myproj/player-state.json")
+        );
+        assert_eq!(
+            home.launches(),
+            PathBuf::from("/data/dashboard/myproj/launches")
         );
         assert_eq!(
             home.heartbeat(),

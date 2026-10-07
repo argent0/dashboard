@@ -58,8 +58,12 @@ hub.git             bare repo — the only source of truth (spec §4)
 work/               the player's own scratch worktree for running checks
 events.jsonl        append-only, JSON per line — the director-event log
 director.cursor     the director's last-read event seq (dashboard wait)
-player-state.json   last-seen (status, session-alive) per slug, so a
-                     restarted player doesn't re-emit old events
+player-state.json   last-seen status per slug, and per session the launch
+                     id whose death was reported, so a restarted player
+                     doesn't re-emit old events (an older bare
+                     {slug: [status, alive]} map is migrated on load)
+launches/<key>      the latest launch id of a session (<slug>, or
+                     <slug>_agent), written by whoever launched it
 player.heartbeat     unix time of the last tick, so `wait` can tell the
                      player looks dead (missing or >30s old)
 ```
@@ -350,7 +354,12 @@ back here):
 - **No auto-relaunch**: a dead worker session is reported (`status`, a
   `session_died` event) but never restarted automatically. `dashboard
   relaunch <slug>` is the manual trigger, reusing the existing clone and
-  pins.
+  pins. Death is reported once per launch, not on an observed alive→dead
+  edge: a launched session (a worker with pins while in flight, a task
+  agent until its task is finished) that's dead under a launch id not yet
+  told is reported, so one that crashed before any tick saw it alive still
+  is. Every launch (`Player::launch_session`, including `relaunch` in its
+  own process) writes a fresh id to `launches/<key>`, re-arming it.
 - **`agent_cmd`**: `[player] agent_cmd` in `roadmap.toml`, default `claude
   --dangerously-skip-permissions`. Launched as `tmux new-session -d -s
   dash-<project>-<slug> -c <clone> sh -c '<agent_cmd> "$(cat
