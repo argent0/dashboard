@@ -3354,14 +3354,18 @@ impl<S: Sessions> Player<S> {
                 .hub
                 .run(&["merge-base", hub_tip, &incoming])
                 .unwrap_or_default();
+            // Only this task's own agent commits count, walked along the
+            // branch's first parents: a `main` merged in brings other tasks'
+            // task-agent commits with it, and those aren't this agent's.
             let rewrote_imported = base.is_empty()
                 || self
                     .hub
-                    .rev_list(&[&format!("{base}..{hub_tip}")])
+                    .rev_list(&["--first-parent", &format!("{base}..{hub_tip}")])
                     .iter()
                     .any(|c| {
-                        records::import_note(&self.hub, c)
-                            .is_some_and(|n| n.actor == Actor::TaskAgent)
+                        records::import_note(&self.hub, c).is_some_and(|n| {
+                            n.actor == Actor::TaskAgent && n.slug.as_deref() == Some(slug)
+                        })
                     });
             if rewrote_imported {
                 let msg = format!(

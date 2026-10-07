@@ -801,3 +801,68 @@ fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalat
     );
     assert_eq!(task(&hub, "s").status, Status::Escalated);
 }
+
+#[test]
+fn another_tasks_agent_commits_merged_in_from_main_still_ask_for_a_rebase() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan_post_finish(&repo, &mut player);
+
+    // `t` is planned and its task agent launched while `s` is still tested.
+    director_commit_on_branch(
+        repo.path(),
+        "task/t",
+        "tasks/t/task.toml",
+        "title = \"t\"\nphase = \"p1\"\n",
+        "plan: t",
+    );
+    let report = player.tick().expect("plan tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    let t_dir = paths::agent_clone(&repo.director_path(), "t");
+    assert!(t_dir.exists(), "t's task agent clone: {report}");
+
+    // Accepting `s` lands its task agent's post on main, and the player
+    // merges main into the not-yet-posted task/t under t's agent.
+    director_pull_task_branch(repo.path(), "s");
+    commit_empty(repo.path(), "accept: s");
+    let report = player.tick().expect("accept tick");
+    assert_eq!(task(&hub, "s").status, Status::Accepted, "{report}");
+    if !report.merges.iter().any(|m| m.starts_with("task/t:")) {
+        player.tick().expect("unblock tick");
+    }
+    let t_tip = hub.rev_parse("refs/heads/task/t").unwrap();
+    let main_tip = hub.rev_parse("refs/heads/main").unwrap();
+    assert!(
+        hub.is_ancestor(&main_tip, &t_tip),
+        "main merged into task/t"
+    );
+
+    // t's agent posts on the tip it was launched at: the hub moved under
+    // it, which asks for a rebase, not a `history` rejection.
+    ensure_identity(&t_dir);
+    write_file(&t_dir, "tasks/t/prompt.md", "make t.txt\n");
+    write_file(
+        &t_dir,
+        "tasks/t/task.toml",
+        "title = \"t\"\nphase = \"p1\"\n\n[check]\nname = \"t-check\"\ncmd = \"test -f t.txt\"\n",
+    );
+    write_file(
+        &t_dir,
+        "tests.d/t.toml",
+        "[[check]]\nname = \"t-check\"\ncmd = \"test -f t.txt\"\n",
+    );
+    commit(&t_dir, "post: t");
+    let report = player.tick().expect("tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert!(
+        player
+            .sessions()
+            .sent
+            .iter()
+            .any(|(k, m)| k == "t_agent" && m.contains("git rebase origin/task/t")),
+        "t's agent is asked to rebase"
+    );
+    assert!(task(&hub, "t").strikes.is_empty());
+}
