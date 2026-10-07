@@ -354,6 +354,10 @@ pub fn evaluate_finish(
             continue;
         }
         let on_base = runner.run_claim(&overlay, c);
+        if let Some(why) = on_base.impurity() {
+            failures.push(format!("claim {:?} on the base commit: {why}", c.name));
+            continue;
+        }
         if on_base.pass {
             failures.push(format!("claim {:?} is a spike claim but also passes on the base commit without your work: it proves nothing, so make it depend on what you built", c.name));
             continue;

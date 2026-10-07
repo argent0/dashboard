@@ -24,6 +24,7 @@ use crate::git::Git;
 use crate::paths::{self, Home};
 use crate::prompts::{self, Prompts};
 use crate::records::{self, Actor, RejectionRecord, Transition};
+use crate::sandbox::Sandbox;
 use crate::spike;
 use crate::state::{self, Status};
 use std::collections::{BTreeMap, BTreeSet};
@@ -373,6 +374,9 @@ pub struct Player<S: Sessions> {
     /// The last stale-base commit of each task agent the player told to
     /// rebase (`import_task_agent`), so it says so once, not every tick.
     agent_rebase_told: BTreeMap<String, String>,
+    /// The fingerprint of the last sandbox policy that passed its
+    /// preflight, so a tick re-runs it only when `[sandbox]` changes.
+    sandbox_preflighted: Option<String>,
 }
 
 impl<S: Sessions> Player<S> {
@@ -398,7 +402,30 @@ impl<S: Sessions> Player<S> {
             last,
             first_run,
             agent_rebase_told: BTreeMap::new(),
+            sandbox_preflighted: None,
         })
+    }
+
+    /// Reads `[sandbox]` from the hub's `main` and runs every check from
+    /// now on under it, after proving the jail holds on this host
+    /// (`Sandbox::preflight`) whenever the policy is new. On an error no
+    /// check may run: the caller must not tick. Returns the policy's
+    /// one-line description.
+    pub fn check_sandbox(&mut self) -> Result<String, String> {
+        let main_tip = self
+            .hub
+            .rev_parse("refs/heads/main")
+            .ok_or("hub has no main")?;
+        let sandbox = Sandbox::from_config(&self.roadmap_at(&main_tip)?.sandbox)?;
+        let fingerprint = sandbox.fingerprint();
+        if self.sandbox_preflighted.as_ref() != Some(&fingerprint) {
+            self.sandbox_preflighted = None;
+            sandbox.preflight(&self.home.root)?;
+            self.sandbox_preflighted = Some(fingerprint);
+        }
+        let description = sandbox.describe();
+        self.runner.set_sandbox(sandbox);
+        Ok(description)
     }
 
     /// Read access to the sessions backend, so tests using `NullSessions`
@@ -425,6 +452,7 @@ impl<S: Sessions> Player<S> {
     pub fn tick(&mut self) -> Result<TickReport, String> {
         let mut report = TickReport::default();
         self.fetch()?;
+        self.check_sandbox()?;
         self.import_main(&mut report)?;
         self.import_task_branches(&mut report)?;
         self.import_task_agents(&mut report)?;
@@ -1481,6 +1509,9 @@ impl<S: Sessions> Player<S> {
             .runner
             .run_task_check(candidate, slug)
             .map_err(|e| format!("post: task/{slug}: {e}"))?;
+        if let Some(why) = result.impurity() {
+            return Err(format!("post: task/{slug}: {why}"));
+        }
         if result.pass {
             return Err(format!(
                 "post: task/{slug}: task check already passes — it must fail at post"
@@ -1577,6 +1608,12 @@ impl<S: Sessions> Player<S> {
             let msg = format!(
                 "send-back: task/{slug}: send-back without evidence: the project suite still passes"
             );
+            return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
+        }
+        // A suite failing only because a test dirtied its worktree is no
+        // evidence against the worker's code.
+        if let Some(why) = suite.impurity() {
+            let msg = format!("send-back: task/{slug}: {why}");
             return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
 
@@ -2656,6 +2693,12 @@ impl<S: Sessions> Player<S> {
                 .runner
                 .run_task_check(tip, slug)
                 .map_err(|e| format!("launch: task/{slug}: {e}"))?;
+            if let Some(why) = result.impurity() {
+                report
+                    .errors
+                    .push(format!("launch: task/{slug}: {why} — not launching"));
+                return Ok(());
+            }
             if result.pass {
                 report.errors.push(format!("launch: task/{slug}: the task check now passes at the tip — not launching a worker for work that's already done"));
                 return Ok(());

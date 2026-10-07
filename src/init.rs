@@ -7,6 +7,7 @@ use crate::config;
 use crate::git::Git;
 use crate::paths::{self, Home};
 use crate::prompts::{self, Prompts};
+use crate::sandbox::Sandbox;
 use std::path::{Path, PathBuf};
 
 // --------------------------------------------------------------------------
@@ -19,16 +20,19 @@ pub struct InitReport {
     pub hub: PathBuf,
     pub project: String,
     pub director: PathBuf,
+    /// `Sandbox::describe` of the jail that passed its preflight.
+    pub sandbox: String,
 }
 
 impl InitReport {
     /// Short human-readable summary printed by `dashboard init`.
     pub fn summary(&self) -> String {
         format!(
-            "dashboard initialized\n  project: {}\n  home:    {}\n  hub:     {}\n\nNext: run `dashboard player` in another terminal.",
+            "dashboard initialized\n  project: {}\n  home:    {}\n  hub:     {}\n  sandbox: {}\n\nNext: run `dashboard player` in another terminal.",
             self.project,
             self.home.display(),
             self.hub.display(),
+            self.sandbox,
         )
     }
 }
@@ -67,7 +71,13 @@ pub fn init(
     let roadmap_text = director
         .show_file("refs/heads/main", "roadmap.toml")
         .ok_or_else(|| "roadmap.toml not found at main's tip".to_string())?;
-    config::roadmap_config_from_str(&roadmap_text).map_err(|e| format!("roadmap.toml: {e}"))?;
+    let roadmap =
+        config::roadmap_config_from_str(&roadmap_text).map_err(|e| format!("roadmap.toml: {e}"))?;
+    // Before anything is created: a host that can't jail the checks the
+    // way roadmap.toml asks gets no hub at all.
+    let sandbox =
+        Sandbox::from_config(&roadmap.sandbox).map_err(|e| format!("roadmap.toml: {e}"))?;
+    sandbox.preflight(&std::env::temp_dir())?;
 
     config::suite_at(&director, "refs/heads/main")?; // tests.toml + tests.d/; also runs Check::validate on every entry
 
@@ -170,6 +180,7 @@ pub fn init(
         hub: hub_path,
         project,
         director: toplevel,
+        sandbox: sandbox.describe(),
     })
 }
 

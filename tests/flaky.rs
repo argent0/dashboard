@@ -19,6 +19,18 @@ use tempfile::TempDir;
 
 fn init_hub(repo: &DirectorRepo) -> (TempDir, Home) {
     let home_dir = temp_home();
+    // The flakes' counter files live in `home_dir`, outside every
+    // worktree: the jail must let checks write there.
+    let roadmap = std::fs::read_to_string(repo.path().join("roadmap.toml")).unwrap();
+    write_file(
+        repo.path(),
+        "roadmap.toml",
+        &format!(
+            "{roadmap}\n[sandbox]\nwritable = [{:?}]\n",
+            home_dir.path().display().to_string()
+        ),
+    );
+    commit(repo.path(), "let checks write the counters");
     let report = init::init(
         repo.path(),
         Some("proj"),

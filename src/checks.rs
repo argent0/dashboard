@@ -7,6 +7,7 @@
 use crate::config::{self, Check, Claim, Evidence};
 use crate::git::Git;
 use crate::paths::Home;
+use crate::sandbox::Sandbox;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -55,6 +56,16 @@ pub struct CheckResult {
     /// way; see spec §14). Absent from older cached notes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<serde_json::Value>,
+    /// The sandbox policy the check ran under (`Sandbox::fingerprint`), so a
+    /// result is never reused under a different jail. Empty in older notes,
+    /// which therefore always re-run.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub isolation: String,
+    /// What a run left behind in the worktree (`git status --porcelain`
+    /// lines): a check that does this is impure and fails, whatever its exit
+    /// code, and isn't retried.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaked: Vec<String>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -67,11 +78,27 @@ impl CheckResult {
         self.pass && self.retries > 0
     }
 
+    /// `Some(why)` if a run left files in the worktree: the check failed
+    /// because it's impure, not because the code under test is wrong, so a
+    /// caller that wants it to fail (a post, a send-back) mustn't count it.
+    pub fn impurity(&self) -> Option<String> {
+        if self.leaked.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "check {:?} is impure: it left files in its worktree ({}). A test may only write \
+             to a temp dir it creates; build outputs belong in .gitignore",
+            self.name,
+            self.leaked.join(", ")
+        ))
+    }
+
     /// A cached result is reusable for `check` only if the name, cmd and
     /// threshold all still match — otherwise it's evidence for a different
     /// check that happens to share a name.
-    fn reusable_for(&self, check: &Check, max_pass: Option<u32>) -> bool {
-        self.name == check.name
+    fn reusable_for(&self, check: &Check, max_pass: Option<u32>, isolation: &str) -> bool {
+        self.isolation == isolation
+            && self.name == check.name
             && self.cmd == check.cmd
             && self.runs == check.runs
             && self.min_pass == check.min_pass
@@ -109,6 +136,11 @@ impl SuiteResult {
         }
     }
 
+    /// The first impure check's `CheckResult::impurity`, if any.
+    pub fn impurity(&self) -> Option<String> {
+        self.checks.iter().find_map(CheckResult::impurity)
+    }
+
     /// Short human text for rejection messages and relays to a worker, e.g.
     /// `suite failed: unit (0/1 runs passed)\n<output tail>`.
     pub fn summary(&self) -> String {
@@ -120,6 +152,10 @@ impl SuiteResult {
         }
         let mut lines = Vec::new();
         for c in self.checks.iter().filter(|c| !c.pass) {
+            if let Some(why) = c.impurity() {
+                lines.push(format!("suite failed: {why}"));
+                continue;
+            }
             let passed = c.exits.iter().filter(|&&e| e == 0).count();
             let mut line = format!(
                 "suite failed: {} ({}/{} runs passed)",
@@ -142,6 +178,7 @@ impl SuiteResult {
 pub struct Runner {
     hub: Git,
     work: PathBuf,
+    sandbox: Sandbox,
 }
 
 enum WorktreeState {
@@ -155,7 +192,18 @@ impl Runner {
         Self {
             hub: Git::new(home.hub()),
             work: home.work(),
+            sandbox: Sandbox::off(),
         }
+    }
+
+    /// Runs every check from now on under `sandbox` (off by default). The
+    /// hub stays readable inside it: the worktree's `.git` points there.
+    pub fn set_sandbox(&mut self, sandbox: Sandbox) {
+        self.sandbox = sandbox.with_readable(&self.hub.dir);
+    }
+
+    pub fn sandbox(&self) -> &Sandbox {
+        &self.sandbox
     }
 
     // ---- worktree management ----
@@ -284,7 +332,7 @@ impl Runner {
     /// lines: the project's test inventory (`tests.toml`'s `list_cmd`).
     pub fn run_list(&self, commit: &str, cmd: &str) -> Result<Vec<String>, String> {
         self.prepare(commit)?;
-        let (code, stdout, combined) = run_command(cmd, &self.work, None);
+        let (code, stdout, combined) = run_command(&self.sandbox, cmd, &self.work, None);
         if code != 0 {
             return Err(format!("list_cmd exited {code}: {}", tail_str(&combined)));
         }
@@ -317,7 +365,7 @@ impl Runner {
             .read_note(commit)
             .checks
             .get(&check.name)
-            .filter(|r| r.reusable_for(check, max_pass))
+            .filter(|r| r.reusable_for(check, max_pass, &self.sandbox.fingerprint()))
             .cloned()
         {
             return cached;
@@ -358,6 +406,8 @@ impl Runner {
             pass: false,
             output_tail: None,
             metrics: None,
+            isolation: self.sandbox.fingerprint(),
+            leaked: Vec::new(),
         };
         if let Err(e) = self.prepare(commit) {
             return CheckResult {
@@ -376,6 +426,7 @@ impl Runner {
         loop {
             let (mut result, failed_output) = self.attempt(check, timeout, max_pass, base.clone());
             let retry = !result.pass
+                && result.leaked.is_empty()
                 && retries < check.retry_failed
                 && (patterns.is_empty() || patterns.iter().any(|p| p.is_match(&failed_output)));
             if !retry {
@@ -405,8 +456,22 @@ impl Runner {
         for i in 0..check.runs {
             let remaining_after_this = check.runs - i - 1;
 
-            let (code, stdout, combined) = run_command(&check.cmd, &self.work, timeout);
+            let (code, stdout, combined) =
+                run_command(&self.sandbox, &check.cmd, &self.work, timeout);
             result.metrics = parse_metrics(&stdout);
+
+            // Impure: the run changed the worktree. Every later run would
+            // see that state, so stop here, failing whatever the exit code.
+            let leaked = self.leaks();
+            if !leaked.is_empty() {
+                exits.push(code);
+                result.leaked = leaked;
+                result.output_tail = Some(tail_str(&combined));
+                result.pass = false;
+                result.runs = exits.len() as u32;
+                result.exits = exits;
+                return (result, failed_output);
+            }
 
             exits.push(code);
             if code == 0 {
@@ -432,6 +497,20 @@ impl Runner {
         result.runs = exits.len() as u32;
         result.exits = exits;
         (result, failed_output)
+    }
+
+    /// What a run left in the worktree, as `git status --porcelain` lines:
+    /// changed tracked files and new untracked ones. Ignored files (build
+    /// caches) don't count; `prepare` keeps those between runs anyway.
+    fn leaks(&self) -> Vec<String> {
+        match Git::new(&self.work).run(&["status", "--porcelain", "--untracked-files=all"]) {
+            Ok(out) => out
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect(),
+            Err(e) => vec![format!("(git status failed: {e})")],
+        }
     }
 
     /// Reads the suite at `commit` (`tests.toml` plus every `tests.d/*.toml`)
@@ -476,22 +555,18 @@ impl Runner {
     }
 }
 
-/// Runs `sh -c <cmd>` in `cwd`, returning `(exit code, stdout, stdout +
+/// Runs `sh -c <cmd>` in `cwd` (jailed by `sandbox`), returning `(exit code, stdout, stdout +
 /// stderr)`. The exit code is -1 for a signal, a spawn failure, or a timeout.
 /// With a timeout the command runs in its own process group so the whole tree
 /// can be killed when the deadline passes.
 fn run_command(
+    sandbox: &Sandbox,
     cmd: &str,
     cwd: &std::path::Path,
     timeout: Option<Duration>,
 ) -> (i32, Vec<u8>, Vec<u8>) {
     let Some(timeout) = timeout else {
-        return match Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(cwd)
-            .output()
-        {
+        return match sandbox.command(cmd, cwd).output() {
             Ok(out) => {
                 let mut combined = out.stdout.clone();
                 combined.extend_from_slice(&out.stderr);
@@ -503,10 +578,8 @@ fn run_command(
         };
     };
 
-    let spawned = Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(cwd)
+    let spawned = sandbox
+        .command(cmd, cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -647,17 +720,19 @@ mod tests {
             pass: true,
             output_tail: None,
             metrics: None,
+            ..Default::default()
         };
-        assert!(result.reusable_for(&check, None));
-        assert!(!result.reusable_for(&check, Some(2)));
+        assert!(result.reusable_for(&check, None, ""));
+        assert!(!result.reusable_for(&check, Some(2), ""));
+        assert!(!result.reusable_for(&check, None, "v1 jail=off"));
 
         let mut other_cmd = check.clone();
         other_cmd.cmd = "false".into();
-        assert!(!result.reusable_for(&other_cmd, None));
+        assert!(!result.reusable_for(&other_cmd, None, ""));
 
         let mut other_threshold = check.clone();
         other_threshold.min_pass = 3;
-        assert!(!result.reusable_for(&other_threshold, None));
+        assert!(!result.reusable_for(&other_threshold, None, ""));
     }
 
     #[test]
@@ -709,10 +784,20 @@ mod tests {
     #[test]
     fn run_command_kills_a_run_past_its_timeout() {
         let dir = std::env::temp_dir();
-        let (code, _, combined) = run_command("sleep 30", &dir, Some(Duration::from_secs(1)));
+        let (code, _, combined) = run_command(
+            &Sandbox::off(),
+            "sleep 30",
+            &dir,
+            Some(Duration::from_secs(1)),
+        );
         assert_eq!(code, -1);
         assert!(String::from_utf8_lossy(&combined).contains("timed out after 1s"));
-        let (code, stdout, _) = run_command("echo hi", &dir, Some(Duration::from_secs(5)));
+        let (code, stdout, _) = run_command(
+            &Sandbox::off(),
+            "echo hi",
+            &dir,
+            Some(Duration::from_secs(5)),
+        );
         assert_eq!(code, 0);
         assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hi");
     }

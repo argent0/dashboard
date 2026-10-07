@@ -448,6 +448,8 @@ spec's parking lot" for the detail behind each pointer):
   Decisions section.
 - **Task agents**: launched and mediated by the player too, with their own
   `[player] task_agent_cmd` (§17).
+- **Test purity**: enforced in part by the player, not only by prompts:
+  every check runs jailed and must leave its worktree clean (§20).
 
 Still not decided:
 
@@ -764,3 +766,37 @@ diagnostics; only the text around them is a template.
   rejection, so `main` always carries a valid one. The player reads it from
   `main`'s tip whenever it writes a prompt or sends a message, so an edit
   applies to the next one; prompt files already written stay as they were.
+
+## 20. Check isolation
+
+Prompts ask every test to be pure; the player enforces the part it can
+guarantee.
+
+- **The jail.** With `[sandbox] enabled` (the default, in `roadmap.toml`:
+  director-owned, so no agent can loosen it), every check, claim, evidence
+  and `list_cmd` runs under bubblewrap: the host filesystem read-only, the
+  check's worktree and the director's `writable` paths read-write, a private
+  `/tmp` (`TMPDIR=/tmp`), and loopback only unless `network = true`. A test
+  that writes outside its sandbox or reaches the network just fails, like any
+  failing check.
+- **A clean worktree.** After each run the player looks at `git status` in
+  the worktree; a changed tracked file or a new untracked one (ignored build
+  output aside) means the check is impure. It fails whatever its exit code,
+  its remaining runs are skipped, and it isn't retried. An impure check can
+  never stand in for a required failure: a post whose task check is impure is
+  a `post` strike, a send-back whose suite fails only impurely a `review`
+  strike, a launch is held, a spike claim that fails on the base impurely is
+  a `claims` failure, and impure evidence retires the task as a miss.
+- **Preflight.** `dashboard init` and the player (at start, and again
+  whenever `[sandbox]` changes) first prove the jail holds on this host:
+  bwrap runs, the working directory is writable, a directory outside it
+  isn't, `/tmp` is private and, with the network off, only `lo` exists. On a
+  failure `init` creates nothing and the player runs no tick: checks never
+  run unjailed by accident. `enabled = false` turns the jail (not the
+  clean-worktree check) off, e.g. on a host without bubblewrap.
+- **The cache.** A cached result records the policy it ran under and is
+  only reused under the same one.
+
+Not enforced: determinism and order independence (a clock, unseeded
+randomness, state shared through a `writable` path). The task agent's review
+still reads for those.

@@ -76,10 +76,18 @@ fn threshold_passes_at_min_pass_2_fails_at_min_pass_3() {
     let runner = Runner::new(&home);
     let commit = repo.git().rev_parse("HEAD").unwrap();
 
-    let cmd =
-        "n=$(cat count 2>/dev/null || echo 0); n=$((n+1)); echo $n > count; [ $((n % 2)) -eq 0 ]";
+    // The counter lives outside the worktree: a check writing into it
+    // would be impure. One counter per threshold, so each starts at 0.
+    let counters = TempDir::new().unwrap();
+    let cmd = |name: &str| {
+        let c = counters.path().join(name);
+        format!(
+            "n=$(cat {c} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {c}; [ $((n % 2)) -eq 0 ]",
+            c = c.display()
+        )
+    };
 
-    let lenient = check("flaky", cmd, 4, 2);
+    let lenient = check("flaky", &cmd("lenient"), 4, 2);
     let result = runner.run_check(&commit, &lenient);
     assert!(
         result.pass,
@@ -87,9 +95,8 @@ fn threshold_passes_at_min_pass_2_fails_at_min_pass_3() {
     );
 
     // A different threshold is a different check as far as the cache is
-    // concerned, so this re-runs from a freshly-cleaned worktree (fresh
-    // counter file) rather than reusing the cached verdict above.
-    let strict = check("flaky", cmd, 4, 3);
+    // concerned, so this re-runs rather than reusing the verdict above.
+    let strict = check("flaky", &cmd("strict"), 4, 3);
     let result = runner.run_check(&commit, &strict);
     assert!(
         !result.pass,
@@ -292,9 +299,12 @@ fn untracked_files_from_a_previous_run_are_cleaned() {
     let runner = Runner::new(&home);
     let commit = repo.git().rev_parse("HEAD").unwrap();
 
+    // Leaving a file behind is impure: the check fails despite exiting 0.
     let leaves_stray_file = check("stray", "touch stray.txt", 1, 1);
     let result = runner.run_check(&commit, &leaves_stray_file);
-    assert!(result.pass);
+    assert!(!result.pass, "{result:?}");
+    assert_eq!(result.leaked, vec!["?? stray.txt".to_string()]);
+    assert!(result.impurity().unwrap().contains("stray.txt"));
 
     // Re-preparing the (now-existing) worktree for the same commit must
     // `git clean -ffd` away stray.txt before the next check runs.

@@ -16,6 +16,45 @@ pub struct RoadmapConfig {
     pub docs_paths: Vec<String>,
     pub limits: Limits,
     pub player: PlayerConfig,
+    pub sandbox: SandboxConfig,
+}
+
+/// `[sandbox]`: the jail every check runs in (`src/sandbox.rs`). It's in
+/// `roadmap.toml`, not `tests.toml`, because task agents may edit the
+/// suite but must never be able to loosen the jail it runs in.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// Run checks under bubblewrap. Off runs them as plain `sh -c`.
+    pub enabled: bool,
+    /// Keep the host network inside the jail (off: loopback only).
+    pub network: bool,
+    /// Host paths checks may write to besides their worktree and a private
+    /// `/tmp`, e.g. a toolchain cache. A leading `~/` is the player's home.
+    pub writable: Vec<String>,
+}
+
+impl SandboxConfig {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        for w in &self.writable {
+            if !(w.starts_with('/') || w.starts_with("~/")) {
+                return Err(format!(
+                    "[sandbox] writable {w:?}: must be an absolute path or start with ~/"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            network: false,
+            writable: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -724,7 +763,9 @@ pub(crate) fn baseline_file_from_str(s: &str) -> Result<BaselineFile, String> {
 // --------------------------------------------------------------------------
 
 pub(crate) fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> {
-    toml::from_str(s).map_err(|e| e.to_string())
+    let cfg: RoadmapConfig = toml::from_str(s).map_err(|e| e.to_string())?;
+    cfg.sandbox.validate()?;
+    Ok(cfg)
 }
 
 pub(crate) fn tests_config_from_str(s: &str) -> Result<TestsConfig, String> {

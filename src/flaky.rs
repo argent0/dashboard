@@ -64,6 +64,9 @@ pub fn miss(evidence: &Evidence, result: &CheckResult) -> Option<String> {
     if result.pass {
         return None;
     }
+    if let Some(why) = result.impurity() {
+        return Some(format!("evidence is impure: {why}"));
+    }
     let passed = result.exits.iter().filter(|&&e| e == 0).count();
     Some(format!(
         "evidence did not reproduce ({passed}/{}): {:?} needs {}..={} passing runs of {}",

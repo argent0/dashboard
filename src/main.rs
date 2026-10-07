@@ -315,6 +315,16 @@ fn run_player(home: Option<PathBuf>, once: bool, interval: u64) {
             std::process::exit(1);
         }
     };
+    // Preflight the jail before anything runs: a player that can't sandbox
+    // its checks refuses to start rather than run them unjailed.
+    match player.check_sandbox() {
+        Ok(desc) if !once => eprintln!("sandbox: {desc}"),
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
 
     if once {
         match player.tick() {

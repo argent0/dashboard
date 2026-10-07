@@ -31,6 +31,7 @@ src/records.rs  provenance/enforcement records: import notes, rejections, pins, 
 src/flaky.rs    flaky-test-fix (spec §15): inventory comparison, evidence verdict text
 src/prompts.rs  prompts.kdl (spec §19): template validation, the max-bytes cap, rendering
 src/prompts.kdl the starter prompts.kdl `dashboard init` commits (embedded with include_str!)
+src/sandbox.rs  the check jail (spec §20): bubblewrap command lines, policy fingerprint, preflight
 src/spike.rs    spikes (spec §14): reading a round, running claims against the base-with-overlay, evaluating a finish
 src/state.rs    derives every task's status (spec §12) purely from the hub + session liveness
 src/player.rs   the player: fetch, validate, import, launch/relay, merge, task agents — spec §5/§7/§9/§11/§17
@@ -164,6 +165,12 @@ evidence = 1                     # a flaky-test-fix post whose flake doesn't rep
 agent_cmd = "claude --dangerously-skip-permissions"        # the worker; default
 task_agent_cmd = "claude --dangerously-skip-permissions"   # the task agent (spec §17); default.
                                                            # "" turns task agents off
+
+[sandbox]                        # the check jail (spec §20)
+enabled = true                   # default; false runs checks as plain `sh -c`
+network = false                  # default: loopback only
+writable = ["~/.cargo"]          # extra writable host paths (absolute or ~/);
+                                 # default none: only the worktree and a private /tmp
 ```
 
 `prompts.kdl` (on `main`, required; spec §19): every text the player
@@ -421,6 +428,20 @@ back here):
   suite requirement, no review round). `TaskState::contest_round` counts
   the `contests/c*.md` at the tip; a contest past `max_contest_rounds`
   escalates without being imported.
+
+- **Check isolation** (spec §20): `Runner::set_sandbox` jails every
+  `run_command` under `bwrap` (`Sandbox::command`); the policy comes from
+  main's `roadmap.toml` each tick (`Player::check_sandbox`), never from the
+  suite, since task agents may edit `tests.toml`. `Sandbox::preflight`
+  runs in `init` (before anything is created) and in the player at start
+  and on every policy change; a failure stops the tick. Independently,
+  `Runner::attempt` runs `git status` after each run: anything left in the
+  worktree is `CheckResult::leaked`, a failure that's never retried, and
+  `impurity()` keeps it from counting as a required failure (post, launch,
+  send-back, spike base, evidence). `CheckResult::isolation` (the policy
+  fingerprint) is part of the cache key. Tests need a working `bwrap`;
+  `tests/sandbox.rs` covers the jail, and `tests/flaky.rs`'s fixture adds a
+  `writable` dir for its counter files.
 
 Still undecided (spec §13): timeout/crash handling beyond manual relaunch,
 scope enforcement beyond pins, and suite-runtime cost at scale.

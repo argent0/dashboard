@@ -13,6 +13,7 @@ pub mod player;
 pub mod prompts;
 pub mod records;
 pub mod render;
+pub mod sandbox;
 pub mod spike;
 pub mod state;
 pub mod ui;

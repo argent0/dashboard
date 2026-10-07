@@ -812,6 +812,7 @@ mod tests {
                 strikes: StrikeLimits::default(),
             },
             player: Default::default(),
+            sandbox: Default::default(),
         }
     }
 
