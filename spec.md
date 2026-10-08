@@ -404,6 +404,7 @@ commits.
 | `pending` | branch has `task.toml` but no validated post |
 | `orphaned` | pending, and some `depends_on` is retired — needs a replan |
 | `ready` | pending, and every `depends_on` accepted — the director may post |
+| `staged` | `ready`, held back by the director's latest `stage:` marker (§9): the task agent isn't launched until `unstage:`. Resolved by walking the branch's first-parent history past the player's `merge_unblock` merges and replans, so `main` moving doesn't release it |
 | `posted` | validated post, no live worker session yet |
 | `in_progress` | worker session alive and working (runtime, not git) |
 | `tested` | latest worker commit validated as passing, awaiting director |
@@ -632,7 +633,11 @@ with the operator.
 
 **Lifecycle.**
 
-- *Launch*: automatic. When an agent-managed task becomes `ready` the player
+- *Launch*: automatic. When an agent-managed task becomes `ready` (not
+  `staged`: the director holds a task back with an empty `stage: <why>` commit
+  on its branch and releases it with `unstage: <why>`; only a `ready`
+  non-spike task can be staged, anything else is a `plan` rejection, and a
+  task agent's marker is `ownership`) the player
   creates the task agent's clone and starts its session with the post step;
   a task found `tested` with no task agent gets one with the review step.
   Launched once, recorded in `refs/dashboard/agent/<slug>`; like a worker,

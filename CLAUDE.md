@@ -549,6 +549,19 @@ back here):
   CLI change: a spike is just different director commit shapes
   (`kind = "spike"`, `questions/`, `conclude:`).
 
+- **Staged tasks**: a `ready` task's task agent launches at once and nothing
+  limits how many tasks are in flight, so the director holds one back with an
+  empty `stage: <why>` commit on `task/<slug>` (`Transition::Stage`,
+  `Player::try_stage`) and releases it with `unstage:` (back to `ready`, the
+  agent launches next tick). Only a `ready` non-spike task can be staged,
+  and only a `staged` one unstaged (`plan` rejection otherwise); a task
+  agent's marker is still `ownership`. `Status::Staged` counts as pending in
+  Overall. `state::staged_at` walks first-parent history from the tip past
+  `merge_unblock`/`replan` commits to the last marker, because the player's
+  merge of `main` becomes the tip and would shadow the note there; a replan
+  keeps a task staged, and `unblock_merges` keeps feeding a staged branch
+  `main`.
+
 - **Parallel tasks** (spec §4, §11): any number of tasks may be posted
   at once; there is no in-flight limit. The player does every merge:
   `Player::land` (called for an `accept:`) merges a moved `main` into the

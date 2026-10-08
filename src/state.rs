@@ -25,6 +25,9 @@ pub enum Status {
     Pending,
     Orphaned,
     Ready,
+    /// A `ready` task the director holds back with a `stage:` marker: its
+    /// task agent isn't launched until `unstage:`.
+    Staged,
     Posted,
     InProgress,
     Tested,
@@ -49,6 +52,7 @@ impl Status {
             Status::Pending => "pending",
             Status::Orphaned => "orphaned",
             Status::Ready => "ready",
+            Status::Staged => "staged",
             Status::Posted => "posted",
             Status::InProgress => "in_progress",
             Status::Tested => "tested",
@@ -262,6 +266,22 @@ fn task_tip(
     accepted.get(slug).cloned()
 }
 
+/// Whether the director's latest `stage:`/`unstage:` on this pending-family
+/// branch is a `stage:`. The tip's own note can't say: the player merges
+/// `main` into the branch (`merge_unblock`) and a `replan` may follow, each
+/// becoming the tip, so walk the branch's own (first-parent) history past
+/// those to the last marker; none (the plan) means not staged.
+fn staged_at(hub: &Git, tip: &str) -> bool {
+    for c in hub.rev_list(&["--first-parent", tip]) {
+        match records::import_note(hub, &c).map(|n| n.transition) {
+            Some(Transition::MergeUnblock | Transition::Replan) => continue,
+            Some(Transition::Stage) => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn derive_task(
     hub: &Git,
     roadmap: &RoadmapConfig,
@@ -379,8 +399,8 @@ fn derive_task(
                     Status::Posted
                 }
             }
-            // `plan`, `replan`, `merge_unblock`, or no note at all — the
-            // pending family. Any other transition found here (accept,
+            // `plan`, `replan`, `merge_unblock`, `stage`, `unstage`, or no
+            // note at all — the pending family. Any other transition found here (accept,
             // retire, docs, merge_accept) is a state the player should
             // never leave a task branch's tip in once its merge/move has
             // completed; treating it as pending-family is a safe fallback
@@ -389,7 +409,11 @@ fn derive_task(
                 if any_dep_retired {
                     Status::Orphaned
                 } else if all_deps_accepted {
-                    Status::Ready
+                    if staged_at(hub, &tip) {
+                        Status::Staged
+                    } else {
+                        Status::Ready
+                    }
                 } else {
                     Status::Pending
                 }

@@ -66,6 +66,11 @@ pub enum Transition {
     Contest,
     /// The reply to a contest (task agent, or director): back to the worker.
     ContestReply,
+    /// A director's `stage:` marker: hold a `ready` task so its task agent
+    /// isn't launched.
+    Stage,
+    /// A director's `unstage:` marker: release a `staged` task.
+    Unstage,
 }
 
 impl Transition {
@@ -88,6 +93,8 @@ impl Transition {
             Transition::Resolve => "resolve",
             Transition::Contest => "contest",
             Transition::ContestReply => "contest_reply",
+            Transition::Stage => "stage",
+            Transition::Unstage => "unstage",
         }
     }
 }

@@ -63,6 +63,10 @@ fn status_style(status: Status) -> StatusStyle {
             icon: "●",
             codes: &[c::CYAN],
         },
+        Status::Staged => StatusStyle {
+            icon: "◌",
+            codes: &[c::YELLOW],
+        },
         Status::Pending => StatusStyle {
             icon: "○",
             codes: &[c::GRAY],
@@ -81,7 +85,7 @@ fn status_style(status: Status) -> StatusStyle {
 /// Live statuses, in the order the overall summary line and per-phase rows
 /// display them. `Retired` is deliberately excluded — it's counted (and
 /// shown) separately, never part of the live denominator.
-const LIVE_STATUS_ORDER: [Status; 11] = [
+const LIVE_STATUS_ORDER: [Status; 12] = [
     Status::Accepted,
     Status::Tested,
     Status::InProgress,
@@ -91,6 +95,7 @@ const LIVE_STATUS_ORDER: [Status; 11] = [
     Status::Contested,
     Status::Escalated,
     Status::Ready,
+    Status::Staged,
     Status::Pending,
     Status::Orphaned,
 ];
@@ -324,6 +329,33 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
         }
     }
     out.push(String::new());
+
+    // ---- staged (held back by the director) ----
+    let staged: Vec<&TaskState> = live
+        .iter()
+        .filter(|t| t.status == Status::Staged)
+        .copied()
+        .collect();
+    if !staged.is_empty() {
+        out.push(style(
+            &format!("◌ Staged ({})", staged.len()),
+            &[c::BOLD, c::YELLOW],
+            color,
+        ));
+        for t in &staged {
+            out.push(format!(
+                "  {}  {}",
+                style(&t.slug, &[c::YELLOW], color),
+                truncate(
+                    &t.config.title,
+                    width
+                        .saturating_sub(t.slug.chars().count())
+                        .saturating_sub(6)
+                )
+            ));
+        }
+        out.push(String::new());
+    }
 
     // ---- spikes ----
     if !spikes.is_empty() {

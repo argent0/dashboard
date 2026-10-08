@@ -1913,7 +1913,7 @@ impl<S: Sessions> Player<S> {
             .find(|t| t.slug == slug)
             .is_some_and(|t| state::task_agent_managed(&hub_state.roadmap, &t.config));
         match status {
-            Some(Status::Pending | Status::Ready | Status::Orphaned) => {
+            Some(Status::Pending | Status::Ready | Status::Staged | Status::Orphaned) => {
                 let prompt_path = format!("tasks/{slug}/prompt.md");
                 let has_prompt = self.hub.blob_hash(candidate, &prompt_path).is_some();
                 if has_prompt && managed {
@@ -2083,11 +2083,64 @@ impl<S: Sessions> Player<S> {
         if subject.starts_with("conclude:") {
             return self.try_conclude(slug, tip, candidate, status, report);
         }
+        if subject.starts_with("stage:") {
+            return self.try_stage(slug, tip, candidate, status, true, report);
+        }
+        if subject.starts_with("unstage:") {
+            return self.try_stage(slug, tip, candidate, status, false, report);
+        }
         let msg = format!(
-            "task/{slug} commit {} is an empty marker with subject {subject:?} — only `accept:`/`retire:`/`conclude:` are the director's to make here",
+            "task/{slug} commit {} is an empty marker with subject {subject:?} — only `accept:`/`retire:`/`conclude:`/`stage:`/`unstage:` are the director's to make here",
             short(candidate)
         );
         self.reject(slug, candidate, Reason::Ownership, msg, report)
+    }
+
+    // ---- stage / unstage ----
+
+    /// A `stage:` holds a `ready` task (so its task agent isn't launched);
+    /// an `unstage:` releases a `staged` one. Neither moves anything but
+    /// the branch tip. A spike is never staged: `ready` already means
+    /// "could start" for it.
+    fn try_stage(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        status: Option<Status>,
+        stage: bool,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
+        let (marker, needs, transition) = if stage {
+            ("stage", Status::Ready, Transition::Stage)
+        } else {
+            ("unstage", Status::Staged, Transition::Unstage)
+        };
+        let problem = if status != Some(needs) {
+            Some(format!(
+                "{marker}: task/{slug} is {} — only a {} task can be {marker}d",
+                status.map(|s| s.as_str()).unwrap_or("unknown"),
+                needs.as_str()
+            ))
+        } else if stage && records::is_spike_at(&self.hub, tip, slug) {
+            Some(format!(
+                "stage: task/{slug} is a spike — it is never launched automatically, so there is nothing to hold"
+            ))
+        } else {
+            None
+        };
+        if let Some(msg) = problem {
+            return self.reject(slug, candidate, Reason::Plan, msg, report);
+        }
+        let hub_ref = format!("refs/heads/task/{slug}");
+        self.hub
+            .update_ref_cas(&hub_ref, candidate, tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, candidate, Actor::Director, transition, Some(slug))?;
+        report
+            .imported
+            .push((hub_ref, candidate.to_string(), transition));
+        Ok(())
     }
 
     // ---- post (spec §9, §6.3) ----
@@ -2231,6 +2284,11 @@ impl<S: Sessions> Player<S> {
             .ok_or_else(|| format!("post: task/{slug}: no task state"))?;
 
         if status != Status::Ready {
+            if status == Status::Staged {
+                return Err(format!(
+                    "post: task/{slug} is staged: the director must `unstage:` it first"
+                ));
+            }
             if status == Status::Orphaned {
                 let retired = records::retired_slugs(&self.hub);
                 let retired_deps: Vec<&str> = task
@@ -3323,6 +3381,7 @@ impl<S: Sessions> Player<S> {
                 Some(
                     Status::Pending
                         | Status::Ready
+                        | Status::Staged
                         | Status::Orphaned
                         | Status::Conflicted
                         | Status::Contested
@@ -5006,6 +5065,8 @@ impl<S: Sessions> Player<S> {
                 None | Some(Transition::Plan)
                     | Some(Transition::Replan)
                     | Some(Transition::MergeUnblock)
+                    | Some(Transition::Stage)
+                    | Some(Transition::Unstage)
             ) {
                 continue;
             }
@@ -5217,7 +5278,7 @@ fn status_event(task: &state::TaskState, managed: bool) -> Option<(EventKind, St
         }
         Status::Retired => Some((EventKind::Retired, first_line(task.post_mortem.as_deref().unwrap_or("")))),
         // `conflicted`: emitted from the tick report instead (`emit_events`).
-        Status::Pending | Status::Orphaned | Status::Posted | Status::InProgress | Status::InRevision | Status::Conflicted => None,
+        Status::Pending | Status::Staged | Status::Orphaned | Status::Posted | Status::InProgress | Status::InRevision | Status::Conflicted => None,
     }
 }
 
