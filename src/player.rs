@@ -1219,7 +1219,7 @@ impl<S: Sessions> Player<S> {
     /// task up, so its sitting idle is worth reporting. The worker: pinned
     /// (launched), `posted`/`in_progress`/`in_revision`, and no finish held
     /// on `main`'s impure checks — a finish, block or contest moves the task
-    /// past these. A task agent: launched, the task `ready` (it owes the
+    /// past these. A task agent: launched, the task `staged` (it owes the
     /// post), `tested` (a review) or `contested` (a reply), and no report
     /// collected since its last launch or message (`REPORTED_FILE` in
     /// `git_dir`, its worktree's git dir) — a report hands the turn to the
@@ -1230,7 +1230,7 @@ impl<S: Sessions> Player<S> {
             task.agent.is_some()
                 && matches!(
                     task.status,
-                    Status::Ready | Status::Tested | Status::Contested
+                    Status::Staged | Status::Tested | Status::Contested
                 )
                 && !git_dir.join(REPORTED_FILE).exists()
         } else {
@@ -2098,10 +2098,10 @@ impl<S: Sessions> Player<S> {
 
     // ---- stage / unstage ----
 
-    /// A `stage:` holds a `ready` task (so its task agent isn't launched);
-    /// an `unstage:` releases a `staged` one. Neither moves anything but
-    /// the branch tip. A spike is never staged: `ready` already means
-    /// "could start" for it.
+    /// A `stage:` releases a `ready` task: its task agent launches (a
+    /// `ready` task never starts on its own). An `unstage:` puts a `staged`
+    /// one back, while no task agent exists yet. Neither moves anything but
+    /// the branch tip. A spike is never staged: it has no task agent.
     fn try_stage(
         &mut self,
         slug: &str,
@@ -2116,15 +2116,24 @@ impl<S: Sessions> Player<S> {
         } else {
             ("unstage", Status::Staged, Transition::Unstage)
         };
+        let has_agent = !stage
+            && state::derive(&self.hub, &|s| self.sessions.alive(s))?
+                .tasks
+                .iter()
+                .any(|t| t.slug == slug && t.agent.is_some());
         let problem = if status != Some(needs) {
             Some(format!(
                 "{marker}: task/{slug} is {} — only a {} task can be {marker}d",
                 status.map(|s| s.as_str()).unwrap_or("unknown"),
                 needs.as_str()
             ))
+        } else if has_agent {
+            Some(format!(
+                "unstage: task/{slug}'s task agent is already running — retire the task to stop it"
+            ))
         } else if stage && records::is_spike_at(&self.hub, tip, slug) {
             Some(format!(
-                "stage: task/{slug} is a spike — it is never launched automatically, so there is nothing to hold"
+                "stage: task/{slug} is a spike — it has no task agent to start"
             ))
         } else {
             None
@@ -2283,12 +2292,7 @@ impl<S: Sessions> Player<S> {
             .find(|t| t.slug == slug)
             .ok_or_else(|| format!("post: task/{slug}: no task state"))?;
 
-        if status != Status::Ready {
-            if status == Status::Staged {
-                return Err(format!(
-                    "post: task/{slug} is staged: the director must `unstage:` it first"
-                ));
-            }
+        if status != Status::Ready && status != Status::Staged {
             if status == Status::Orphaned {
                 let retired = records::retired_slugs(&self.hub);
                 let retired_deps: Vec<&str> = task
@@ -4519,7 +4523,7 @@ impl<S: Sessions> Player<S> {
     }
 
     /// The newest commit a task agent made, validated as one cumulative
-    /// change from the hub tip: its post while the task is ready, a
+    /// change from the hub tip: its post while the task is staged, a
     /// send-back while it's tested. Either may touch only tests, the suite
     /// files and `tasks/<slug>/` (with `[check]` the only part of `task.toml`
     /// it may change), and it never commits a marker (spec §17).
@@ -4562,7 +4566,7 @@ impl<S: Sessions> Player<S> {
         }
 
         let step = match status {
-            Status::Pending | Status::Ready | Status::Orphaned => {
+            Status::Staged => {
                 if self
                     .hub
                     .blob_hash(candidate, &format!("tasks/{slug}/prompt.md"))
@@ -4714,7 +4718,7 @@ impl<S: Sessions> Player<S> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
         for task in &hub_state.tasks {
             let step = match task.status {
-                Status::Ready => Some(AgentStep::Post),
+                Status::Staged => Some(AgentStep::Post),
                 Status::Tested => Some(AgentStep::Review),
                 Status::Contested => Some(AgentStep::Contest),
                 _ => None,
@@ -4996,7 +5000,7 @@ impl<S: Sessions> Player<S> {
             ));
         }
         let step = match task.status {
-            Status::Pending | Status::Ready | Status::Orphaned => AgentStep::Post,
+            Status::Pending | Status::Ready | Status::Staged | Status::Orphaned => AgentStep::Post,
             Status::Tested => AgentStep::Review,
             Status::Contested => AgentStep::Contest,
             _ => AgentStep::Wait,
@@ -5262,7 +5266,7 @@ fn record_launch(home: &Home, key: &str) -> Result<(), String> {
 /// so the director hears `agent_launched` and `agent_report` instead.
 fn status_event(task: &state::TaskState, managed: bool) -> Option<(EventKind, String)> {
     match task.status {
-        Status::Ready | Status::Tested | Status::Contested if managed => None,
+        Status::Tested | Status::Contested if managed => None,
         Status::Contested => Some((EventKind::Contested, task.contest.clone().unwrap_or_default())),
         Status::Tested if task.spike.is_some() => {
             Some((EventKind::Tested, "spike finish validated — claims passed; review the findings with the operator, then send back a new question or conclude".to_string()))
@@ -5270,6 +5274,7 @@ fn status_event(task: &state::TaskState, managed: bool) -> Option<(EventKind, St
         Status::Tested => Some((EventKind::Tested, "finish accepted — tests passed, awaiting director review".to_string())),
         Status::Escalated => Some((EventKind::Escalated, task.escalation.clone().unwrap_or_default())),
         Status::Ready if task.spike.is_some() => Some((EventKind::Ready, format!("spike task/{} is planned: post its question when the operator agrees", task.slug))),
+        Status::Ready if managed => Some((EventKind::Ready, format!("task/{}'s dependencies are all accepted and merged in; it waits for a `stage:` commit before its task agent starts", task.slug))),
         Status::Ready => Some((EventKind::Ready, format!("task/{}'s dependencies are all accepted and merged in", task.slug))),
         Status::Accepted => Some((EventKind::Accepted, format!("task/{} accepted and merged into main", task.slug))),
         Status::Explored => {

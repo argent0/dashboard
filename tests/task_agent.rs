@@ -94,10 +94,11 @@ fn agent_sent(player: &Player<NullSessions>) -> Vec<String> {
         .collect()
 }
 
-/// Plans `s` as the director and ticks: the task is ready at once (no
-/// dependencies), so the same tick launches its task agent.
+/// Plans `s` as the director, stages it and ticks: the task is ready at once
+/// (no dependencies) but only the `stage:` launches its task agent.
 fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>) -> TickReport {
     director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", PLAN, "plan: s");
+    commit_empty(repo.path(), "stage: go");
     let report = player.tick().expect("plan tick should succeed");
     assert!(report.rejected.is_empty(), "{report}");
     report
@@ -787,11 +788,11 @@ fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
             .exists()
     );
 
-    // Ready, it owes the post: a stop without one is reported, once.
+    // Staged, it owes the post: a stop without one is reported, once.
     std::fs::write(&marker, "stop 100 1\n").unwrap();
     player.tick().expect("tick");
     assert_eq!(idle().len(), 1, "{:?}", events::read_all(&home));
-    assert!(idle()[0].message.contains("ready"), "{}", idle()[0].message);
+    assert!(idle()[0].message.contains("staged"), "{}", idle()[0].message);
     player.tick().expect("tick");
     drop(player);
     let mut player = open_player(&home);
@@ -844,7 +845,7 @@ fn a_task_agent_whose_screen_goes_stale_while_it_owes_work_is_reported_idle() {
         "Do you trust this folder? [y/n]".to_string(),
     );
 
-    // Ready, it owes the post; a screen stuck on a dialog is reported once.
+    // Staged, it owes the post; a screen stuck on a dialog is reported once.
     player.set_clock(1000);
     player.tick().expect("tick");
     player.set_clock(1900);
@@ -854,7 +855,7 @@ fn a_task_agent_whose_screen_goes_stale_while_it_owes_work_is_reported_idle() {
     assert!(
         idle()[0]
             .message
-            .contains("no new output for 15 min while the task is ready"),
+            .contains("no new output for 15 min while the task is staged"),
         "{}",
         idle()[0].message
     );
@@ -1104,6 +1105,7 @@ fn another_tasks_agent_commits_merged_in_from_main_still_ask_for_a_rebase() {
         "title = \"t\"\nphase = \"p1\"\n",
         "plan: t",
     );
+    commit_empty(repo.path(), "stage: go");
     let report = player.tick().expect("plan tick");
     assert!(report.rejected.is_empty(), "{report}");
     let t_dir = paths::agent_clone(&repo.director_path(), "t");

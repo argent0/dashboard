@@ -159,7 +159,7 @@ impl Event {
                 "nothing to do on this task: it's re-judged once main's impure checks are fixed".to_string(),
             ),
             EventKind::Ready => Some(format!(
-                "git fetch hub && git merge (or checkout) hub/task/{slug} before posting"
+                "git fetch hub && git merge (or checkout) hub/task/{slug}; with task agents on, start it with an empty `stage: <why>` commit on the branch, else post"
             )),
             EventKind::DirectorRejected => {
                 Some("fetch hub and fix with a new commit / reset".to_string())

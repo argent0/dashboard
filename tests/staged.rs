@@ -1,7 +1,8 @@
-// Integration tests for `staged`: a director's `stage:` marker holds a
-// `ready` task (no task agent is launched), `unstage:` releases it. The
-// status survives `main` moving under the branch (the player's
-// `merge_unblock` merge becomes the tip) and a replan.
+// Integration tests for `staged`: a `ready` task never starts on its own; a
+// director's `stage:` marker releases it (status `staged`, its task agent is
+// launched). The status survives `main` moving under the branch (the
+// player's `merge_unblock` merge becomes the tip) and a replan. `unstage:`
+// puts it back while no task agent exists yet.
 
 mod common;
 
@@ -54,13 +55,19 @@ fn tick(player: &mut Player<NullSessions>) -> TickReport {
     player.tick().expect("tick")
 }
 
-/// Plans `s` and stages it before the player ever sees it `ready`, so no
-/// task agent is launched.
-fn plan_and_stage(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
+/// Plans `s` (no stage): ready, nothing launched.
+fn plan_only(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
     director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", PLAN, "plan: s");
-    commit_empty(repo.path(), "stage: not yet");
     let report = tick(player);
     assert!(report.rejected.is_empty(), "{report}");
+}
+
+/// Stages `s` as the director and ticks.
+fn stage(repo: &DirectorRepo, player: &mut Player<NullSessions>) -> TickReport {
+    commit_empty(repo.path(), "stage: go");
+    let report = tick(player);
+    assert!(report.rejected.is_empty(), "{report}");
+    report
 }
 
 /// Moves `main` with a roadmap change, ticks (the player merges it into the
@@ -75,21 +82,22 @@ fn move_main(repo: &DirectorRepo, player: &mut Player<NullSessions>, title: &str
 }
 
 #[test]
-fn a_staged_task_launches_no_task_agent_until_unstaged() {
+fn a_ready_task_never_starts_until_staged() {
     let (repo, _h, home, mut player) = setup();
     let hub = Git::new(home.hub());
-    plan_and_stage(&repo, &mut player);
-    assert_eq!(status(&hub, "s"), Status::Staged);
+    tick(&mut player); // the first tick is a baseline: no events
+    plan_only(&repo, &mut player);
+    assert_eq!(status(&hub, "s"), Status::Ready);
     for _ in 0..3 {
         let report = tick(&mut player);
         assert!(report.agents_launched.is_empty(), "{report}");
     }
     assert!(player.sessions().launched.is_empty());
+    let kinds: Vec<_> = dashboard::events::read_all(&home).iter().map(|e| e.kind).collect();
+    assert!(kinds.contains(&dashboard::events::EventKind::Ready), "{kinds:?}");
 
-    commit_empty(repo.path(), "unstage: go");
-    let report = tick(&mut player);
-    assert!(report.rejected.is_empty(), "{report}");
-    assert_eq!(status(&hub, "s"), Status::Ready);
+    let report = stage(&repo, &mut player);
+    assert_eq!(status(&hub, "s"), Status::Staged);
     assert_eq!(report.agents_launched, vec!["s".to_string()], "{report}");
 }
 
@@ -97,7 +105,8 @@ fn a_staged_task_launches_no_task_agent_until_unstaged() {
 fn staged_survives_main_moving_and_a_replan() {
     let (repo, _h, home, mut player) = setup();
     let hub = Git::new(home.hub());
-    plan_and_stage(&repo, &mut player);
+    plan_only(&repo, &mut player);
+    stage(&repo, &mut player);
     director_pull_task_branch(repo.path(), "s");
 
     move_main(&repo, &mut player, "Retitled once");
@@ -108,7 +117,6 @@ fn staged_survives_main_moving_and_a_replan() {
         "the staged branch still receives main"
     );
     assert_eq!(status(&hub, "s"), Status::Staged);
-
     move_main(&repo, &mut player, "Retitled twice");
     assert_eq!(status(&hub, "s"), Status::Staged);
 
@@ -122,14 +130,6 @@ fn staged_survives_main_moving_and_a_replan() {
     let report = tick(&mut player);
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(status(&hub, "s"), Status::Staged);
-    assert!(player.sessions().launched.is_empty());
-
-    commit_empty(repo.path(), "unstage: go");
-    let report = tick(&mut player);
-    assert!(report.rejected.is_empty(), "{report}");
-    assert_eq!(status(&hub, "s"), Status::Ready);
-    move_main(&repo, &mut player, "Retitled thrice");
-    assert_eq!(status(&hub, "s"), Status::Ready);
 }
 
 #[test]
@@ -138,29 +138,62 @@ fn stage_and_unstage_are_refused_outside_their_status() {
     let hub = Git::new(home.hub());
 
     // `unstage:` on a ready task.
-    director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", PLAN, "plan: s");
-    tick(&mut player);
-    assert_eq!(status(&hub, "s"), Status::Ready);
-    commit_empty(repo.path(), "unstage: nothing to release");
+    plan_only(&repo, &mut player);
+    commit_empty(repo.path(), "unstage: nothing to put back");
     let report = tick(&mut player);
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Plan);
     assert_eq!(status(&hub, "s"), Status::Ready);
+
 }
 
 #[test]
-fn staging_twice_a_pending_task_and_a_spike_are_refused() {
+fn staging_twice_or_unstaging_after_the_agent_launched_is_refused() {
     let (repo, _h, home, mut player) = setup();
     let hub = Git::new(home.hub());
-
-    plan_and_stage(&repo, &mut player);
+    plan_only(&repo, &mut player);
+    stage(&repo, &mut player);
     commit_empty(repo.path(), "stage: again");
     let report = tick(&mut player);
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Plan);
     assert_eq!(status(&hub, "s"), Status::Staged);
 
-    // A pending task (an unaccepted dependency).
+    let (repo, _h, home, mut player) = setup();
+    let hub = Git::new(home.hub());
+    plan_only(&repo, &mut player);
+    stage(&repo, &mut player);
+    commit_empty(repo.path(), "unstage: too late");
+    let report = tick(&mut player);
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert!(report.rejected[0].message.contains("already running"), "{report}");
+    assert_eq!(status(&hub, "s"), Status::Staged);
+}
+
+#[test]
+fn unstage_puts_a_task_back_while_no_agent_exists() {
+    let repo = director_repo(); // task agents off: staging launches nothing
+    let home_dir = temp_home();
+    let report = init::init(repo.path(), Some("proj"), Some(home_dir.path().join("home")))
+        .expect("init");
+    let home = Home { root: report.home };
+    let hub = Git::new(home.hub());
+    let mut player = Player::open(Home { root: home.root.clone() }, NullSessions::default()).unwrap();
+    plan_only(&repo, &mut player);
+    stage(&repo, &mut player);
+    assert_eq!(status(&hub, "s"), Status::Staged);
+    commit_empty(repo.path(), "unstage: not yet");
+    let report = tick(&mut player);
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(status(&hub, "s"), Status::Ready);
+}
+
+#[test]
+fn staging_a_pending_task_and_a_spike_is_refused() {
+    let (repo, _h, home, mut player) = setup();
+    let hub = Git::new(home.hub());
+
+    plan_only(&repo, &mut player);
     director_commit_on_branch(
         repo.path(),
         "task/p",
@@ -174,7 +207,6 @@ fn staging_twice_a_pending_task_and_a_spike_are_refused() {
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Plan);
 
-    // A spike.
     director_commit_on_branch(
         repo.path(),
         "task/sp",
@@ -184,7 +216,7 @@ fn staging_twice_a_pending_task_and_a_spike_are_refused() {
     );
     tick(&mut player);
     assert_eq!(status(&hub, "sp"), Status::Ready);
-    commit_empty(repo.path(), "stage: hold the spike");
+    commit_empty(repo.path(), "stage: start the spike");
     let report = tick(&mut player);
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Plan);
@@ -195,8 +227,8 @@ fn staging_twice_a_pending_task_and_a_spike_are_refused() {
 fn a_task_agents_stage_is_ownership() {
     let (repo, _h, home, mut player) = setup();
     let hub = Git::new(home.hub());
-    director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", PLAN, "plan: s");
-    tick(&mut player);
+    plan_only(&repo, &mut player);
+    stage(&repo, &mut player);
     let dir = dashboard::paths::agent_clone(&repo.director_path(), "s");
     let git = Git::new(&dir);
     git.run(&["config", "user.name", "Test Agent"]).unwrap();
@@ -207,5 +239,56 @@ fn a_task_agents_stage_is_ownership() {
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Ownership);
     assert_eq!(report.rejected[0].actor, Actor::TaskAgent);
-    assert_eq!(status(&hub, "s"), Status::Ready);
+    assert_eq!(status(&hub, "s"), Status::Staged);
+}
+
+// The old race: a dependent task used to get its agent in the accept's own
+// tick. Now it becomes `ready` and waits for the director's `stage:`.
+#[test]
+fn a_dependent_task_waits_ready_after_its_dependency_is_accepted() {
+    let (repo, _h, home, mut player) = setup();
+    let hub = Git::new(home.hub());
+    director_commit_on_branch(repo.path(), "task/t", "tasks/t/task.toml",
+        "title = \"t\"\nphase = \"p1\"\ndepends_on = [\"s\"]\n", "plan: t");
+    director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", PLAN, "plan: s");
+    tick(&mut player);
+    stage(&repo, &mut player);
+
+    let adir = dashboard::paths::agent_clone(&repo.director_path(), "s");
+    let g = Git::new(&adir);
+    g.run(&["config", "user.name", "a"]).unwrap();
+    g.run(&["config", "user.email", "a@x"]).unwrap();
+    g.run(&["config", "commit.gpgsign", "false"]).unwrap();
+    write_file(&adir, "tasks/s/prompt.md", "p\n");
+    write_file(&adir, "tasks/s/task.toml", &format!("{PLAN}\n[check]\nname = \"sc\"\ncmd = \"test -f f.txt\"\n"));
+    write_file(&adir, "tests.d/s.toml", "[[check]]\nname = \"sc\"\ncmd = \"test -f f.txt\"\n");
+    commit(&adir, "post: s");
+    let r = tick(&mut player);
+    assert!(r.rejected.is_empty(), "{r}");
+    let wdir = dashboard::paths::worker_clone(&repo.director_path(), "s");
+    let g = Git::new(&wdir);
+    g.run(&["config", "user.name", "w"]).unwrap();
+    g.run(&["config", "user.email", "w@x"]).unwrap();
+    g.run(&["config", "commit.gpgsign", "false"]).unwrap();
+    write_file(&wdir, "f.txt", "x\n");
+    commit(&wdir, "finish");
+    let r = tick(&mut player);
+    assert!(r.rejected.is_empty(), "{r}");
+    assert_eq!(status(&hub, "s"), Status::Tested);
+
+    director_pull_task_branch(repo.path(), "s");
+    commit_empty(repo.path(), "accept: s");
+    let r = tick(&mut player);
+    assert_eq!(status(&hub, "s"), Status::Accepted, "{r}");
+    assert_eq!(status(&hub, "t"), Status::Ready, "{r}");
+    assert!(!r.agents_launched.contains(&"t".to_string()), "{r}");
+    tick(&mut player);
+    assert_eq!(status(&hub, "t"), Status::Ready);
+
+    director_pull_task_branch(repo.path(), "t");
+    commit_empty(repo.path(), "stage: go");
+    let r = tick(&mut player);
+    assert!(r.rejected.is_empty(), "{r}");
+    assert_eq!(status(&hub, "t"), Status::Staged);
+    assert!(r.agents_launched.contains(&"t".to_string()), "{r}");
 }

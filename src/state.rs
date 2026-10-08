@@ -25,8 +25,9 @@ pub enum Status {
     Pending,
     Orphaned,
     Ready,
-    /// A `ready` task the director holds back with a `stage:` marker: its
-    /// task agent isn't launched until `unstage:`.
+    /// A `ready` task the director released with a `stage:` marker: its task
+    /// agent is launched (a `ready` task never starts on its own); `unstage:`
+    /// puts it back, until the agent exists.
     Staged,
     Posted,
     InProgress,

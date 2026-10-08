@@ -429,7 +429,7 @@ back here):
   (`session_idle` / `agent_idle`, `Player::report_idle`, `idle_told`) if
   it `owes_work`: a worker while pinned and `posted`/`in_progress`/
   `in_revision` with no held finish (a finish, block: or contest: moves
-  it past these); a task agent while its task is `ready` (the post),
+  it past these); a task agent while its task is `staged` (the post),
   `tested` (a review) or `contested` (a reply) and no report was collected
   since its last launch/relay. Anything else is waiting on someone else.
   `owes_work` is the reusable "supposed to be working" rule. Another
@@ -549,14 +549,17 @@ back here):
   CLI change: a spike is just different director commit shapes
   (`kind = "spike"`, `questions/`, `conclude:`).
 
-- **Staged tasks**: a `ready` task's task agent launches at once and nothing
-  limits how many tasks are in flight, so the director holds one back with an
-  empty `stage: <why>` commit on `task/<slug>` (`Transition::Stage`,
-  `Player::try_stage`) and releases it with `unstage:` (back to `ready`, the
-  agent launches next tick). Only a `ready` non-spike task can be staged,
-  and only a `staged` one unstaged (`plan` rejection otherwise); a task
-  agent's marker is still `ownership`. `Status::Staged` counts as pending in
-  Overall. `state::staged_at` walks first-parent history from the tip past
+- **Staged tasks**: a `ready` task never starts on its own (a dependency's
+  accept used to launch its agent in the same tick, leaving no window to
+  hold it). The director releases it with an empty `stage: <why>` commit on
+  `task/<slug>` (`Transition::Stage`, `Player::try_stage`): status `staged`,
+  and `run_task_agents` launches its agent. `unstage:` puts it back to
+  `ready`, refused once a task agent exists (`task.agent`). Only a `ready`
+  non-spike task can be staged, and only a `staged` one unstaged (`plan`
+  rejection otherwise); a task agent's marker is still `ownership`, and a
+  task agent may post only while `staged`. A managed `ready` task emits a
+  `ready` event. `Status::Staged` counts as pending in Overall.
+  `state::staged_at` walks first-parent history from the tip past
   `merge_unblock`/`replan` commits to the last marker, because the player's
   merge of `main` becomes the tip and would shadow the note there; a replan
   keeps a task staged, and `unblock_merges` keeps feeding a staged branch
@@ -594,7 +597,8 @@ back here):
   session, so the operator can watch them (`tmux attach -t
   dash-<project>-<slug>_agent`) and the hub records everything they do.
   Launched automatically when an agent-managed task (any kind but a spike,
-  with `task_agent_cmd` non-empty) becomes `ready`, or is found `tested`
+  with `task_agent_cmd` non-empty) becomes `staged` (a `ready` one waits for
+  the director's `stage:`), or is found `tested`
   without one; the player pastes a review request on every new tested tip.
   Its `Sessions` key is `state::agent_key(slug)` (`<slug>_agent`; `_` never
   occurs in a slug). Its commits (`Actor::TaskAgent`) go through the same
@@ -603,7 +607,7 @@ back here):
   `task.toml`, no markers, all `ownership`. A hub tip that moved under its
   unimported commit gets a rebase request, not a strike. While task agents
   are on, a director post/send-back on an agent-managed task is
-  `ownership`, and `ready`/`tested` events give way to `agent_launched` /
+  `ownership`, and `tested` events give way to `agent_launched` /
   `agent_report`. Tests turn task agents off in their fixture roadmap
   (`tests/common`'s `NO_TASK_AGENTS`) unless they're about them
   (`tests/task_agent.rs`).

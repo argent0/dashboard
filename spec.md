@@ -404,7 +404,7 @@ commits.
 | `pending` | branch has `task.toml` but no validated post |
 | `orphaned` | pending, and some `depends_on` is retired — needs a replan |
 | `ready` | pending, and every `depends_on` accepted — the director may post |
-| `staged` | `ready`, held back by the director's latest `stage:` marker (§9): the task agent isn't launched until `unstage:`. Resolved by walking the branch's first-parent history past the player's `merge_unblock` merges and replans, so `main` moving doesn't release it |
+| `staged` | `ready`, released by the director's latest `stage:` marker (§9): the task agent is launched and posts. Resolved by walking the branch's first-parent history past the player's `merge_unblock` merges and replans, so `main` moving doesn't un-stage it |
 | `posted` | validated post, no live worker session yet |
 | `in_progress` | worker session alive and working (runtime, not git) |
 | `tested` | latest worker commit validated as passing, awaiting director |
@@ -633,17 +633,18 @@ with the operator.
 
 **Lifecycle.**
 
-- *Launch*: automatic. When an agent-managed task becomes `ready` (not
-  `staged`: the director holds a task back with an empty `stage: <why>` commit
-  on its branch and releases it with `unstage: <why>`; only a `ready`
-  non-spike task can be staged, anything else is a `plan` rejection, and a
-  task agent's marker is `ownership`) the player
+- *Launch*: a `ready` task never starts on its own. The director releases
+  it with an empty `stage: <why>` commit on its branch; when an
+  agent-managed task is `staged` the player
   creates the task agent's clone and starts its session with the post step;
   a task found `tested` with no task agent gets one with the review step.
   Launched once, recorded in `refs/dashboard/agent/<slug>`; like a worker,
   a dead task agent is reported (`agent_died`), never restarted
   automatically: `dashboard relaunch <slug> --agent` restarts it in the same
-  clone, with a fresh prompt for where the task is now.
+  clone, with a fresh prompt for where the task is now. Only a `ready`
+  non-spike task can be staged and only a `staged` one unstaged (back to
+  `ready`, and only while no task agent exists); anything else is a `plan`
+  rejection, and a task agent's marker is `ownership`.
 - *Review*: each time the task becomes `tested` at a new tip, the player
   pastes a review request for the next round into the task agent's session
   (once per tip, recorded in `refs/dashboard/agent-asked/<slug>`).
@@ -710,8 +711,9 @@ accepts on an `accept` verdict, asks (`dashboard ask`) or takes an `unsure`
 to the operator; the decision stays the director's.
 
 **Events.** `agent_launched`, `agent_report`, `agent_died`. For an
-agent-managed task, `ready`, `tested` and `contested` are not emitted: they're the task
-agent's to act on, and the director hears its report instead.
+agent-managed task, `tested` and `contested` are not emitted: they're the task
+agent's to act on, and the director hears its report instead. `ready` is
+emitted: it waits for the director's `stage:`.
 
 ## 18. Contests
 

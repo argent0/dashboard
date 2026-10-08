@@ -682,6 +682,14 @@ printf 'title = "epsilon"\nphase = "p1"\nbrief = "a fake task agent posts this"\
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: epsilon"
 
+# A ready task never starts on its own: it waits for the director's `stage:`.
+wait_until "epsilon is ready" task_status_is epsilon ready
+tick; tick
+session_gone epsilon_agent || { echo "e2e: a ready task's task agent started without a stage:" >&2; exit 1; }
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/task/epsilon
+git -C "$DIR_REPO" commit -q --allow-empty -m "stage: epsilon" -m "start its task agent"
+wait_until "epsilon is staged" task_status_is epsilon staged
 wait_until "epsilon's task agent session exists" session_alive epsilon_agent
 wait_until "epsilon's worker session exists" session_alive epsilon
 post_sha=$(git --git-dir "$HOME_DIR/hub.git" log --format=%H --grep='^post: epsilon' refs/heads/task/epsilon)

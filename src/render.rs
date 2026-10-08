@@ -330,7 +330,7 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     }
     out.push(String::new());
 
-    // ---- staged (held back by the director) ----
+    // ---- staged (released by the director: the task agent posts) ----
     let staged: Vec<&TaskState> = live
         .iter()
         .filter(|t| t.status == Status::Staged)
@@ -343,8 +343,20 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
             color,
         ));
         for t in &staged {
+            let agent = match &t.agent {
+                Some(a) if a.alive => style("  (task agent posting)", &[c::DIM], color),
+                Some(a) => style(
+                    &format!(
+                        "  (task agent dead{})",
+                        relaunched(a.relaunches, state.roadmap.limits.max_relaunches)
+                    ),
+                    &[c::RED],
+                    color,
+                ),
+                None => String::new(),
+            };
             out.push(format!(
-                "  {}  {}",
+                "  {}  {}{agent}",
                 style(&t.slug, &[c::YELLOW], color),
                 truncate(
                     &t.config.title,
