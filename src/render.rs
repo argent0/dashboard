@@ -923,6 +923,7 @@ mod tests {
             },
             player: Default::default(),
             sandbox: Default::default(),
+            budget: Default::default(),
         }
     }
 

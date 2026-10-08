@@ -17,7 +17,7 @@
 // send-backs into its tmux session. Step 7 adds events and `dashboard wait`.
 
 use crate::checks;
-use crate::config::{self, path_under_test_paths, Reason, RoadmapConfig, TaskConfig, TaskKind};
+use crate::config::{self, Reason, RoadmapConfig, TaskConfig, TaskKind, path_under_test_paths};
 use crate::events::{self, EventKind};
 use crate::flaky;
 use crate::fsm::{self, Move, Verdict};
@@ -599,6 +599,8 @@ pub struct TickReport {
     /// Finishes and accepts held because they fail only on checks already
     /// impure on `main`: (slug, message).
     pub held: Vec<(String, String)>,
+    /// Suites over `[budget] suite_warn`: (slug, message); `_main` for main's.
+    pub slow: Vec<(String, String)>,
     pub errors: Vec<String>,
 }
 
@@ -615,6 +617,7 @@ impl TickReport {
             && self.agent_reports.is_empty()
             && self.main_impure.is_empty()
             && self.held.is_empty()
+            && self.slow.is_empty()
             && self.errors.is_empty()
     }
 }
@@ -659,6 +662,9 @@ impl fmt::Display for TickReport {
         }
         for (slug, msg) in &self.held {
             lines.push(format!("held {slug}: {msg}"));
+        }
+        for (slug, msg) in &self.slow {
+            lines.push(format!("slow suite {slug}: {msg}"));
         }
         lines.extend(self.merges.iter().cloned());
         for err in &self.errors {
@@ -720,6 +726,10 @@ pub struct Player<S: Sessions> {
     /// `main`'s impure checks under the current sandbox, by name, as of
     /// this tick's `verify_main`: work failing only on these is held.
     main_impure: BTreeMap<String, String>,
+    /// Main's tip and why its suite is over `[budget] suite_warn`, if it is.
+    main_slow: Option<(String, String)>,
+    /// The main tip whose slowness was last reported.
+    slow_told: Option<String>,
     /// The main tip `verify_main` last ran the suite on.
     main_verified: String,
     /// What `main`'s suite verdict was last reported for (tip, policy and
@@ -765,6 +775,8 @@ impl<S: Sessions> Player<S> {
             agent_hold_told: BTreeMap::new(),
             sandbox_preflighted: None,
             main_impure: BTreeMap::new(),
+            main_slow: None,
+            slow_told: None,
             main_verified: String::new(),
             main_told: None,
             held_accepts: BTreeMap::new(),
@@ -788,6 +800,9 @@ impl<S: Sessions> Player<S> {
             .iter()
             .filter_map(|c| c.impurity().map(|why| (c.name.clone(), why)))
             .collect();
+        self.main_slow = suite
+            .slow(&self.runner.budget())
+            .map(|msg| (main_tip.clone(), msg));
         self.main_verified = main_tip;
         Ok(&self.main_impure)
     }
@@ -795,6 +810,12 @@ impl<S: Sessions> Player<S> {
     /// Puts `main`'s impure checks in the report once per (tip, policy,
     /// impure set), for the director's `main_impure` event.
     fn report_main(&mut self, report: &mut TickReport) {
+        if let Some((tip, msg)) = &self.main_slow {
+            if self.slow_told.as_ref() != Some(tip) {
+                self.slow_told = Some(tip.clone());
+                report.slow.push(("_main".to_string(), msg.clone()));
+            }
+        }
         if self.main_impure.is_empty() {
             self.main_told = None;
             return;
@@ -913,7 +934,9 @@ impl<S: Sessions> Player<S> {
             .hub
             .rev_parse("refs/heads/main")
             .ok_or("hub has no main")?;
-        let sandbox = Sandbox::from_config(&self.roadmap_at(&main_tip)?.sandbox)?;
+        let roadmap = self.roadmap_at(&main_tip)?;
+        self.runner.set_budget(roadmap.budget);
+        let sandbox = Sandbox::from_config(&roadmap.sandbox)?;
         let fingerprint = sandbox.fingerprint();
         if self.sandbox_preflighted.as_ref() != Some(&fingerprint) {
             self.sandbox_preflighted = None;
@@ -1023,6 +1046,10 @@ impl<S: Sessions> Player<S> {
         }
         for (slug, msg) in &report.held {
             events::append(&self.home, EventKind::Held, Some(slug), msg)?;
+        }
+        for (slug, msg) in &report.slow {
+            let slug = (slug != "_main").then_some(slug.as_str());
+            events::append(&self.home, EventKind::SuiteSlow, slug, msg)?;
         }
         for slug in &report.agents_launched {
             let session = state::tmux_session_name(&self.project, &state::agent_key(slug));
@@ -1549,7 +1576,8 @@ impl<S: Sessions> Player<S> {
         // problem, not this commit's: it mustn't block the director (who may
         // be here to change `[sandbox]`).
         if !suite.pass && self.held_by_main(&suite).is_none() {
-            return Err((Reason::Suite, format!("suite: {}", suite.summary())));
+            let reason = Self::suite_failure_reason(&suite);
+            return Err((reason, format!("{}: {}", reason.as_str(), suite.summary())));
         }
         Ok(())
     }
@@ -1911,16 +1939,13 @@ impl<S: Sessions> Player<S> {
             return self.try_marker(slug, tip, candidate, cumulative_empty, status, report);
         }
 
-        let managed = hub_state
-            .tasks
-            .iter()
-            .find(|t| t.slug == slug)
-            .is_some_and(|t| state::task_agent_managed(&hub_state.roadmap, &t.config));
+        let ctx = self.fsm_ctx(&hub_state, slug);
+        let verdict = |mv: Move| ctx.map(|c| fsm::decide(Actor::Director, mv, c));
         match status {
             Some(Status::Pending | Status::Ready | Status::Staged | Status::Orphaned) => {
                 let prompt_path = format!("tasks/{slug}/prompt.md");
                 let has_prompt = self.hub.blob_hash(candidate, &prompt_path).is_some();
-                if has_prompt && managed {
+                if has_prompt && verdict(Move::Post) == Some(Verdict::Reject(Reason::Ownership)) {
                     let msg = format!(
                         "task/{slug}'s post is its task agent's (spec §17), not the director's; with `[player] task_agent_cmd = \"\"` the director posts itself"
                     );
@@ -1939,10 +1964,7 @@ impl<S: Sessions> Player<S> {
                 }
                 let task_toml_path = format!("tasks/{slug}/task.toml");
                 if diffs.len() == 1 && diffs[0].1 == task_toml_path {
-                    let ctx = self.fsm_ctx(&hub_state, slug);
-                    if let Some(Verdict::Reject(reason)) =
-                        ctx.map(|c| fsm::decide(Actor::Director, Move::Replan, c))
-                    {
+                    if let Some(Verdict::Reject(reason)) = verdict(Move::Replan) {
                         let msg = format!(
                             "{}: task/{slug}'s task agent is already running on this plan (its prompt was written at launch): retire the task to change it",
                             reason.as_str()
@@ -1957,39 +1979,45 @@ impl<S: Sessions> Player<S> {
                 );
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
-            Some(Status::Tested) if records::is_spike_at(&self.hub, tip, slug) => {
-                self.try_spike_send_back(slug, tip, candidate, &diffs, &hub_state, report)
-            }
-            Some(Status::Tested) if managed => {
-                let msg = format!(
-                    "task/{slug}'s send-backs are its task agent's (spec §17), not the director's: accept, or ask it (`dashboard ask {slug}`)"
-                );
-                self.reject(slug, candidate, Reason::Ownership, msg, report)
-            }
-            Some(Status::Tested) => self.try_send_back(
-                slug,
-                tip,
-                candidate,
-                &diffs,
-                &hub_state,
-                Actor::Director,
-                report,
-            ),
-            Some(Status::Contested) if managed => {
-                let msg = format!(
-                    "task/{slug}'s contest is its task agent's to answer (spec §18), not the director's: ask it (`dashboard ask {slug}`)"
-                );
-                self.reject(slug, candidate, Reason::Ownership, msg, report)
-            }
-            Some(Status::Contested) => self.try_contest_reply(
-                slug,
-                tip,
-                candidate,
-                &diffs,
-                &hub_state,
-                Actor::Director,
-                report,
-            ),
+            Some(Status::Tested) => match verdict(Move::SendBack) {
+                Some(Verdict::Allow) if ctx.is_some_and(|c| c.spike) => {
+                    self.try_spike_send_back(slug, tip, candidate, &diffs, &hub_state, report)
+                }
+                Some(Verdict::Allow) => self.try_send_back(
+                    slug,
+                    tip,
+                    candidate,
+                    &diffs,
+                    &hub_state,
+                    Actor::Director,
+                    report,
+                ),
+                Some(Verdict::Reject(reason)) => {
+                    let msg = format!(
+                        "task/{slug}'s send-backs are its task agent's (spec §17), not the director's: accept, or ask it (`dashboard ask {slug}`)"
+                    );
+                    self.reject(slug, candidate, reason, msg, report)
+                }
+                _ => Ok(()),
+            },
+            Some(Status::Contested) => match verdict(Move::ContestReply) {
+                Some(Verdict::Allow) => self.try_contest_reply(
+                    slug,
+                    tip,
+                    candidate,
+                    &diffs,
+                    &hub_state,
+                    Actor::Director,
+                    report,
+                ),
+                Some(Verdict::Reject(reason)) => {
+                    let msg = format!(
+                        "task/{slug}'s contest is its task agent's to answer (spec §18), not the director's: ask it (`dashboard ask {slug}`)"
+                    );
+                    self.reject(slug, candidate, reason, msg, report)
+                }
+                _ => Ok(()),
+            },
             Some(Status::Conflicted) => {
                 let main = hub_state
                     .tasks
@@ -2004,11 +2032,16 @@ impl<S: Sessions> Player<S> {
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
             Some(other) => {
+                let reason = match verdict(Move::Other) {
+                    Some(Verdict::Reject(reason)) => reason,
+                    Some(Verdict::Ignore | Verdict::Hold) => return Ok(()),
+                    _ => Reason::Ownership,
+                };
                 let msg = format!(
                     "task/{slug} is {} — the director may not commit until the worker finishes",
                     other.as_str()
                 );
-                self.reject(slug, candidate, Reason::Ownership, msg, report)
+                self.reject(slug, candidate, reason, msg, report)
             }
             None => {
                 let msg =
@@ -2072,6 +2105,15 @@ impl<S: Sessions> Player<S> {
             spike: task.spike.is_some(),
             agent: task.agent.is_some(),
         })
+    }
+
+    /// The fsm verdict for the director making `mv` on `slug`'s branch now.
+    /// An unknown task has no context: `None`.
+    fn director_verdict(&self, slug: &str, mv: Move) -> Result<Option<Verdict>, String> {
+        let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
+        Ok(self
+            .fsm_ctx(&hub_state, slug)
+            .map(|c| fsm::decide(Actor::Director, mv, c)))
     }
 
     /// An empty commit on an existing branch: a marker (spec §5, §9). Only
@@ -2141,27 +2183,21 @@ impl<S: Sessions> Player<S> {
         } else {
             ("unstage", Status::Staged, Transition::Unstage)
         };
-        let has_agent = !stage
-            && state::derive(&self.hub, &|s| self.sessions.alive(s))?
-                .tasks
-                .iter()
-                .any(|t| t.slug == slug && t.agent.is_some());
-        let problem = if status != Some(needs) {
-            Some(format!(
+        let mv = if stage { Move::Stage } else { Move::Unstage };
+        let problem = match self.director_verdict(slug, mv)? {
+            Some(Verdict::Allow) => None,
+            Some(Verdict::Ignore | Verdict::Hold) => return Ok(()),
+            _ if status != Some(needs) => Some(format!(
                 "{marker}: task/{slug} is {} — only a {} task can be {marker}d",
                 status.map(|s| s.as_str()).unwrap_or("unknown"),
                 needs.as_str()
-            ))
-        } else if has_agent {
-            Some(format!(
-                "unstage: task/{slug}'s task agent is already running — retire the task to stop it"
-            ))
-        } else if stage && records::is_spike_at(&self.hub, tip, slug) {
-            Some(format!(
+            )),
+            _ if stage => Some(format!(
                 "stage: task/{slug} is a spike — it has no task agent to start"
-            ))
-        } else {
-            None
+            )),
+            _ => Some(format!(
+                "unstage: task/{slug}'s task agent is already running — retire the task to stop it"
+            )),
         };
         if let Some(msg) = problem {
             return self.reject(slug, candidate, Reason::Plan, msg, report);
@@ -2170,7 +2206,13 @@ impl<S: Sessions> Player<S> {
         self.hub
             .update_ref_cas(&hub_ref, candidate, tip)
             .map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, Actor::Director, transition, Some(slug))?;
+        records::record_import(
+            &self.hub,
+            candidate,
+            Actor::Director,
+            transition,
+            Some(slug),
+        )?;
         report
             .imported
             .push((hub_ref, candidate.to_string(), transition));
@@ -2194,9 +2236,9 @@ impl<S: Sessions> Player<S> {
         // 1 by default, and the player retires the task itself).
         let mut reason = Reason::Post;
         let validated = if records::is_spike_at(&self.hub, candidate, slug) {
-            self.validate_spike_post(slug, tip, candidate, status)
+            self.validate_spike_post(slug, tip, candidate, status, actor, hub_state)
         } else {
-            self.validate_post(slug, candidate, status, hub_state)
+            self.validate_post(slug, candidate, status, actor, hub_state)
                 .and_then(|()| {
                     self.evidence_miss(slug, candidate).map_or(Ok(()), |miss| {
                         reason = Reason::Evidence;
@@ -2309,6 +2351,7 @@ impl<S: Sessions> Player<S> {
         slug: &str,
         candidate: &str,
         status: Status,
+        actor: Actor,
         hub_state: &state::HubState,
     ) -> Result<(), String> {
         let task = hub_state
@@ -2317,7 +2360,10 @@ impl<S: Sessions> Player<S> {
             .find(|t| t.slug == slug)
             .ok_or_else(|| format!("post: task/{slug}: no task state"))?;
 
-        if status != Status::Ready && status != Status::Staged {
+        let may_post = self
+            .fsm_ctx(hub_state, slug)
+            .is_some_and(|c| fsm::decide(actor, Move::Post, c) == Verdict::Allow);
+        if !may_post {
             if status == Status::Orphaned {
                 let retired = records::retired_slugs(&self.hub);
                 let retired_deps: Vec<&str> = task
@@ -2700,19 +2746,28 @@ impl<S: Sessions> Player<S> {
         status: Option<Status>,
         report: &mut TickReport,
     ) -> Result<(), String> {
-        if status != Some(Status::Tested) {
-            let msg = format!(
-                "accept: task/{slug} is {} — it must be tested before it can be accepted",
-                status.map(|s| s.as_str()).unwrap_or("unknown")
-            );
-            return self.reject(slug, candidate, Reason::Accept, msg, report);
-        }
-
-        if records::is_spike_at(&self.hub, tip, slug) {
-            let msg = format!(
-                "accept: task/{slug} is a spike: it never merges into main (finish it with `conclude:`)"
-            );
-            return self.reject(slug, candidate, Reason::Accept, msg, report);
+        match self.director_verdict(slug, Move::Accept)? {
+            Some(Verdict::Allow) => {}
+            Some(Verdict::Reject(reason)) => {
+                let msg = if status == Some(Status::Tested) {
+                    format!(
+                        "accept: task/{slug} is a spike: it never merges into main (finish it with `conclude:`)"
+                    )
+                } else {
+                    format!(
+                        "accept: task/{slug} is {} — it must be tested before it can be accepted",
+                        status.map(|s| s.as_str()).unwrap_or("unknown")
+                    )
+                };
+                return self.reject(slug, candidate, reason, msg, report);
+            }
+            Some(Verdict::Ignore | Verdict::Hold) => return Ok(()),
+            None => {
+                let msg = format!(
+                    "accept: task/{slug} is unknown — it must be tested before it can be accepted"
+                );
+                return self.reject(slug, candidate, Reason::Accept, msg, report);
+            }
         }
 
         self.land(slug, tip, candidate, Transition::Accept, report)
@@ -2984,7 +3039,13 @@ impl<S: Sessions> Player<S> {
     ) -> Result<(), String> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
         let task = hub_state.tasks.iter().find(|t| t.slug == slug);
-        let Some(conflict) = task.and_then(|t| t.conflict.clone()) else {
+        let resolvable = self
+            .fsm_ctx(&hub_state, slug)
+            .map(|c| fsm::decide(Actor::Director, Move::Resolve, c));
+        let conflict = task
+            .and_then(|t| t.conflict.clone())
+            .filter(|_| resolvable == Some(Verdict::Allow));
+        let Some(conflict) = conflict else {
             let msg = format!(
                 "history: task/{slug} is {} — the only director merge is the resolution of a conflict the player recorded (the player merges main itself)",
                 task.map(|t| t.status.as_str()).unwrap_or("unknown")
@@ -3038,8 +3099,13 @@ impl<S: Sessions> Player<S> {
         tip: &str,
         candidate: &str,
         status: Status,
+        actor: Actor,
+        hub_state: &state::HubState,
     ) -> Result<(), String> {
-        if status != Status::Ready {
+        let may_post = self
+            .fsm_ctx(hub_state, slug)
+            .is_some_and(|c| fsm::decide(actor, Move::Post, c) == Verdict::Allow);
+        if !may_post {
             return Err(format!(
                 "post: task/{slug} is {} — a spike can only be posted while ready",
                 status.as_str()
@@ -3337,18 +3403,28 @@ impl<S: Sessions> Player<S> {
         status: Option<Status>,
         report: &mut TickReport,
     ) -> Result<(), String> {
-        if !records::is_spike_at(&self.hub, tip, slug) {
-            let msg = format!(
-                "conclude: task/{slug} is not a spike — an ordinary task is finished with `accept:`"
-            );
-            return self.reject(slug, candidate, Reason::Ownership, msg, report);
-        }
-        if status != Some(Status::Tested) {
-            let msg = format!(
-                "conclude: task/{slug} is {} — a spike needs a validated finish before it can be concluded",
-                status.map(|s| s.as_str()).unwrap_or("unknown")
-            );
-            return self.reject(slug, candidate, Reason::Accept, msg, report);
+        match self.director_verdict(slug, Move::Conclude)? {
+            Some(Verdict::Allow) => {}
+            Some(Verdict::Reject(reason)) => {
+                let msg = if reason == Reason::Ownership {
+                    format!(
+                        "conclude: task/{slug} is not a spike — an ordinary task is finished with `accept:`"
+                    )
+                } else {
+                    format!(
+                        "conclude: task/{slug} is {} — a spike needs a validated finish before it can be concluded",
+                        status.map(|s| s.as_str()).unwrap_or("unknown")
+                    )
+                };
+                return self.reject(slug, candidate, reason, msg, report);
+            }
+            Some(Verdict::Ignore | Verdict::Hold) => return Ok(()),
+            None => {
+                let msg = format!(
+                    "conclude: task/{slug} is unknown — a spike needs a validated finish before it can be concluded"
+                );
+                return self.reject(slug, candidate, Reason::Accept, msg, report);
+            }
         }
         let Some(note) = records::exploration(&self.hub, tip) else {
             let msg = format!("conclude: task/{slug} has no verified answer recorded at its tip");
@@ -3402,21 +3478,11 @@ impl<S: Sessions> Player<S> {
     ) -> Result<(), String> {
         // A spike the operator gives up on may also be retired once its
         // finish is validated (spec §14); an ordinary tested task may not.
-        let tested_spike =
-            status == Some(Status::Tested) && records::is_spike_at(&self.hub, tip, slug);
-        let allowed = tested_spike
-            || matches!(
-                status,
-                Some(
-                    Status::Pending
-                        | Status::Ready
-                        | Status::Staged
-                        | Status::Orphaned
-                        | Status::Conflicted
-                        | Status::Contested
-                        | Status::Escalated
-                )
-            );
+        let allowed = match self.director_verdict(slug, Move::Retire)? {
+            Some(Verdict::Allow) => true,
+            Some(Verdict::Ignore | Verdict::Hold) => return Ok(()),
+            Some(Verdict::Reject(_)) | None => false,
+        };
         if !allowed {
             let msg = format!(
                 "retire: task/{slug} is {} — retire is only allowed while pending/ready/orphaned (not posted or in flight), conflicted, contested or escalated",
@@ -3585,6 +3651,16 @@ impl<S: Sessions> Player<S> {
             .hub
             .show_file(&tip, &format!("tasks/{slug}/task.toml"))?;
         config::task_config_from_str(&text).ok()
+    }
+
+    /// A failing suite is a `budget` strike when a check was killed for
+    /// running too long, else a `suite` one.
+    fn suite_failure_reason(suite: &checks::SuiteResult) -> Reason {
+        if suite.checks.iter().any(|c| c.timed_out) {
+            Reason::Budget
+        } else {
+            Reason::Suite
+        }
     }
 
     fn roadmap_at(&self, commit: &str) -> Result<RoadmapConfig, String> {
@@ -4091,10 +4167,9 @@ impl<S: Sessions> Player<S> {
             .tasks
             .iter()
             .filter(|t| {
-                matches!(
-                    t.status,
-                    Status::Posted | Status::InProgress | Status::InRevision
-                ) && records::has_pins(&self.hub, &t.slug)
+                self.fsm_ctx(&hub_state, &t.slug)
+                    .is_some_and(|c| fsm::decide(Actor::Worker, Move::Finish, c) == Verdict::Allow)
+                    && records::has_pins(&self.hub, &t.slug)
             })
             .map(|t| (t.slug.clone(), t.tip.clone()))
             .collect();
@@ -4263,8 +4338,17 @@ impl<S: Sessions> Player<S> {
                 }
                 return Ok(());
             }
-            let msg = format!("suite: task/{slug}: {}", suite.summary());
-            return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
+            let reason = Self::suite_failure_reason(&suite);
+            let msg = format!("{}: task/{slug}: {}", reason.as_str(), suite.summary());
+            return self.reject_and_relay(slug, candidate, reason, msg, report);
+        }
+        let budget = self.runner.budget();
+        if let Some(why) = suite.over_budget(&budget) {
+            let msg = format!("budget: task/{slug}: {why}");
+            return self.reject_and_relay(slug, candidate, Reason::Budget, msg, report);
+        }
+        if let Some(msg) = suite.slow(&budget) {
+            report.slow.push((slug.to_string(), msg));
         }
 
         if let Err(problem) = self.validate_flaky_finish(slug, hub_tip, candidate) {
@@ -4590,8 +4674,19 @@ impl<S: Sessions> Player<S> {
             );
         }
 
-        let step = match status {
-            Status::Staged => {
+        let mv = match status {
+            Status::Staged => Move::Post,
+            Status::Tested => Move::SendBack,
+            Status::Contested => Move::ContestReply,
+            _ => Move::Post,
+        };
+        let verdict = fsm::decide(
+            Actor::TaskAgent,
+            mv,
+            self.fsm_ctx(&hub_state, slug).unwrap(),
+        );
+        let step = match (verdict, mv) {
+            (Verdict::Allow, Move::Post) => {
                 if self
                     .hub
                     .blob_hash(candidate, &format!("tasks/{slug}/prompt.md"))
@@ -4620,7 +4715,7 @@ impl<S: Sessions> Player<S> {
                 )?;
                 "post"
             }
-            Status::Tested if task.spike.is_none() => {
+            (Verdict::Allow, Move::SendBack) => {
                 self.try_send_back(
                     slug,
                     tip,
@@ -4632,7 +4727,7 @@ impl<S: Sessions> Player<S> {
                 )?;
                 "send-back"
             }
-            Status::Contested => {
+            (Verdict::Allow, Move::ContestReply) => {
                 self.try_contest_reply(
                     slug,
                     tip,
@@ -4644,10 +4739,9 @@ impl<S: Sessions> Player<S> {
                 )?;
                 "contest reply"
             }
-            other => {
-                if fsm::decide(Actor::TaskAgent, Move::Post, self.fsm_ctx(&hub_state, slug).unwrap())
-                    == Verdict::Hold
-                {
+            (verdict, _) => {
+                let other = status;
+                if verdict == Verdict::Hold {
                     // Not the agent's doing: the plan moved the task off
                     // `staged`. Leave the commit unimported, tell it once.
                     if self.agent_hold_told.get(slug) != Some(&candidate.to_string()) {
@@ -5356,7 +5450,6 @@ fn path_allowed(path: &str, docs_paths: &[String]) -> bool {
         path == prefix || path.starts_with(&format!("{prefix}/"))
     })
 }
-
 
 /// `path`'s basename looks like a review note (`tasks/<slug>/reviews/r<N>.md`):
 /// used only to tell "no review file at all" apart from "wrong round number"

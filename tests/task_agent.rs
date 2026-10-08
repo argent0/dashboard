@@ -321,7 +321,10 @@ fn a_task_agent_may_commit_a_lock_file_only_when_the_roadmap_names_it() {
     agent_commit(&repo, &[("Cargo.lock", "# locked\n")], "lock the test dep");
     let report = player.tick().expect("tick");
     assert!(
-        !report.rejected.iter().any(|r| r.reason == Reason::Ownership),
+        !report
+            .rejected
+            .iter()
+            .any(|r| r.reason == Reason::Ownership),
         "{report}"
     );
 
@@ -475,10 +478,7 @@ fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
         &repo,
         &[
             ("tasks/s/prompt.md", "make feature.txt\n"),
-            (
-                "tasks/s/task.toml",
-                &format!("{PLAN}{CHECK}"),
-            ),
+            ("tasks/s/task.toml", &format!("{PLAN}{CHECK}")),
             (
                 "tests.d/s.toml",
                 "[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n",
@@ -798,7 +798,11 @@ fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
     std::fs::write(&marker, "stop 100 1\n").unwrap();
     player.tick().expect("tick");
     assert_eq!(idle().len(), 1, "{:?}", events::read_all(&home));
-    assert!(idle()[0].message.contains("staged"), "{}", idle()[0].message);
+    assert!(
+        idle()[0].message.contains("staged"),
+        "{}",
+        idle()[0].message
+    );
     player.tick().expect("tick");
     drop(player);
     let mut player = open_player(&home);
@@ -1167,7 +1171,121 @@ fn a_lock_file_under_test_paths_is_refused_at_init() {
     write_file(repo.path(), "tests.toml", "test_paths = [\"Cargo.lock\"]\n");
     commit(repo.path(), "pin the lock file");
     let home_dir = temp_home();
-    let err = init::init(repo.path(), Some("proj"), Some(home_dir.path().join("home")))
-        .expect_err("overlap is refused");
-    assert!(err.contains("lock_files") && err.contains("test_paths"), "{err}");
+    let err = init::init(
+        repo.path(),
+        Some("proj"),
+        Some(home_dir.path().join("home")),
+    )
+    .expect_err("overlap is refused");
+    assert!(
+        err.contains("lock_files") && err.contains("test_paths"),
+        "{err}"
+    );
+}
+
+// --------------------------------------------------------------------------
+// The status gate (src/fsm.rs) as the player applies it
+// --------------------------------------------------------------------------
+
+#[test]
+fn a_director_send_back_is_ownership_when_task_agents_are_on() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan_post_finish(&repo, &mut player);
+
+    director_pull_task_branch(repo.path(), "s");
+    write_file(repo.path(), "tasks/s/reviews/r1.md", "do more\n");
+    commit(repo.path(), "send back: s r1");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Ownership);
+    assert_eq!(report.rejected[0].actor, Actor::Director);
+    assert!(
+        report.rejected[0].message.contains("send-backs"),
+        "{}",
+        report.rejected[0].message
+    );
+    assert_eq!(task(&hub, "s").status, Status::Tested);
+}
+
+#[test]
+fn a_director_contest_reply_is_ownership_when_task_agents_are_on() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan_post_contest(&repo, &mut player);
+
+    director_pull_task_branch(repo.path(), "s");
+    write_file(repo.path(), "tasks/s/contests/c1.md", "no\n");
+    commit(repo.path(), "reply: s c1");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Ownership);
+    assert!(
+        report.rejected[0].message.contains("contest"),
+        "{}",
+        report.rejected[0].message
+    );
+    assert_eq!(task(&hub, "s").status, Status::Contested);
+}
+
+#[test]
+fn a_director_replan_after_posting_is_ownership() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan_post_finish(&repo, &mut player);
+
+    director_pull_task_branch(repo.path(), "s");
+    write_file(
+        repo.path(),
+        "tasks/s/task.toml",
+        &format!("{PLAN}{CHECK}# edited\n"),
+    );
+    commit(repo.path(), "replan: s");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Ownership);
+}
+
+#[test]
+fn a_worker_commit_outside_its_statuses_is_ignored_not_struck() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+
+    // Tested: the worker is not listened to.
+    let mut player = open_player(&home);
+    plan_post_finish(&repo, &mut player);
+    let tip = hub.rev_parse("refs/heads/task/s").unwrap();
+    let dir = paths::worker_clone(&repo.director_path(), "s");
+    write_file(&dir, "extra.txt", "late\n");
+    commit(&dir, "late work");
+    let report = player.tick().expect("tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert!(report.imported.is_empty(), "{report}");
+    assert_eq!(hub.rev_parse("refs/heads/task/s").unwrap(), tip);
+    assert_eq!(task(&hub, "s").status, Status::Tested);
+}
+
+#[test]
+fn a_worker_push_while_contested_is_ignored_not_struck() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan_post_contest(&repo, &mut player);
+    let tip = hub.rev_parse("refs/heads/task/s").unwrap();
+
+    let dir = paths::worker_clone(&repo.director_path(), "s");
+    write_file(&dir, "feature.txt", "done anyway\n");
+    commit(&dir, "finish while contested");
+    let report = player.tick().expect("tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert!(report.imported.is_empty(), "{report}");
+    assert_eq!(hub.rev_parse("refs/heads/task/s").unwrap(), tip);
+    assert_eq!(task(&hub, "s").status, Status::Contested);
 }

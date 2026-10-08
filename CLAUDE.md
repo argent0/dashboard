@@ -30,8 +30,9 @@ src/records.rs  provenance/enforcement records: import notes, rejections, pins, 
                 spike base commits and exploration notes
 src/flaky.rs    flaky-test-fix (spec §15): inventory comparison, evidence verdict text
 src/fsm.rs      the status gate as a table: who (director/task agent/worker) may do what at which
-                status -> allow / reject(reason) / ignore / hold; tests walk every cell. Partly
-                wired into player.rs (see handover-fsm-wiring.md)
+                status -> allow / reject(reason) / ignore / hold; tests walk every cell. player.rs
+                asks it for every status/actor gate (markers, posts, send-backs, replies,
+                resolves, worker imports, agent commits); content checks stay in player.rs
 src/prompts.rs  prompts.kdl (spec §19): template validation, the max-bytes cap, rendering
 src/prompts.kdl the starter prompts.kdl `dashboard init` commits (embedded with include_str!)
 src/sandbox.rs  the check jail (spec §20): bubblewrap command lines, policy fingerprint, preflight
@@ -136,6 +137,7 @@ Notes (JSON payloads, `git notes --ref <ref>`):
 
 ```
 refs/notes/dashboard             check-result cache: {"checks": {name: CheckResult}}
+                                 (a result carries `millis`, `timeout`, `timed_out`)
 refs/notes/dashboard-imports     provenance per imported commit (actor, transition, slug, at)
 refs/notes/dashboard-rejections  reason/actor/message/at per refs/rejected/* commit
 refs/notes/dashboard-escalations cause/at per refs/dashboard/escalated/<slug>
@@ -198,6 +200,7 @@ accept = 2
 retire = 2
 claims = 2                       # a spike's finish whose claims/findings don't validate
 evidence = 1                     # a flaky-test-fix post whose flake doesn't reproduce
+budget = 2                       # a suite that timed out or ran past [budget] suite_fail
 
 [player]
 agent_cmd = "claude --dangerously-skip-permissions"        # the worker; default
@@ -212,6 +215,13 @@ lock_files = ["Cargo.lock"]      # default none: lock files a task agent may com
 [player.lock_regen]              # default none: a merge of main into a task at accept
 "Cargo.lock" = "cargo metadata --offline"  # that conflicts only in these paths is resolved by
                                  # the player: branch's version, then this command in the jail
+
+[budget]                         # the suite time budget; seconds, 0 (default) = off
+check_timeout = 600              # kill any one run of a suite check past this: it fails
+                                 # (a `budget` strike, never retried)
+suite_warn = 300                 # the checks' total wall time past this: a `suite_slow` event
+suite_fail = 900                 # ...past this: a worker finish is rejected (`budget`), even
+                                 # with every test passing. suite_warn must be < suite_fail
 
 [sandbox]                        # the check jail (spec §20)
 enabled = true                   # default; false runs checks as plain `sh -c`
@@ -531,6 +541,23 @@ back here):
   pins commit minus the `old` names must still be in the branch's, with every
   `new` present (a `suite` strike otherwise). Evidence runs in full, never
   early-stopping, so its cached result and k/N are exact.
+- **Suite time budget**: `[budget]` in `roadmap.toml` (not `tests.toml`: task
+  agents edit the suite), read from main's tip each tick in `check_sandbox`
+  and applied by `Runner::set_budget`. `run_suite` runs each check under
+  `check_timeout` (not a task's own `[check]`, evidence or spike claims,
+  which keep theirs); the kill is `run_command`'s existing deadline, and
+  `CheckResult::timed_out` stops further runs and retries. Every result
+  records its wall time (`millis`, all runs and retries) and the timeout it
+  ran under (`timeout`, part of the cache key), so a suite's time
+  (`SuiteResult::millis`) is a pure function of the hub's notes: a cache
+  hit reports the original timing, not zero. A failing suite with a timed-out
+  check is a `budget` strike instead of `suite`; a *passing* one over
+  `suite_fail` is a `budget` rejection at a worker finish only (`over_budget`).
+  The director's main import and accepts don't enforce `suite_fail` (main's
+  own policy lives there: rejecting would lock out raising it), and a
+  timeout still fails them as before. `suite_warn` puts a `suite_slow` event
+  (informational, no hint) in the report: per worker finish, and once per
+  main tip from `verify_main`. Tests: `tests/budget.rs`.
 - **Check retries**: `retry_failed = N` re-runs a failing check (all its
   `runs`) up to N more times; any passing attempt passes it, a check failing
   every attempt is still one `suite` strike. `retry_on` limits retries to

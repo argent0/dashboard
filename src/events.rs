@@ -44,6 +44,8 @@ pub enum EventKind {
     /// A finish or accept held, not judged, because it fails only on checks
     /// that are already impure on `main`.
     Held,
+    /// A suite took longer than `[budget] suite_warn`; informational.
+    SuiteSlow,
     Ready,
     Accepted,
     Explored,
@@ -76,6 +78,7 @@ impl EventKind {
             EventKind::Contested => "contested",
             EventKind::MainImpure => "main_impure",
             EventKind::Held => "held",
+            EventKind::SuiteSlow => "suite_slow",
             EventKind::Ready => "ready",
             EventKind::Accepted => "accepted",
             EventKind::Explored => "explored",
@@ -158,6 +161,7 @@ impl Event {
             EventKind::Held => Some(
                 "nothing to do on this task: it's re-judged once main's impure checks are fixed".to_string(),
             ),
+            EventKind::SuiteSlow => None, // informational
             EventKind::Ready => Some(format!(
                 "git fetch hub && git merge (or checkout) hub/task/{slug}; with task agents on, start it with an empty `stage: <why>` commit on the branch, else post"
             )),

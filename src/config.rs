@@ -18,6 +18,34 @@ pub struct RoadmapConfig {
     pub limits: Limits,
     pub player: PlayerConfig,
     pub sandbox: SandboxConfig,
+    pub budget: BudgetConfig,
+}
+
+/// `[budget]`: how long the project suite may take. Like `[sandbox]` it lives
+/// in `roadmap.toml`, so a task agent editing the suite can't loosen it. Every
+/// field is seconds; 0 (the default) turns that limit off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct BudgetConfig {
+    /// Kills any single run of a suite check that takes longer (the check
+    /// fails, a `budget` strike). Not applied to a task's own `[check]`.
+    pub check_timeout: u64,
+    /// A suite whose checks took longer in total is reported (`suite_slow`).
+    pub suite_warn: u64,
+    /// A suite whose checks took longer in total is rejected (`budget`).
+    pub suite_fail: u64,
+}
+
+impl BudgetConfig {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.suite_warn > 0 && self.suite_fail > 0 && self.suite_warn >= self.suite_fail {
+            return Err(format!(
+                "[budget] suite_warn ({}) must be below suite_fail ({})",
+                self.suite_warn, self.suite_fail
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// `[sandbox]`: the jail every check runs in (`src/sandbox.rs`). It's in
@@ -112,6 +140,8 @@ pub struct StrikeLimits {
     /// A `flaky-test-fix` post whose evidence doesn't reproduce the flake.
     /// Defaults to 1: the player retires the task on the first miss.
     pub evidence: u32,
+    /// A suite that timed out or exceeded `[budget] suite_fail`.
+    pub budget: u32,
 }
 
 impl Default for StrikeLimits {
@@ -128,6 +158,7 @@ impl Default for StrikeLimits {
             retire: 2,
             claims: 2,
             evidence: 1,
+            budget: 2,
         }
     }
 }
@@ -146,6 +177,7 @@ impl StrikeLimits {
             Reason::Retire => self.retire,
             Reason::Claims => self.claims,
             Reason::Evidence => self.evidence,
+            Reason::Budget => self.budget,
         }
     }
 }
@@ -216,10 +248,13 @@ pub enum Reason {
     /// A `flaky-test-fix` post whose evidence shows no flake (not a
     /// structural mistake by the director).
     Evidence,
+    /// The suite ran past its `[budget]`: a check timed out, or the total
+    /// exceeded `suite_fail`.
+    Budget,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 11] = [
+    pub const ALL: [Reason; 12] = [
         Reason::History,
         Reason::Ownership,
         Reason::Pins,
@@ -231,6 +266,7 @@ impl Reason {
         Reason::Retire,
         Reason::Claims,
         Reason::Evidence,
+        Reason::Budget,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -246,6 +282,7 @@ impl Reason {
             Reason::Retire => "retire",
             Reason::Claims => "claims",
             Reason::Evidence => "evidence",
+            Reason::Budget => "budget",
         }
     }
 }
@@ -266,6 +303,7 @@ impl FromStr for Reason {
             "retire" => Ok(Reason::Retire),
             "claims" => Ok(Reason::Claims),
             "evidence" => Ok(Reason::Evidence),
+            "budget" => Ok(Reason::Budget),
             other => Err(format!("unknown rejection reason: {other:?}")),
         }
     }
@@ -813,6 +851,7 @@ pub(crate) fn check_lock_files(lock_files: &[String], test_paths: &[String]) -> 
 pub(crate) fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> {
     let cfg: RoadmapConfig = toml::from_str(s).map_err(|e| e.to_string())?;
     cfg.sandbox.validate()?;
+    cfg.budget.validate()?;
     Ok(cfg)
 }
 
@@ -895,7 +934,10 @@ mod tests {
         assert_eq!(cfg.player.agent_cmd, "codex run");
         assert_eq!(cfg.player.idle_after, 0);
         assert_eq!(cfg.player.lock_files, vec!["Cargo.lock".to_string()]);
-        assert_eq!(cfg.player.lock_regen["Cargo.lock"], "cargo metadata --offline");
+        assert_eq!(
+            cfg.player.lock_regen["Cargo.lock"],
+            "cargo metadata --offline"
+        );
     }
 
     #[test]
@@ -1109,6 +1151,23 @@ mod tests {
             baseline_file_from_str("[[claim]]\nname = \"c\"\ncmd = \"true\"\nsupports = \"yes\"\n")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn budget_is_parsed_defaults_off_and_is_validated() {
+        let none = roadmap_config_from_str("").unwrap();
+        assert_eq!(none.budget, BudgetConfig::default());
+        assert_eq!(none.limits.strikes.limit(Reason::Budget), 2);
+        let cfg = roadmap_config_from_str(
+            "[budget]\ncheck_timeout = 60\nsuite_warn = 120\nsuite_fail = 300\n[limits.strikes]\nbudget = 3\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.budget.check_timeout, 60);
+        assert_eq!(cfg.budget.suite_fail, 300);
+        assert_eq!(cfg.limits.strikes.limit(Reason::Budget), 3);
+        assert!(roadmap_config_from_str("[budget]\nsuite_warn = 5\nsuite_fail = 5\n").is_err());
+        assert!(roadmap_config_from_str("[budget]\nsuite_warn = 5\n").is_ok());
+        assert_eq!("budget".parse::<Reason>(), Ok(Reason::Budget));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 // commit so rendering and repeated finish-claims never re-run tests for a
 // commit already seen.
 
-use crate::config::{self, Check, Claim, Evidence};
+use crate::config::{self, BudgetConfig, Check, Claim, Evidence};
 use crate::git::Git;
 use crate::paths::Home;
 use crate::sandbox::Sandbox;
@@ -71,6 +71,22 @@ pub struct CheckResult {
     /// a leak, since that failure says nothing about the code under test.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked: Vec<String>,
+    /// Wall time of the whole check (every run, every retry), in
+    /// milliseconds: what the suite's `[budget]` adds up. Absent from older
+    /// cached notes.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub millis: u64,
+    /// The per-run timeout it ran under, in seconds (0: none), so a changed
+    /// `[budget] check_timeout` never reuses an old verdict.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub timeout: u64,
+    /// A run was killed for exceeding `timeout`; never retried.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -120,8 +136,15 @@ impl CheckResult {
     /// A cached result is reusable for `check` only if the name, cmd and
     /// threshold all still match — otherwise it's evidence for a different
     /// check that happens to share a name.
-    fn reusable_for(&self, check: &Check, max_pass: Option<u32>, isolation: &str) -> bool {
+    fn reusable_for(
+        &self,
+        check: &Check,
+        max_pass: Option<u32>,
+        isolation: &str,
+        timeout: Option<Duration>,
+    ) -> bool {
         self.isolation == isolation
+            && self.timeout == timeout.map_or(0, |t| t.as_secs())
             && self.name == check.name
             && self.cmd == check.cmd
             && self.runs == check.runs
@@ -150,6 +173,11 @@ pub struct SuiteResult {
     pub error: Option<String>,
 }
 
+/// `12.3s`.
+pub fn fmt_secs(millis: u64) -> String {
+    format!("{:.1}s", millis as f64 / 1000.0)
+}
+
 impl SuiteResult {
     /// A suite that couldn't even be evaluated (missing/invalid `tests.toml`).
     pub fn failing(error: impl Into<String>) -> Self {
@@ -158,6 +186,53 @@ impl SuiteResult {
             checks: Vec::new(),
             error: Some(error.into()),
         }
+    }
+
+    /// Total wall time of the suite's checks, as measured when each ran.
+    pub fn millis(&self) -> u64 {
+        self.checks.iter().map(|c| c.millis).sum()
+    }
+
+    /// `Some(why)` if a check was killed for its timeout, or the checks
+    /// together took longer than `[budget] suite_fail`: the suite ran past
+    /// its budget, whatever the tests say.
+    pub fn over_budget(&self, budget: &BudgetConfig) -> Option<String> {
+        if let Some(c) = self.checks.iter().find(|c| c.timed_out) {
+            return Some(format!(
+                "check {:?} ran longer than the {}s a run may take ([budget] check_timeout) and was killed",
+                c.name, c.timeout
+            ));
+        }
+        if budget.suite_fail > 0 && self.millis() > budget.suite_fail * 1000 {
+            return Some(format!(
+                "the suite took {} against a budget of {}s ([budget] suite_fail); slowest: {}",
+                fmt_secs(self.millis()),
+                budget.suite_fail,
+                self.slowest()
+            ));
+        }
+        None
+    }
+
+    /// `Some(why)` if the suite took longer than `[budget] suite_warn`.
+    pub fn slow(&self, budget: &BudgetConfig) -> Option<String> {
+        (budget.suite_warn > 0 && self.millis() > budget.suite_warn * 1000).then(|| {
+            format!(
+                "the suite took {} (warn at {}s); slowest: {}",
+                fmt_secs(self.millis()),
+                budget.suite_warn,
+                self.slowest()
+            )
+        })
+    }
+
+    fn slowest(&self) -> String {
+        self.checks
+            .iter()
+            .max_by_key(|c| c.millis)
+            .map_or("-".to_string(), |c| {
+                format!("{} ({})", c.name, fmt_secs(c.millis))
+            })
     }
 
     /// The first impure check's `CheckResult::impurity`, if any.
@@ -203,6 +278,7 @@ pub struct Runner {
     hub: Git,
     work: PathBuf,
     sandbox: Sandbox,
+    budget: BudgetConfig,
 }
 
 enum WorktreeState {
@@ -217,6 +293,7 @@ impl Runner {
             hub: Git::new(home.hub()),
             work: home.work(),
             sandbox: Sandbox::off(),
+            budget: BudgetConfig::default(),
         }
     }
 
@@ -224,6 +301,15 @@ impl Runner {
     /// hub stays readable inside it: the worktree's `.git` points there.
     pub fn set_sandbox(&mut self, sandbox: Sandbox) {
         self.sandbox = sandbox.with_readable(&self.hub.dir);
+    }
+
+    /// Applies `[budget]` to every suite from now on.
+    pub fn set_budget(&mut self, budget: BudgetConfig) {
+        self.budget = budget;
+    }
+
+    pub fn budget(&self) -> BudgetConfig {
+        self.budget
     }
 
     pub fn sandbox(&self) -> &Sandbox {
@@ -432,7 +518,7 @@ impl Runner {
             .read_note(commit)
             .checks
             .get(&check.name)
-            .filter(|r| r.reusable_for(check, max_pass, &self.sandbox.fingerprint()))
+            .filter(|r| r.reusable_for(check, max_pass, &self.sandbox.fingerprint(), timeout))
             .cloned()
         {
             return cached;
@@ -476,6 +562,9 @@ impl Runner {
             isolation: self.sandbox.fingerprint(),
             leaked: Vec::new(),
             blocked: Vec::new(),
+            millis: 0,
+            timeout: timeout.map_or(0, |t| t.as_secs()),
+            timed_out: false,
         };
         if let Err(e) = self.prepare(commit) {
             return CheckResult {
@@ -491,15 +580,18 @@ impl Runner {
             .collect();
         let mut retries = 0;
         let mut retry_outputs = Vec::new();
+        let started = Instant::now();
         loop {
             let (mut result, failed_output) = self.attempt(check, timeout, max_pass, base.clone());
             let retry = !result.pass
+                && !result.timed_out
                 && result.impurity().is_none()
                 && retries < check.retry_failed
                 && (patterns.is_empty() || patterns.iter().any(|p| p.is_match(&failed_output)));
             if !retry {
                 result.retries = retries;
                 result.retry_outputs = retry_outputs;
+                result.millis = started.elapsed().as_millis() as u64;
                 return result;
             }
             retries += 1;
@@ -534,6 +626,17 @@ impl Runner {
             if !leaked.is_empty() {
                 exits.push(code);
                 result.leaked = leaked;
+                result.output_tail = Some(tail_str(&combined));
+                result.pass = false;
+                result.runs = exits.len() as u32;
+                result.exits = exits;
+                return (result, failed_output);
+            }
+
+            // Killed for running too long: more runs would only repeat it.
+            if code == -1 && timeout.is_some() && was_killed(&combined) {
+                exits.push(code);
+                result.timed_out = true;
                 result.output_tail = Some(tail_str(&combined));
                 result.pass = false;
                 result.runs = exits.len() as u32;
@@ -604,10 +707,12 @@ impl Runner {
             Err(e) => return SuiteResult::failing(e),
         };
 
+        let timeout =
+            (self.budget.check_timeout > 0).then(|| Duration::from_secs(self.budget.check_timeout));
         let mut checks = Vec::with_capacity(cfg.check.len());
         let mut pass = true;
         for check in &cfg.check {
-            let result = self.run_check(commit, check);
+            let result = self.run_check_timed(commit, check, timeout, None);
             pass &= result.pass;
             checks.push(result);
         }
@@ -711,9 +816,7 @@ fn run_command(
     let mut combined = stdout.clone();
     combined.extend_from_slice(&err_reader.join().unwrap_or_default());
     if timed_out {
-        combined.extend_from_slice(
-            format!("\n[killed: timed out after {}s]", timeout.as_secs()).as_bytes(),
-        );
+        combined.extend_from_slice(format!("\n{KILLED_MARKER}{}s]", timeout.as_secs()).as_bytes());
         return (-1, stdout, combined);
     }
     (
@@ -721,6 +824,13 @@ fn run_command(
         stdout,
         combined,
     )
+}
+
+/// What `run_command` appends to the output of a run it killed at its deadline.
+const KILLED_MARKER: &str = "[killed: timed out after ";
+
+fn was_killed(combined: &[u8]) -> bool {
+    String::from_utf8_lossy(combined).contains(KILLED_MARKER)
 }
 
 /// The JSON object on the last non-empty stdout line, if that line is
@@ -804,17 +914,78 @@ mod tests {
             metrics: None,
             ..Default::default()
         };
-        assert!(result.reusable_for(&check, None, ""));
-        assert!(!result.reusable_for(&check, Some(2), ""));
-        assert!(!result.reusable_for(&check, None, "v1 jail=off"));
+        assert!(result.reusable_for(&check, None, "", None));
+        assert!(!result.reusable_for(&check, Some(2), "", None));
+        assert!(!result.reusable_for(&check, None, "v1 jail=off", None));
 
         let mut other_cmd = check.clone();
         other_cmd.cmd = "false".into();
-        assert!(!result.reusable_for(&other_cmd, None, ""));
+        assert!(!result.reusable_for(&other_cmd, None, "", None));
 
         let mut other_threshold = check.clone();
         other_threshold.min_pass = 3;
-        assert!(!result.reusable_for(&other_threshold, None, ""));
+        assert!(!result.reusable_for(&other_threshold, None, "", None));
+    }
+
+    #[test]
+    fn suite_over_budget_and_slow() {
+        let check = |name: &str, millis: u64, timed_out: bool| CheckResult {
+            name: name.into(),
+            pass: !timed_out,
+            millis,
+            timed_out,
+            timeout: if timed_out { 5 } else { 0 },
+            ..Default::default()
+        };
+        let suite = SuiteResult {
+            pass: true,
+            checks: vec![check("a", 4000, false), check("b", 7000, false)],
+            error: None,
+        };
+        assert_eq!(suite.millis(), 11000);
+        let off = BudgetConfig::default();
+        assert!(suite.over_budget(&off).is_none() && suite.slow(&off).is_none());
+        let b = BudgetConfig {
+            check_timeout: 0,
+            suite_warn: 10,
+            suite_fail: 20,
+        };
+        assert!(suite.slow(&b).unwrap().contains("b (7.0s)"));
+        assert!(suite.over_budget(&b).is_none());
+        let b = BudgetConfig {
+            suite_fail: 10,
+            ..b
+        };
+        assert!(suite.over_budget(&b).unwrap().contains("suite_fail"));
+        let killed = SuiteResult {
+            pass: false,
+            checks: vec![check("c", 5000, true)],
+            error: None,
+        };
+        assert!(killed.over_budget(&off).unwrap().contains("check_timeout"));
+    }
+
+    #[test]
+    fn cached_result_is_not_reused_under_another_timeout() {
+        let check = Check {
+            name: "u".into(),
+            cmd: "true".into(),
+            runs: 1,
+            min_pass: 1,
+            retry_failed: 0,
+            retry_on: vec![],
+        };
+        let result = CheckResult {
+            name: "u".into(),
+            cmd: "true".into(),
+            runs: 1,
+            min_pass: 1,
+            timeout: 5,
+            ..Default::default()
+        };
+        assert!(result.reusable_for(&check, None, "", Some(Duration::from_secs(5))));
+        assert!(!result.reusable_for(&check, None, "", Some(Duration::from_secs(9))));
+        assert!(!result.reusable_for(&check, None, "", None));
     }
 
     #[test]

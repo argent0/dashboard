@@ -14,8 +14,8 @@
 //! `decide` matches exhaustively on `Actor`/`Move` with no wildcard on
 //! either, so a new move or actor fails to compile until it is decided; the
 //! tests walk every `Status × Actor × Move × flags` cell and pin who may do
-//! what where. Not wired into the player yet: the tests are the contract the
-//! dispatch has to keep.
+//! what where. The player asks `decide` for each of those gates; the tests are
+//! the contract its dispatch keeps.
 
 use crate::config::Reason;
 use crate::records::Actor;
@@ -491,7 +491,10 @@ mod tests {
                 );
             }
             if a == Actor::TaskAgent {
-                assert!(c.managed, "task agent {m:?} allowed on an unmanaged task: {c:?}");
+                assert!(
+                    c.managed,
+                    "task agent {m:?} allowed on an unmanaged task: {c:?}"
+                );
             }
             // A spike never merges and is never staged; only a spike concludes.
             if c.spike {
@@ -541,20 +544,59 @@ mod tests {
             agent,
         };
         let d = |m, c| decide(Actor::Director, m, c);
-        assert_eq!(d(Move::Accept, at(Status::Posted, false, false, false)), Reject(Reason::Accept));
-        assert_eq!(d(Move::Accept, at(Status::Tested, false, true, false)), Reject(Reason::Accept));
-        assert_eq!(d(Move::Retire, at(Status::Posted, false, false, false)), Reject(Reason::Retire));
-        assert_eq!(d(Move::Stage, at(Status::Staged, true, false, true)), Reject(Reason::Plan));
-        assert_eq!(d(Move::Unstage, at(Status::Staged, true, false, true)), Reject(Reason::Plan));
-        assert_eq!(d(Move::Post, at(Status::Pending, false, false, false)), Reject(Reason::Post));
-        assert_eq!(d(Move::Post, at(Status::Ready, true, false, false)), Reject(Reason::Ownership));
-        assert_eq!(d(Move::Resolve, at(Status::Tested, false, false, false)), Reject(Reason::History));
-        assert_eq!(d(Move::Conclude, at(Status::Ready, false, true, false)), Reject(Reason::Accept));
-        assert_eq!(d(Move::Conclude, at(Status::Tested, false, false, false)), Reject(Reason::Ownership));
+        assert_eq!(
+            d(Move::Accept, at(Status::Posted, false, false, false)),
+            Reject(Reason::Accept)
+        );
+        assert_eq!(
+            d(Move::Accept, at(Status::Tested, false, true, false)),
+            Reject(Reason::Accept)
+        );
+        assert_eq!(
+            d(Move::Retire, at(Status::Posted, false, false, false)),
+            Reject(Reason::Retire)
+        );
+        assert_eq!(
+            d(Move::Stage, at(Status::Staged, true, false, true)),
+            Reject(Reason::Plan)
+        );
+        assert_eq!(
+            d(Move::Unstage, at(Status::Staged, true, false, true)),
+            Reject(Reason::Plan)
+        );
+        assert_eq!(
+            d(Move::Post, at(Status::Pending, false, false, false)),
+            Reject(Reason::Post)
+        );
+        assert_eq!(
+            d(Move::Post, at(Status::Ready, true, false, false)),
+            Reject(Reason::Ownership)
+        );
+        assert_eq!(
+            d(Move::Resolve, at(Status::Tested, false, false, false)),
+            Reject(Reason::History)
+        );
+        assert_eq!(
+            d(Move::Conclude, at(Status::Ready, false, true, false)),
+            Reject(Reason::Accept)
+        );
+        assert_eq!(
+            d(Move::Conclude, at(Status::Tested, false, false, false)),
+            Reject(Reason::Ownership)
+        );
         // A replan is refused once the agent exists, allowed before.
-        assert_eq!(d(Move::Replan, at(Status::Staged, true, false, true)), Reject(Reason::Plan));
-        assert_eq!(d(Move::Replan, at(Status::Staged, false, false, false)), Allow);
-        assert_eq!(d(Move::Replan, at(Status::Pending, true, false, true)), Allow);
+        assert_eq!(
+            d(Move::Replan, at(Status::Staged, true, false, true)),
+            Reject(Reason::Plan)
+        );
+        assert_eq!(
+            d(Move::Replan, at(Status::Staged, false, false, false)),
+            Allow
+        );
+        assert_eq!(
+            d(Move::Replan, at(Status::Pending, true, false, true)),
+            Allow
+        );
         // A task agent's post after the task left `staged` is held, not struck.
         for status in [Status::Pending, Status::Ready, Status::Orphaned] {
             assert_eq!(
@@ -563,7 +605,11 @@ mod tests {
             );
         }
         assert_eq!(
-            decide(Actor::TaskAgent, Move::Post, at(Status::Posted, true, false, true)),
+            decide(
+                Actor::TaskAgent,
+                Move::Post,
+                at(Status::Posted, true, false, true)
+            ),
             Reject(Reason::Ownership)
         );
     }
