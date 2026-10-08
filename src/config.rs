@@ -491,6 +491,20 @@ pub enum TaskKind {
     /// this task, and the director's `evidence` proves the flake on `main`.
     #[serde(rename = "flaky-test-fix")]
     FlakyTestFix,
+    /// Makes slow suite checks faster (spec §15.1): the test tree and the
+    /// checks' `cmd`s are unpinned for this task, the code stays out of
+    /// reach, and the finish is judged by a ratchet against `main`'s
+    /// recorded timings while `main` is over its `[budget]`.
+    #[serde(rename = "test-speedup")]
+    TestSpeedup,
+}
+
+/// One `[[slow]]` of a test-speedup: a suite check that is slow on `main`
+/// (killed for its timeout, or with a recorded wall time).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Slow {
+    pub check: String,
 }
 
 /// One `[[replace]]` of a flaky-test-fix: the flaky test and its replacement.
@@ -564,6 +578,8 @@ pub struct TaskConfig {
     pub replace: Vec<Replace>,
     /// flaky-test-fix only.
     pub evidence: Vec<Evidence>,
+    /// test-speedup only: the slow checks the task is to speed up.
+    pub slow: Vec<Slow>,
 }
 
 impl TaskConfig {
@@ -574,7 +590,31 @@ impl TaskConfig {
         for e in &self.evidence {
             e.validate()?;
         }
-        if self.kind != TaskKind::FlakyTestFix {
+        if self.kind == TaskKind::TestSpeedup {
+            if self.slow.is_empty() {
+                return Err(
+                    "a test-speedup needs at least one [[slow]] naming a suite check".to_string(),
+                );
+            }
+            for s in &self.slow {
+                if s.check.trim().is_empty() {
+                    return Err("[[slow]] check must name a suite check".to_string());
+                }
+            }
+            if self.check.is_some() {
+                return Err("a test-speedup has no task [check]: its evidence is the [[slow]] checks' recorded times on main".to_string());
+            }
+            if self.milestone {
+                return Err("a test-speedup can't be a milestone".to_string());
+            }
+        } else if !self.slow.is_empty() {
+            return Err("[[slow]] is only for kind = \"test-speedup\"".to_string());
+        }
+        if self.kind == TaskKind::TestSpeedup {
+            if !self.fix_paths.is_empty() || !self.replace.is_empty() || !self.evidence.is_empty() {
+                return Err("fix_paths, [[replace]] and [[evidence]] are only for kind = \"flaky-test-fix\"".to_string());
+            }
+        } else if self.kind != TaskKind::FlakyTestFix {
             if !self.fix_paths.is_empty() || !self.replace.is_empty() || !self.evidence.is_empty() {
                 return Err("fix_paths, [[replace]] and [[evidence]] are only for kind = \"flaky-test-fix\"".to_string());
             }

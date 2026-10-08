@@ -29,6 +29,7 @@ src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based 
 src/records.rs  provenance/enforcement records: import notes, rejections, pins, retirements, accepted-merge lookup,
                 spike base commits and exploration notes
 src/flaky.rs    flaky-test-fix (spec §15): inventory comparison, evidence verdict text
+src/speedup.rs  test-speedup (spec §15.1): scope check, the ratchet, removal text (pure)
 src/fsm.rs      the status gate as a table: who (director/task agent/worker) may do what at which
                 status -> allow / reject(reason) / ignore / hold; tests walk every cell. player.rs
                 asks it for every status/actor gate (markers, posts, send-backs, replies,
@@ -148,6 +149,8 @@ refs/notes/dashboard-flakes       the flake ledger: checks that passed only on a
 refs/notes/dashboard-impurities   the impurity ledger: checks found impure (refs/impure/<scope>/<n>, spec §20)
 refs/notes/dashboard-explorations a spike round's verified answer + claim results, on each validated
                                  finish commit; {concluded: true, ...} on the `conclude:` commit
+refs/notes/dashboard-speedups    on a test-speedup finish: the removed tests and rewired
+                                 `cmd`s text (spec §15.1)
 refs/notes/dashboard-conflicts   on a conflicted task's tip: the exact main commit an accept couldn't
                                  merge in, and the conflicted paths ({main, paths, at})
 refs/notes/dashboard-agent-reports  task agent reports read at a task tip: [{verdict, text, at}]
@@ -270,7 +273,9 @@ one is a `pins` strike.
 ```toml
 title = "…"
 kind = "task"                    # or "spike" (spec §14): no depends_on/[check]/milestone,
-                                 # or "flaky-test-fix" (spec §15): see below
+                                 # or "flaky-test-fix" (spec §15): see below,
+                                 # or "test-speedup" (spec §15.1): [[slow]] check = "<name>"
+                                 # per slow suite check, no [check]
 phase = "p1"
 milestone = false
 depends_on = ["other-slug"]
@@ -516,6 +521,22 @@ back here):
   timeout still fails them as before. `suite_warn` puts a `suite_slow` event
   (informational, no hint) in the report: per worker finish, and once per
   main tip from `verify_main`. Tests: `tests/budget.rs`.
+- **An over-budget `main`** (spec §20) and **test-speedup** (spec §15.1):
+  `verify_main` keeps `main_over` (`checks::Overrun`: killed checks, whether
+  the total is over, every check's `millis`) beside `main_impure`, reports it
+  once per tip (`main_over_budget` event, `state::HubState::main_over_budget`
+  for `status`). `bad_on_main` widens `held_by_main` to checks killed on both;
+  `held_over_total` holds a passing finish over `suite_fail` only because main
+  is (per-check, `checks::within_tolerance`); `held_reason` is both, used by
+  `release_held` and the finish. `test-speedup` (`TaskKind::TestSpeedup`,
+  `[[slow]]`): `slow_miss` is its `evidence_miss` (an `evidence` rejection
+  and auto-retire, also at launch), `records::pinned_files` unpins the test
+  side, `test_speedup_scope` + `speedup::scope_problems` fence the worker
+  (`pins`), and `speedup::ratchet_problems` judges a finish still over budget.
+  `test_speedup_notes` lists removed tests (`flaky::removed`) and changed
+  `cmd`s: the `speedup_finish` event, `records::record_speedup`, and the
+  review prompt's `{notes}`. fsm.rs needed no change: it is kind-agnostic.
+  Tests: `tests/speedup.rs`.
 - **Check retries** (spec §16): `Runner::execute` loops attempts; never
   applied to `run_task_check` (`Check::without_retries`) or evidence. Every
   retry is in the cached result; a pass after one goes in the flake ledger

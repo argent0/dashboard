@@ -58,6 +58,18 @@ pub fn inventory_problems(
     problems
 }
 
+/// The tests on `base` that `candidate` no longer lists (sorted, unique,
+/// without the `: test` suffix): what a test-speedup removed or renamed.
+pub fn removed(base: &[String], candidate: &[String]) -> Vec<String> {
+    let have: BTreeSet<&str> = candidate.iter().map(|e| normalize(e)).collect();
+    let gone: BTreeSet<&str> = base
+        .iter()
+        .map(|e| normalize(e))
+        .filter(|e| !have.contains(e))
+        .collect();
+    gone.into_iter().map(str::to_string).collect()
+}
+
 /// `Some(text)` when `result` shows the evidence did not reproduce the
 /// flake: `evidence did not reproduce (k/N): <name> needs a..=b passing runs`.
 pub fn miss(evidence: &Evidence, result: &CheckResult) -> Option<String> {

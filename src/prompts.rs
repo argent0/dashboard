@@ -18,6 +18,7 @@ pub const STARTER: &str = include_str!("prompts.kdl");
 const TEMPLATES: &[(&str, &[&str])] = &[
     ("worker.launch", &["slug", "project", "pinned"]),
     ("worker.flaky", &["fix_paths", "replacements"]),
+    ("worker.test-speedup", &["slow"]),
     ("worker.finish-accepted", &[]),
     ("worker.rejected", &["message", "recovery"]),
     ("worker.recovery-history", &["slug"]),
@@ -47,10 +48,12 @@ const TEMPLATES: &[(&str, &[&str])] = &[
     ("task-agent.post", &["slug", "check"]),
     ("task-agent.post-check-task", &["slug"]),
     ("task-agent.post-check-flaky", &[]),
+    ("task-agent.post-check-speedup", &[]),
     (
         "task-agent.review",
-        &["round", "slug", "tip", "base", "cap"],
+        &["round", "slug", "tip", "base", "cap", "notes"],
     ),
+    ("task-agent.review-notes", &["notes"]),
     ("task-agent.review-cap-last", &[]),
     ("task-agent.review-cap-over", &["max"]),
     ("task-agent.contest", &["n", "slug", "reason", "remaining"]),
@@ -226,10 +229,10 @@ impl Prompts {
         out
     }
 
-    /// A worker's prompt file: its preamble (plus a flaky-test-fix's
-    /// paragraph, already rendered), then the task's prompt.md.
-    pub fn worker_launch(&self, preamble: &str, flaky: Option<&str>, prompt: &str) -> String {
-        match flaky {
+    /// A worker's prompt file: its preamble (plus a flaky-test-fix's or
+    /// test-speedup's paragraph, already rendered), then the task's prompt.md.
+    pub fn worker_launch(&self, preamble: &str, kind: Option<&str>, prompt: &str) -> String {
+        match kind {
             Some(f) => format!("{preamble}{JOIN}{f}{RULE}{prompt}"),
             None => format!("{preamble}{RULE}{prompt}"),
         }
@@ -266,9 +269,14 @@ impl Prompts {
             .collect();
         let step = [
             s("task-agent.post")
-                + max(&["task-agent.post-check-task", "task-agent.post-check-flaky"]),
+                + max(&[
+                    "task-agent.post-check-task",
+                    "task-agent.post-check-flaky",
+                    "task-agent.post-check-speedup",
+                ]),
             s("task-agent.review")
-                + max(&["task-agent.review-cap-last", "task-agent.review-cap-over"]),
+                + max(&["task-agent.review-cap-last", "task-agent.review-cap-over"])
+                + s("task-agent.review-notes"),
             s("task-agent.contest"),
             s("task-agent.wait"),
         ]
@@ -278,7 +286,10 @@ impl Prompts {
         sizes.extend([
             (
                 "worker prompt".to_string(),
-                s("worker.launch") + JOIN.len() + s("worker.flaky") + RULE.len(),
+                s("worker.launch")
+                    + JOIN.len()
+                    + max(&["worker.flaky", "worker.test-speedup"])
+                    + RULE.len(),
             ),
             (
                 "spike prompt".to_string(),

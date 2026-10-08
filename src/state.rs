@@ -148,6 +148,10 @@ pub struct HubState {
     /// policy (spec §20): (check, what it left in the worktree). Until a
     /// task fixes them, work failing only on these is held.
     pub main_impure: Vec<(String, Vec<String>)>,
+    /// Why `main`'s cached suite run is over its `[budget]` (a check killed
+    /// for its timeout, or the total past `suite_fail`), one line each;
+    /// empty when it isn't. Work failing only there is held too.
+    pub main_over_budget: Vec<String>,
     /// Tasks whose finish is held on those checks (`refs/dashboard/held/*`).
     pub held: Vec<String>,
     /// `dashboard.project` from the hub's git config — used to name tmux
@@ -188,6 +192,35 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
             (r.name, evidence)
         })
         .collect();
+    let main_over_budget = {
+        let results: Vec<checks::CheckResult> = checks::cached(hub, &main_tip)
+            .into_iter()
+            .filter(|r| r.isolation == isolation && r.timeout == roadmap.budget.check_timeout)
+            .collect();
+        let suite = checks::SuiteResult {
+            pass: true,
+            checks: results,
+            error: None,
+        };
+        suite
+            .budget_overrun(&roadmap.budget)
+            .map(|o| {
+                let mut lines: Vec<String> = o
+                    .timed_out
+                    .iter()
+                    .map(|n| format!("{n}: killed past check_timeout ({}s)", roadmap.budget.check_timeout))
+                    .collect();
+                if o.total_over {
+                    lines.push(format!(
+                        "suite: {} against suite_fail ({}s)",
+                        checks::fmt_secs(suite.millis()),
+                        roadmap.budget.suite_fail
+                    ));
+                }
+                lines
+            })
+            .unwrap_or_default()
+    };
     let project = hub.config_get("dashboard.project").unwrap_or_default();
 
     // Every slug we know about: a live task branch, a retirement, or an
@@ -240,6 +273,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         flakes,
         impurities,
         main_impure,
+        main_over_budget,
         held: records::held_slugs(hub),
         project,
     })

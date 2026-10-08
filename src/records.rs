@@ -754,6 +754,24 @@ pub fn conflict(hub: &Git, tip: &str) -> Option<ConflictRecord> {
 }
 
 // --------------------------------------------------------------------------
+// test-speedup finishes: refs/notes/dashboard-speedups
+// --------------------------------------------------------------------------
+
+const SPEEDUPS_NOTES_REF: &str = "refs/notes/dashboard-speedups";
+
+/// Notes what a test-speedup finish `commit` removed or rewired (spec
+/// §15.1), for the review the task agent and director make of it.
+pub fn record_speedup(hub: &Git, commit: &str, text: &str) -> Result<(), String> {
+    hub.notes_add(SPEEDUPS_NOTES_REF, commit, text)
+        .map_err(|e| e.to_string())
+}
+
+/// The note `record_speedup` left on `commit`, if any.
+pub fn speedup_notes(hub: &Git, commit: &str) -> Option<String> {
+    hub.notes_show(SPEEDUPS_NOTES_REF, commit)
+}
+
+// --------------------------------------------------------------------------
 // Task agents (spec §17): refs/dashboard/agent/<slug>,
 // refs/dashboard/agent-asked/<slug>, refs/notes/dashboard-agent-reports
 // --------------------------------------------------------------------------
@@ -856,7 +874,10 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     let commit = hub.rev_parse(&format!("refs/dashboard/pins/{slug}"))?;
     let mut map = BTreeMap::new();
 
-    if !is_spike_at(hub, &commit, slug) {
+    // A spike pins no suite; a test-speedup unpins it (the whole test side
+    // is its to change): the player's scope check (`test_speedup_scope`)
+    // fences it in instead.
+    if !is_spike_at(hub, &commit, slug) && !is_test_speedup_at(hub, &commit, slug) {
         add_pinned_path(hub, &commit, "tests.toml", &mut map);
         add_pinned_path(hub, &commit, &format!("{}/", config::SUITE_DIR), &mut map);
         if let Some(text) = hub.show_file(&commit, "tests.toml") {
@@ -895,6 +916,11 @@ pub fn is_spike_at(hub: &Git, commit: &str, slug: &str) -> bool {
         .is_some_and(|cfg| cfg.kind == TaskKind::Spike)
 }
 
+/// Whether `tasks/<slug>/task.toml` at `commit` declares `kind = "test-speedup"`.
+pub fn is_test_speedup_at(hub: &Git, commit: &str, slug: &str) -> bool {
+    task_config_at(hub, commit, slug).is_some_and(|cfg| cfg.kind == TaskKind::TestSpeedup)
+}
+
 /// Every pinned path that `candidate_commit` leaves missing or changed. A
 /// slug with no recorded pins has nothing to violate. New files at
 /// `candidate_commit` that aren't in the pinned set are never violations,
@@ -918,7 +944,7 @@ pub fn check_pins(hub: &Git, slug: &str, candidate_commit: &str) -> Vec<String> 
     let pins_commit = hub
         .rev_parse(&format!("refs/dashboard/pins/{slug}"))
         .unwrap_or_default();
-    if !is_spike_at(hub, &pins_commit, slug) {
+    if !is_spike_at(hub, &pins_commit, slug) && !is_test_speedup_at(hub, &pins_commit, slug) {
         let added = hub
             .ls_tree_files(candidate_commit, &format!("{}/", config::SUITE_DIR))
             .into_iter()

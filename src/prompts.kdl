@@ -65,6 +65,21 @@ worker max-bytes=512 {
         task.
         """#
 
+    // {slow}; appended to `launch` for a test-speedup
+    test-speedup max-bytes=1024 #"""
+        This is a test-speedup task. The suite is over its time budget; make these checks faster:
+        {slow}
+
+        The test tree and the checks' `cmd` / `retry_failed` / `retry_on` in tests.toml and
+        tests.d/ are yours to change; nothing else is: no production code, no other field of a
+        check, no roadmap.toml. Faster by what the tests do (less setup, shared fixtures, narrower
+        work), not by what they check: removing tests is allowed, but the player lists every
+        removed test and rewired `cmd` for the director, who decides at `accept`. A check must
+        end up strictly faster than it is on main, none may be slower, and none may be killed.
+        If the slowness is in the product code, make a `block:` commit saying so, and the
+        director will replan it.
+        """#
+
     finish-accepted "finish accepted — tests passed, awaiting director review; don't commit further"
 
     // {message} {recovery}
@@ -273,13 +288,19 @@ task-agent max-bytes=512 {
           in tests.d/{slug}.toml (same name, cmd, runs and min_pass; check names are unique across
           the whole suite);
         """#
+    post-check-speedup #"""
+        - nothing in tests.d/: this is a test-speedup (spec §15.1), whose [[slow]] checks are
+          already in its plan and which adds no test. Your post is prompt.md alone: say which
+          checks are slow, what in them is likely slow, and what the worker may safely trim;
+        """#
     post-check-flaky #"""
         - nothing in tests.d/: this is a flaky-test-fix (spec §15), whose [check] and [[evidence]]
           are already in its plan and stay out of the suite. Your post is prompt.md, plus any test
           files its check needs that don't exist yet;
         """#
 
-    // {round} {slug} {tip} {base} {cap}: {cap} is empty, `review-cap-last` or `review-cap-over`
+    // {round} {slug} {tip} {base} {cap} {notes}: {cap} is empty, `review-cap-last` or
+    // `review-cap-over`; {notes} is empty or `review-notes`
     review max-bytes=1536 #"""
         Step: review round {round}. The worker's work on task/{slug} passed the whole project suite
         at {tip}; the player ran it, so don't re-run it. Update your branch: git fetch origin && git
@@ -294,7 +315,15 @@ task-agent max-bytes=512 {
           reason your review gives: a send-back the suite still passes is a `review` strike. Run it
           only on the worker's code: never write code of your own to see how the test should
           pass. A concern you can't turn into a failing test isn't a send-back: report verdict:
-          unsure.{cap}
+          unsure.{cap}{notes}
+        """#
+    // {notes}: what a test-speedup finish removed or rewired
+    review-notes #"""
+
+        This is a test-speedup. The player lists what it gave up; removing tests is allowed, so
+        judge whether each is a real loss (a test that checked something now unchecked) and say so
+        in your report:
+        {notes}
         """#
     review-cap-last #"""
 

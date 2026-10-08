@@ -539,6 +539,25 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
         out.push(String::new());
     }
 
+    // ---- main over its budget ----
+    if !state.main_over_budget.is_empty() {
+        out.push(style(
+            "Over budget on main — work failing only on these (or slow only because of them) is held",
+            &[c::BOLD, c::RED],
+            color,
+        ));
+        for line in &state.main_over_budget {
+            out.push(format!(
+                "  {}",
+                truncate(line, width.saturating_sub(4).max(10))
+            ));
+        }
+        if state.main_impure.is_empty() && !state.held.is_empty() {
+            out.push(format!("  held: {}", state.held.join(", ")));
+        }
+        out.push(String::new());
+    }
+
     // ---- impure checks (the impurity ledger) ----
     if !state.impurities.is_empty() {
         out.push(style(
@@ -967,6 +986,7 @@ mod tests {
             flakes: vec![],
             impurities: vec![],
             main_impure: vec![],
+            main_over_budget: vec![],
             held: vec![],
             project: "widget".to_string(),
         }

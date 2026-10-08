@@ -595,6 +595,44 @@ test per line.
 - *Not enforced*: weakened assertions or a helper that neuters other tests;
   the task agent's review reads the diff for that.
 
+### 15.1 Test speed-ups
+
+A suite that is already over its `[budget]` (a check killed at `check_timeout`,
+or the total past `suite_fail`) can't be fixed by an ordinary task: the test
+tree is pinned. A task of `kind = "test-speedup"` is the fix. Its plan names
+the slow checks, `[[slow]] check = "<suite check name>"`, and has no `[check]`
+(its evidence is main's recorded timings) and adds nothing to the suite;
+`tests.toml` needs `list_cmd`.
+
+- **Post.** The evidence is read from `main`'s cached suite run, never
+  re-measured: `main` must be over its budget, every named check must exist
+  and be slow there (killed, or a recorded wall time of at least 10% of
+  `suite_fail`), and every check killed on `main` must be named, since the
+  suite can't pass until each is faster. Otherwise it is an `evidence`
+  rejection (limit 1) and the player retires the task, as for a flake that
+  doesn't reproduce; the launch re-checks it. The post itself needs no passing
+  or failing suite, so it imports while `main` is over budget.
+- **Scope** (the inverse of the usual pins). `tests.toml`, `tests.d/` and the
+  `test_paths` tree are unpinned. The worker may change those paths, and in the
+  suite definition only a check's `cmd`, `retry_failed` and `retry_on`.
+  Changing `runs`, `min_pass`, `test_paths`, `list_cmd`, adding or removing a
+  check, any non-test path or `roadmap.toml` (so `[budget]`) is a `pins` strike.
+- **Finish.** The suite must pass: a check still killed is a `budget` strike,
+  and this kind is never held (it is the fix, not the held work). If the
+  branch's suite is still over `suite_fail` while `main` is over budget, a
+  ratchet against `main`'s recorded `millis` applies: every named check
+  strictly faster; no other check slower than on `main` by more than 25% plus
+  1s (constants in `checks.rs`, not config: wall time jitters); the total no
+  higher than `main`'s; a check `main` lacks within `suite_fail` on its own.
+  Once the branch is under `suite_fail` the normal rule applies.
+- **Removals are visible, not forbidden.** The player diffs the test
+  inventory (`list_cmd`) against the pinned base and lists the changed `cmd`s
+  (a `cmd` turned into `true` removes tests the inventory can't see). That
+  text is the `speedup_finish` event and is noted on the finish commit
+  (`refs/notes/dashboard-speedups`), where the task agent's review prompt
+  reads it; the director decides at `accept`.
+- **The task agent** posts `prompt.md` alone, as for a flaky-test-fix.
+
 ## 16. Check retries and the flake ledger
 
 A `[[check]]` may set `retry_failed = N` (default 0) and `retry_on`, a list
@@ -828,6 +866,23 @@ a held accept is simply re-landed; a held finish's branch still carries the
 old check, so the player merges `main` into it (a `sync_revision`,
 re-pinned) and the worker rebases its finish onto that. A launch held for
 an impure task check is reported once per tip, not every tick.
+
+**An over-budget `main`.** The same rule covers a `main` that is already over
+its `[budget]`, which is nobody's current work either. `verify_main` also
+records how `main`'s suite is over (the checks killed at `check_timeout`, the
+total past `suite_fail`, every check's `millis`); it is reported once per main
+tip (`main_over_budget`) and shown in `status`. A suite that fails *only* on
+checks killed on both `main` and the commit at hand is held like an impure one
+(a director commit on `main` imports, so the limit can be raised; a finish or
+accept is held, no strike; a send-back on such a failure is no evidence). A
+passing finish over `suite_fail` is held only if every check `main` has is
+within the ratchet's tolerance of its time there and the checks `main` lacks
+fit `suite_fail` on their own; totals are never compared, so slow tests can't
+hide in main's excess, and a check that got slower is a `budget` strike. A
+held finish is released, as for impurity, once the new policy has `main` under
+budget (one tick after the director's commit, as `[budget]` is read from
+`main`'s tip). A `test-speedup` (§15.1) is judged by its ratchet, not held.
+Checks are matched by name.
 
 Not enforced: determinism and order independence (a clock, unseeded
 randomness, state shared through a `writable` path). The task agent's review

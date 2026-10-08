@@ -173,6 +173,30 @@ pub struct SuiteResult {
     pub error: Option<String>,
 }
 
+/// How a suite is over its `[budget]` (`SuiteResult::budget_overrun`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Overrun {
+    /// Checks killed for exceeding `check_timeout`.
+    pub timed_out: std::collections::BTreeSet<String>,
+    /// The checks' total is past `suite_fail`.
+    pub total_over: bool,
+    /// Every check's recorded wall time, in milliseconds.
+    pub millis: BTreeMap<String, u64>,
+    /// `SuiteResult::over_budget`'s text.
+    pub why: String,
+}
+
+/// How much slower than on `main` a check may be and still count as the
+/// same speed: `millis` is wall-clock and jitters. A constant, not config.
+pub const SLOWER_TOLERANCE_PERCENT: u64 = 25;
+/// ...plus this much, so a check of a few hundred ms isn't judged on noise.
+pub const SLOWER_TOLERANCE_FLOOR_MS: u64 = 1000;
+
+/// Whether `millis` is no slower than `reference` beyond the tolerance.
+pub fn within_tolerance(millis: u64, reference: u64) -> bool {
+    millis <= reference + reference * SLOWER_TOLERANCE_PERCENT / 100 + SLOWER_TOLERANCE_FLOOR_MS
+}
+
 /// `12.3s`.
 pub fn fmt_secs(millis: u64) -> String {
     format!("{:.1}s", millis as f64 / 1000.0)
@@ -223,6 +247,30 @@ impl SuiteResult {
                 budget.suite_warn,
                 self.slowest()
             )
+        })
+    }
+
+    /// What `[budget]` finds wrong with this suite as a whole, per check:
+    /// the checks killed for their timeout, whether the total is past
+    /// `suite_fail`, and every check's recorded wall time. `None` when it
+    /// is within budget. This is what a task's suite is compared against
+    /// when `main` is already over (`Player::held_by_main`).
+    pub fn budget_overrun(&self, budget: &BudgetConfig) -> Option<Overrun> {
+        let why = self.over_budget(budget)?;
+        Some(Overrun {
+            timed_out: self
+                .checks
+                .iter()
+                .filter(|c| c.timed_out)
+                .map(|c| c.name.clone())
+                .collect(),
+            total_over: budget.suite_fail > 0 && self.millis() > budget.suite_fail * 1000,
+            millis: self
+                .checks
+                .iter()
+                .map(|c| (c.name.clone(), c.millis))
+                .collect(),
+            why,
         })
     }
 

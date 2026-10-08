@@ -20,6 +20,7 @@ use crate::checks;
 use crate::config::{self, Reason, RoadmapConfig, TaskConfig, TaskKind, path_under_test_paths};
 use crate::events::{self, EventKind};
 use crate::flaky;
+use crate::speedup;
 use crate::fsm::{self, Move, Verdict};
 use crate::git::Git;
 use crate::paths::{self, Home};
@@ -596,9 +597,15 @@ pub struct TickReport {
     pub agent_reports: Vec<(String, records::AgentReport)>,
     /// `main`'s impure checks, when newly found (spec §20): one line each.
     pub main_impure: Vec<String>,
+    /// `main`'s suite is over its `[budget]` (a check killed, or the total
+    /// past `suite_fail`), when newly found: one line.
+    pub main_over_budget: Vec<String>,
     /// Finishes and accepts held because they fail only on checks already
-    /// impure on `main`: (slug, message).
+    /// impure or over budget on `main`: (slug, message).
     pub held: Vec<(String, String)>,
+    /// What a test-speedup finish removed or rewired (tests gone, `cmd`s
+    /// changed): (slug, message), for the director's review.
+    pub speedups: Vec<(String, String)>,
     /// Suites over `[budget] suite_warn`: (slug, message); `_main` for main's.
     pub slow: Vec<(String, String)>,
     pub errors: Vec<String>,
@@ -616,7 +623,9 @@ impl TickReport {
             && self.agents_launched.is_empty()
             && self.agent_reports.is_empty()
             && self.main_impure.is_empty()
+            && self.main_over_budget.is_empty()
             && self.held.is_empty()
+            && self.speedups.is_empty()
             && self.slow.is_empty()
             && self.errors.is_empty()
     }
@@ -660,8 +669,14 @@ impl fmt::Display for TickReport {
         for line in &self.main_impure {
             lines.push(format!("main impure: {line}"));
         }
+        for line in &self.main_over_budget {
+            lines.push(format!("main over budget: {line}"));
+        }
         for (slug, msg) in &self.held {
             lines.push(format!("held {slug}: {msg}"));
+        }
+        for (slug, msg) in &self.speedups {
+            lines.push(format!("speedup {slug}: {}", first_line(msg)));
         }
         for (slug, msg) in &self.slow {
             lines.push(format!("slow suite {slug}: {msg}"));
@@ -728,6 +743,12 @@ pub struct Player<S: Sessions> {
     main_impure: BTreeMap<String, String>,
     /// Main's tip and why its suite is over `[budget] suite_warn`, if it is.
     main_slow: Option<(String, String)>,
+    /// How `main`'s suite is over `[budget]` (checks killed, total past
+    /// `suite_fail`) as of this tick's `verify_main`: work failing only on
+    /// these, or only through the total, is held.
+    main_over: Option<checks::Overrun>,
+    /// The main tip whose overrun was last reported.
+    over_told: Option<String>,
     /// The main tip whose slowness was last reported.
     slow_told: Option<String>,
     /// The main tip `verify_main` last ran the suite on.
@@ -776,6 +797,8 @@ impl<S: Sessions> Player<S> {
             sandbox_preflighted: None,
             main_impure: BTreeMap::new(),
             main_slow: None,
+            main_over: None,
+            over_told: None,
             slow_told: None,
             main_verified: String::new(),
             main_told: None,
@@ -803,6 +826,7 @@ impl<S: Sessions> Player<S> {
         self.main_slow = suite
             .slow(&self.runner.budget())
             .map(|msg| (main_tip.clone(), msg));
+        self.main_over = suite.budget_overrun(&self.runner.budget());
         self.main_verified = main_tip;
         Ok(&self.main_impure)
     }
@@ -815,6 +839,14 @@ impl<S: Sessions> Player<S> {
                 self.slow_told = Some(tip.clone());
                 report.slow.push(("_main".to_string(), msg.clone()));
             }
+        }
+        match &self.main_over {
+            Some(over) if self.over_told.as_ref() != Some(&self.main_verified) => {
+                self.over_told = Some(self.main_verified.clone());
+                report.main_over_budget.push(over.why.clone());
+            }
+            Some(_) => {}
+            None => self.over_told = None,
         }
         if self.main_impure.is_empty() {
             self.main_told = None;
@@ -836,8 +868,50 @@ impl<S: Sessions> Player<S> {
             .extend(self.main_impure.values().cloned());
     }
 
+    /// Whether failing check `c` is the same failure `main` already has:
+    /// impure there too, or killed for its timeout there too (matched by
+    /// name).
+    fn bad_on_main(&self, c: &checks::CheckResult) -> bool {
+        (c.impurity().is_some() && self.main_impure.contains_key(&c.name))
+            || (c.timed_out
+                && self
+                    .main_over
+                    .as_ref()
+                    .is_some_and(|o| o.timed_out.contains(&c.name)))
+    }
+
+    /// A passing suite over `suite_fail` only because `main` is: every check
+    /// `main` has is no slower than there (`checks::within_tolerance`), and
+    /// the checks `main` lacks fit `suite_fail` on their own, so slow tests
+    /// can't hide in main's excess. Totals are never compared. Returns the
+    /// text for the `held` event.
+    fn held_over_total(&self, suite: &checks::SuiteResult) -> Option<Vec<String>> {
+        let over = self.main_over.as_ref().filter(|o| o.total_over)?;
+        let budget = self.runner.budget();
+        if !suite.pass || suite.over_budget(&budget).is_none() {
+            return None;
+        }
+        let mut added = 0;
+        for c in &suite.checks {
+            match over.millis.get(&c.name) {
+                Some(m) if checks::within_tolerance(c.millis, *m) => {}
+                Some(_) => return None,
+                None => added += c.millis,
+            }
+        }
+        (added <= budget.suite_fail * 1000).then(|| vec!["suite time".to_string()])
+    }
+
+    /// Whether `suite` is held, not judged: it fails only where `main`
+    /// does (`held_by_main`), or is slow only because `main` is
+    /// (`held_over_total`).
+    fn held_reason(&self, suite: &checks::SuiteResult) -> Option<Vec<String>> {
+        self.held_by_main(suite).or_else(|| self.held_over_total(suite))
+    }
+
     /// The failing checks' names if the suite fails only on checks that are
-    /// impure here *and* already impure on `main`: not the work's fault.
+    /// already bad on `main` (impure, or killed for their timeout): not the
+    /// work's fault.
     fn held_by_main(&self, suite: &checks::SuiteResult) -> Option<Vec<String>> {
         let failing: Vec<&checks::CheckResult> = suite.checks.iter().filter(|c| !c.pass).collect();
         if suite.error.is_some() || failing.is_empty() {
@@ -845,7 +919,7 @@ impl<S: Sessions> Player<S> {
         }
         failing
             .iter()
-            .all(|c| c.impurity().is_some() && self.main_impure.contains_key(&c.name))
+            .all(|c| self.bad_on_main(c))
             .then(|| failing.iter().map(|c| c.name.clone()).collect())
     }
 
@@ -860,7 +934,7 @@ impl<S: Sessions> Player<S> {
                 continue;
             };
             if self
-                .held_by_main(&self.runner.run_suite(&candidate))
+                .held_reason(&self.runner.run_suite(&candidate))
                 .is_some()
             {
                 continue;
@@ -1044,8 +1118,14 @@ impl<S: Sessions> Player<S> {
                 &report.main_impure.join("\n"),
             )?;
         }
+        for line in &report.main_over_budget {
+            events::append(&self.home, EventKind::MainOverBudget, None, line)?;
+        }
         for (slug, msg) in &report.held {
             events::append(&self.home, EventKind::Held, Some(slug), msg)?;
+        }
+        for (slug, msg) in &report.speedups {
+            events::append(&self.home, EventKind::SpeedupFinish, Some(slug), msg)?;
         }
         for (slug, msg) in &report.slow {
             let slug = (slug != "_main").then_some(slug.as_str());
@@ -2285,11 +2365,63 @@ impl<S: Sessions> Player<S> {
     /// task's own files, cached by commit). `None` for any other task or
     /// when every evidence reproduces.
     fn evidence_miss(&self, slug: &str, commit: &str) -> Option<String> {
-        let cfg = records::task_config_at(&self.hub, commit, slug)
-            .filter(|c| c.kind == TaskKind::FlakyTestFix)?;
+        let cfg = records::task_config_at(&self.hub, commit, slug)?;
+        if cfg.kind == TaskKind::TestSpeedup {
+            return self.slow_miss(&cfg);
+        }
+        if cfg.kind != TaskKind::FlakyTestFix {
+            return None;
+        }
         cfg.evidence
             .iter()
             .find_map(|e| flaky::miss(e, &self.runner.run_evidence(commit, e)))
+    }
+
+    /// For a test-speedup: why its `[[slow]]` evidence doesn't hold on
+    /// `main` now (read from the cached suite run, not re-measured): `main`
+    /// isn't over its budget, a named check isn't slow there (killed, or a
+    /// tenth of `suite_fail` or more), or a check killed there isn't named,
+    /// which the worker could never get the suite passing without.
+    fn slow_miss(&self, cfg: &TaskConfig) -> Option<String> {
+        let main_tip = self.hub.rev_parse("refs/heads/main")?;
+        let Some(over) = &self.main_over else {
+            return Some(format!(
+                "evidence did not reproduce: main's suite is within its [budget] at {}",
+                short(&main_tip)
+            ));
+        };
+        let suite_fail_ms = self.runner.budget().suite_fail * 1000;
+        let is_slow = |name: &str| {
+            over.timed_out.contains(name)
+                || (suite_fail_ms > 0
+                    && over.millis.get(name).is_some_and(|m| {
+                        *m * 100 >= suite_fail_ms * speedup::SLOW_SHARE_PERCENT
+                    }))
+        };
+        for s in &cfg.slow {
+            if !over.millis.contains_key(&s.check) {
+                return Some(format!(
+                    "evidence did not reproduce: {:?} is not a check of main's suite",
+                    s.check
+                ));
+            }
+            if !is_slow(&s.check) {
+                return Some(format!(
+                    "evidence did not reproduce: {:?} is not slow on main ({}; slow means killed, or {}% of suite_fail)",
+                    s.check,
+                    checks::fmt_secs(over.millis[&s.check]),
+                    speedup::SLOW_SHARE_PERCENT
+                ));
+            }
+        }
+        over.timed_out
+            .iter()
+            .find(|t| !cfg.slow.iter().any(|s| &s.check == *t))
+            .map(|t| {
+                format!(
+                    "evidence is incomplete: {t:?} is killed on main too, so name it in a [[slow]] (the suite can't pass until it is faster)"
+                )
+            })
     }
 
     /// The player's own retire, for a dead end that needs no director
@@ -2410,14 +2542,28 @@ impl<S: Sessions> Player<S> {
             .ok_or_else(|| format!("post: task/{slug}: {task_toml_path} missing"))?;
         let cfg = config::task_config_from_str(&text)
             .map_err(|e| format!("post: task/{slug}: {task_toml_path}: {e}"))?;
-        let check = cfg
-            .check
-            .ok_or_else(|| format!("post: task/{slug}: {task_toml_path} has no [check] section"))?;
-
         let suite = config::suite_at(&self.hub, candidate)
             .map_err(|e| format!("post: task/{slug}: {e}"))?;
         let fragment_path = config::suite_fragment_path(slug);
         let fragment = self.hub.blob_hash(candidate, &fragment_path).is_some();
+        if cfg.kind == TaskKind::TestSpeedup {
+            // No task check: its evidence is the named checks' times on main
+            // (`evidence_miss`), and it adds nothing to the suite.
+            if fragment {
+                return Err(format!(
+                    "post: task/{slug}: a test-speedup adds no check to the suite ({fragment_path})"
+                ));
+            }
+            if suite.list_cmd.is_none() {
+                return Err(format!(
+                    "post: task/{slug}: a test-speedup needs `list_cmd` in tests.toml (the player lists the tests it removes with it)"
+                ));
+            }
+            return Ok(());
+        }
+        let check = cfg
+            .check
+            .ok_or_else(|| format!("post: task/{slug}: {task_toml_path} has no [check] section"))?;
         if cfg.kind == TaskKind::FlakyTestFix {
             // The stress check is a one-off proof for this task, an exception
             // to spec §6.3: it must not slow every future suite.
@@ -2557,6 +2703,15 @@ impl<S: Sessions> Player<S> {
         if suite.pass {
             let msg = format!(
                 "send-back: task/{slug}: send-back without evidence: the project suite still passes"
+            );
+            return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
+        }
+        // Nor is one failing only where main already does (a check killed
+        // for its timeout there too).
+        if let Some(names) = self.held_by_main(&suite) {
+            let msg = format!(
+                "send-back: task/{slug}: send-back without evidence: the suite fails only on checks that already fail on main: {}",
+                names.join(", ")
             );
             return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
@@ -2888,7 +3043,7 @@ impl<S: Sessions> Player<S> {
                     report.held.push((
                         slug.to_string(),
                         format!(
-                            "{} {} fails only on checks impure on main: {}",
+                            "{} {} fails only on checks already bad on main (impure or killed): {}",
                             transition.as_str(),
                             short(candidate),
                             names.join(", ")
@@ -3723,6 +3878,11 @@ impl<S: Sessions> Player<S> {
                 self.hold_launch(slug, tip, msg, report);
                 return Ok(());
             }
+        } else if records::is_test_speedup_at(&self.hub, tip, slug) {
+            // No task check: it's launched while its evidence still holds.
+            if let Some(miss) = self.evidence_miss(slug, tip) {
+                return self.auto_retire(slug, tip, &miss, report);
+            }
         } else {
             let result = self
                 .runner
@@ -3984,16 +4144,28 @@ impl<S: Sessions> Player<S> {
                 &question,
             )
         } else {
-            let flaky = records::task_config_at(&self.hub, tip, slug)
-                .filter(|c| c.kind == TaskKind::FlakyTestFix)
-                .map(|cfg| {
+            let flaky = records::task_config_at(&self.hub, tip, slug).and_then(|cfg| match cfg
+                .kind
+            {
+                TaskKind::FlakyTestFix => {
                     let (fix_paths, replacements) =
                         flaky::prompt_lists(&cfg.fix_paths, &cfg.replace);
-                    prompts.render(
+                    Some(prompts.render(
                         "worker.flaky",
                         &[("fix_paths", &fix_paths), ("replacements", &replacements)],
-                    )
-                });
+                    ))
+                }
+                TaskKind::TestSpeedup => {
+                    let slow = cfg
+                        .slow
+                        .iter()
+                        .map(|s| format!("  - {}", s.check))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Some(prompts.render("worker.test-speedup", &[("slow", &slow)]))
+                }
+                _ => None,
+            });
             prompts.worker_launch(
                 &prompts.render("worker.launch", &vars),
                 flaky.as_deref(),
@@ -4314,29 +4486,30 @@ impl<S: Sessions> Player<S> {
             return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
         }
 
+        let speedup = records::task_config_at(&self.hub, hub_tip, slug)
+            .filter(|c| c.kind == TaskKind::TestSpeedup);
+        if let Some(cfg) = &speedup {
+            let problems = self.test_speedup_scope(hub_tip, candidate, cfg);
+            if !problems.is_empty() {
+                let msg = format!(
+                    "pins: task/{slug} is a test-speedup and may only change the test tree and its checks' cmd / retry_failed / retry_on, not: {}. If the slowness is in the product code, make a `block:` commit instead: the director replans it",
+                    problems.join("; ")
+                );
+                return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
+            }
+        }
+
         let suite = self.runner.run_suite(candidate);
         self.note_ledgers(slug, candidate, &suite);
         if !suite.pass {
-            // Failing only where main already fails impurely: not the
-            // worker's doing. Left unimported, it's re-judged every tick
-            // (a cache hit) and goes through once main is clean.
-            if let Some(names) = self.held_by_main(&suite) {
-                if records::held_commit(&self.hub, slug).as_deref() != Some(candidate) {
-                    records::set_held(&self.hub, slug, candidate)?;
-                    let checks = names.join(", ");
-                    report.held.push((
-                        slug.to_string(),
-                        format!(
-                            "finish {} fails only on checks impure on main: {checks}",
-                            short(candidate)
-                        ),
-                    ));
-                    let text = self
-                        .prompts()?
-                        .render("worker.held", &[("checks", &checks)]);
-                    self.relay(slug, &text);
+            // Failing only where main already fails (impurely, or killed for
+            // its timeout): not the worker's doing. Left unimported, it's
+            // re-judged every tick (a cache hit) and goes through once main
+            // is clean. A test-speedup is the fix, not the held work.
+            if speedup.is_none() {
+                if let Some(names) = self.held_by_main(&suite) {
+                    return self.hold_finish(slug, candidate, &names, report);
                 }
-                return Ok(());
             }
             let reason = Self::suite_failure_reason(&suite);
             let msg = format!("{}: task/{slug}: {}", reason.as_str(), suite.summary());
@@ -4344,8 +4517,24 @@ impl<S: Sessions> Player<S> {
         }
         let budget = self.runner.budget();
         if let Some(why) = suite.over_budget(&budget) {
-            let msg = format!("budget: task/{slug}: {why}");
-            return self.reject_and_relay(slug, candidate, Reason::Budget, msg, report);
+            if let (Some(cfg), Some(main)) = (&speedup, &self.main_over) {
+                // Still over, but `main` is too: progress is what counts.
+                let named: Vec<String> = cfg.slow.iter().map(|s| s.check.clone()).collect();
+                let problems = speedup::ratchet_problems(&named, &main.millis, &budget, &suite);
+                if !problems.is_empty() {
+                    let msg = format!(
+                        "budget: task/{slug}: still {}, and not enough progress against main: {}",
+                        why.trim_end_matches('.'),
+                        problems.join("; ")
+                    );
+                    return self.reject_and_relay(slug, candidate, Reason::Budget, msg, report);
+                }
+            } else if let Some(names) = self.held_over_total(&suite) {
+                return self.hold_finish(slug, candidate, &names, report);
+            } else {
+                let msg = format!("budget: task/{slug}: {why}");
+                return self.reject_and_relay(slug, candidate, Reason::Budget, msg, report);
+            }
         }
         if let Some(msg) = suite.slow(&budget) {
             report.slow.push((slug.to_string(), msg));
@@ -4355,6 +4544,16 @@ impl<S: Sessions> Player<S> {
             let msg = format!("suite: task/{slug}: {problem}");
             return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
         }
+        let speedup_notes = match &speedup {
+            Some(_) => match self.test_speedup_notes(slug, hub_tip, candidate) {
+                Ok(notes) => notes,
+                Err(problem) => {
+                    let msg = format!("suite: task/{slug}: {problem}");
+                    return self.reject_and_relay(slug, candidate, Reason::Suite, msg, report);
+                }
+            },
+            None => String::new(),
+        };
 
         let hub_ref = format!("refs/heads/task/{slug}");
         self.hub
@@ -4370,6 +4569,10 @@ impl<S: Sessions> Player<S> {
         report
             .imported
             .push((hub_ref, candidate.to_string(), Transition::Finish));
+        if !speedup_notes.is_empty() {
+            records::record_speedup(&self.hub, candidate, &speedup_notes)?;
+            report.speedups.push((slug.to_string(), speedup_notes));
+        }
         let text = self.prompts()?.render("worker.finish-accepted", &[]);
         self.relay(slug, &text);
         Ok(())
@@ -4416,6 +4619,86 @@ impl<S: Sessions> Player<S> {
             .map(|(_, path)| path)
             .collect();
         (!stray.is_empty()).then_some(stray)
+    }
+
+    /// Holds a worker's finish `candidate`, not judged: `names` are the
+    /// checks `main` already fails (or `suite time`). Told once per commit.
+    fn hold_finish(
+        &mut self,
+        slug: &str,
+        candidate: &str,
+        names: &[String],
+        report: &mut TickReport,
+    ) -> Result<(), String> {
+        if records::held_commit(&self.hub, slug).as_deref() != Some(candidate) {
+            records::set_held(&self.hub, slug, candidate)?;
+            let checks = names.join(", ");
+            report.held.push((
+                slug.to_string(),
+                format!(
+                    "finish {} fails only where main already does (impure or over budget): {checks}",
+                    short(candidate)
+                ),
+            ));
+            let text = self
+                .prompts()?
+                .render("worker.held", &[("checks", &checks)]);
+            self.relay(slug, &text);
+        }
+        Ok(())
+    }
+
+    /// For a test-speedup: what `candidate` changes beyond its scope. The
+    /// paths must be the test tree, `tests.toml` or a suite fragment; the
+    /// suite definition may change only in its checks' `cmd` / `retry_*`
+    /// (`speedup::scope_problems`). Never `roadmap.toml`, so never `[budget]`.
+    fn test_speedup_scope(&self, hub_tip: &str, candidate: &str, _cfg: &TaskConfig) -> Vec<String> {
+        let (Ok(base), Ok(cand)) = (
+            config::suite_at(&self.hub, hub_tip),
+            config::suite_at(&self.hub, candidate),
+        ) else {
+            return vec!["tests.toml or a tests.d/ fragment doesn't load".to_string()];
+        };
+        let mut problems: Vec<String> = self
+            .hub
+            .diff_names(hub_tip, candidate)
+            .into_iter()
+            .map(|(_, path)| path)
+            .filter(|path| {
+                !(path == "tests.toml"
+                    || config::is_suite_fragment(path)
+                    || path_under_test_paths(path, &base.test_paths))
+            })
+            .collect();
+        problems.extend(speedup::scope_problems(&base, &cand));
+        problems
+    }
+
+    /// A test-speedup's finish: the removed tests (inventory diff against the
+    /// pinned base with `list_cmd`) and rewired `cmd`s, as the text the
+    /// director sees. Removing is allowed, never hidden. Empty if none.
+    fn test_speedup_notes(
+        &self,
+        slug: &str,
+        hub_tip: &str,
+        candidate: &str,
+    ) -> Result<String, String> {
+        let cand = config::suite_at(&self.hub, candidate)?;
+        let base_commit = self
+            .hub
+            .rev_parse(&format!("refs/dashboard/pins/{slug}"))
+            .ok_or("no pins recorded")?;
+        let list_cmd = cand
+            .list_cmd
+            .clone()
+            .ok_or("tests.toml has no list_cmd")?;
+        let before = self.runner.run_list(&base_commit, &list_cmd)?;
+        let after = self.runner.run_list(candidate, &list_cmd)?;
+        let base = config::suite_at(&self.hub, hub_tip)?;
+        Ok(speedup::removal_text(
+            &flaky::removed(&before, &after),
+            &speedup::changed_checks(&base, &cand),
+        ))
     }
 
     /// A flaky-test-fix's finish, on top of the passing suite: the director's
@@ -5002,6 +5285,8 @@ impl<S: Sessions> Player<S> {
             AgentStep::Post => {
                 let check = if task.config.kind == TaskKind::FlakyTestFix {
                     prompts.render("task-agent.post-check-flaky", &[])
+                } else if task.config.kind == TaskKind::TestSpeedup {
+                    prompts.render("task-agent.post-check-speedup", &[])
                 } else {
                     prompts.render("task-agent.post-check-task", &[("slug", slug)])
                 };
@@ -5021,6 +5306,9 @@ impl<S: Sessions> Player<S> {
                 } else {
                     String::new()
                 };
+                let notes = records::speedup_notes(&self.hub, &task.tip)
+                    .map(|n| prompts.render("task-agent.review-notes", &[("notes", &n)]))
+                    .unwrap_or_default();
                 prompts.render(
                     "task-agent.review",
                     &[
@@ -5029,6 +5317,7 @@ impl<S: Sessions> Player<S> {
                         ("tip", &task.tip),
                         ("base", &base),
                         ("cap", &cap),
+                        ("notes", &notes),
                     ],
                 )
             }
