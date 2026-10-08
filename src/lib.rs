@@ -12,6 +12,7 @@ pub mod init;
 pub mod paths;
 pub mod player;
 pub mod prompts;
+pub mod queue;
 pub mod records;
 pub mod render;
 pub mod sandbox;

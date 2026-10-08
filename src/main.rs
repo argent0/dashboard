@@ -10,7 +10,7 @@
 use clap::{Parser, Subcommand};
 use dashboard::git::Git;
 use dashboard::paths::Home;
-use dashboard::{events, init, paths, player, render, state, ui};
+use dashboard::{config, events, git, init, paths, player, queue, render, state, ui};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -99,6 +99,18 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         question: Vec<String>,
     },
+    /// Run the suite through the player's queue (`[player] runs = "queued"`)
+    /// from a worker's or task agent's worktree: snapshots the working tree,
+    /// waits its turn and prints each check's result and output. Exits 1 if
+    /// the suite fails. A failing run is never a strike.
+    Test {
+        /// Print the result file's path and return instead of waiting.
+        #[arg(long)]
+        no_wait: bool,
+        /// Give up (exit 2) after this many seconds waiting.
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
     /// The director's listener: blocks until the player appends a new event,
     /// prints every event past the cursor, advances it, and exits (step 7 —
     /// the director runs this as a background command instead of polling).
@@ -127,6 +139,7 @@ fn main() {
             run_relaunch(args.home, &slug, agent, reset)
         }
         Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
+        Some(Command::Test { no_wait, timeout }) => run_test(args.home, no_wait, timeout),
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
     }
 }
@@ -510,6 +523,54 @@ fn run_ask(home: Option<PathBuf>, slug: &str, question: &str) {
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+/// `dashboard test`: see `queue.rs`.
+fn run_test(home: Option<PathBuf>, no_wait: bool, timeout: Option<u64>) {
+    let fail = |msg: String| -> ! {
+        eprintln!("error: {msg}");
+        std::process::exit(1);
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|e| fail(format!("cannot read current directory: {e}")));
+    let home = paths::resolve_home(home, &cwd).unwrap_or_else(|e| fail(e));
+    let hub = git::Git::new(home.hub());
+    let queued = hub
+        .rev_parse("refs/heads/main")
+        .and_then(|tip| hub.show_file(&tip, "roadmap.toml"))
+        .and_then(|text| config::roadmap_config_from_str(&text).ok())
+        .is_some_and(|r| r.player.runs == config::Runs::Queued);
+    if !queued {
+        fail("runs are not queued in this project ([player] runs): run the suite yourself".into());
+    }
+    let worktree = git::Git::new(&cwd);
+    let branch = worktree
+        .run(&["symbolic-ref", "--short", "HEAD"])
+        .unwrap_or_else(|e| fail(e.to_string()));
+    let slug = queue::slug_of_branch(&branch)
+        .unwrap_or_else(|| fail(format!("branch {branch} is not a task/<slug> or agent/<slug> branch")));
+    let commit = queue::snapshot(&worktree).unwrap_or_else(|e| fail(e));
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let req = queue::enqueue(&home, &worktree, slug, &commit, millis).unwrap_or_else(|e| fail(e));
+    let result = queue::result_path(&home, &req.id);
+    if no_wait {
+        println!("{}", result.display());
+        return;
+    }
+    eprintln!("queued {}; waiting for the player", req.id);
+    match queue::wait(&home, &req.id, timeout.map(std::time::Duration::from_secs)) {
+        Some((pass, report)) => {
+            let _ = worktree.delete_ref(&req.ref_name());
+            print!("{report}");
+            std::process::exit(if pass { 0 } else { 1 });
+        }
+        None => {
+            eprintln!("still queued; the result will appear at {}", result.display());
+            std::process::exit(2);
         }
     }
 }

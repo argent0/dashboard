@@ -62,6 +62,11 @@ impl Home {
         self.root.join("launches")
     }
 
+    /// Test requests and results (`queue`), when `[player] runs = "queued"`.
+    pub fn queue(&self) -> PathBuf {
+        self.root.join("queue")
+    }
+
     /// Written every tick with the current unix time, so `dashboard wait`
     /// can tell the director when the player itself looks dead.
     pub fn heartbeat(&self) -> PathBuf {

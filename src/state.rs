@@ -251,6 +251,28 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         )?);
     }
 
+    // Sequential (the default): nothing is `ready` while another task is
+    // in flight.
+    if roadmap.player.runs == config::Runs::Sequential
+        && tasks.iter().any(|t| {
+            matches!(
+                t.status,
+                Status::Staged
+                    | Status::Posted
+                    | Status::InProgress
+                    | Status::Tested
+                    | Status::InRevision
+                    | Status::Conflicted
+                    | Status::Contested
+                    | Status::Escalated
+            )
+        })
+    {
+        for t in tasks.iter_mut().filter(|t| t.status == Status::Ready) {
+            t.status = Status::Pending;
+        }
+    }
+
     // Task list order: the order of phases in roadmap.toml, then slug.
     let phase_order: Vec<&str> = roadmap.phases.iter().map(|p| p.id.as_str()).collect();
     tasks.sort_by(|a, b| {

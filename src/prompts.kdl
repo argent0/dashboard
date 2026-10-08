@@ -80,6 +80,15 @@ worker max-bytes=512 {
         director will replan it.
         """#
 
+    // appended to `launch` when `[player] runs = "queued"`
+    queued max-bytes=512 #"""
+        This project queues test runs: run the suite with `dashboard test` from your worktree
+        instead of running it yourself. It snapshots your working tree, waits its turn behind
+        other tasks' runs, and prints each check's result and output; it exits 1 if the suite
+        fails, and a failing run costs nothing. `dashboard test --no-wait` prints the result
+        file's path instead: read it once it exists.
+        """#
+
     finish-accepted "finish accepted — tests passed, awaiting director review; don't commit further"
 
     // {message} {recovery}
@@ -266,6 +275,15 @@ task-agent max-bytes=512 {
     relaunched #"""
         You were relaunched: an earlier session's context is gone. Rebuild what you need from the
         repo: tasks/{slug}/ (task.toml, prompt.md, reviews/) on origin/task/{slug} and its history.
+        """#
+
+    // appended to `preamble` when `[player] runs = "queued"`
+    queued max-bytes=512 #"""
+        This project queues test runs: run the suite with `dashboard test` from your worktree
+        instead of running it yourself. It snapshots your working tree, waits its turn behind
+        other tasks' runs, and prints each check's result and output; it exits 1 if the suite
+        fails, and a failing run costs nothing. `dashboard test --no-wait` prints the result
+        file's path instead: read it once it exists.
         """#
 
     // {slug} {check}: {check} is `post-check-task` or `post-check-flaky`

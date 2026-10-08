@@ -303,6 +303,7 @@ title = "Phase One"
 
 [player]
 agent_cmd = "$FAKE_AGENT"
+runs = "parallel"
 task_agent_cmd = ""
 EOF
 

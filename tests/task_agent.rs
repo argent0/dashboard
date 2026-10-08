@@ -34,7 +34,7 @@ fn repo_with_task_agents() -> DirectorRepo {
     write_file(
         repo.path(),
         "roadmap.toml",
-        "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\ntask_agent_cmd = \"fake-task-agent\"\n",
+        "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"fake-task-agent\"\n",
     );
     commit(repo.path(), "turn task agents on");
     repo
@@ -304,7 +304,7 @@ fn repo_with_lock_files() -> DirectorRepo {
     write_file(
         repo.path(),
         "roadmap.toml",
-        "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\ntask_agent_cmd = \"fake-task-agent\"\nlock_files = [\"Cargo.lock\"]\n",
+        "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"fake-task-agent\"\nlock_files = [\"Cargo.lock\"]\n",
     );
     commit(repo.path(), "name the lock file");
     repo
@@ -440,7 +440,7 @@ fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
         repo.path(),
         "main",
         "roadmap.toml",
-        "title = \"Retitled\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\ntask_agent_cmd = \"fake-task-agent\"\n",
+        "title = \"Retitled\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"fake-task-agent\"\n",
         "retitle",
     );
     push_main_to_hub(repo.path());

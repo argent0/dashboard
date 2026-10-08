@@ -17,7 +17,7 @@ use dashboard::state::{self, Status};
 use tempfile::TempDir;
 
 const PLAN: &str = "title = \"s\"\nphase = \"p1\"\n";
-const ROADMAP: &str = "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\ntask_agent_cmd = \"fake-task-agent\"\n";
+const ROADMAP: &str = "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"fake-task-agent\"\n";
 
 fn setup() -> (DirectorRepo, TempDir, Home, Player<NullSessions>) {
     let repo = director_repo();

@@ -25,6 +25,7 @@ src/config.rs   roadmap.toml / tests.toml / task.toml schemas (serde) + defaults
 src/git.rs      thin sync wrapper over the `git` CLI (rev-parse, diff, notes, merge-tree, …)
 src/paths.rs    XDG home layout and `--home` / `dashboard.home` resolution
 src/init.rs     `dashboard init`: creates the hub and wires up the director <-> hub links
+src/queue.rs    queued runs: `dashboard test` snapshot + request files, results
 src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based result cache
 src/records.rs  provenance/enforcement records: import notes, rejections, pins, retirements, accepted-merge lookup,
                 spike base commits and exploration notes
@@ -197,6 +198,10 @@ max_relaunches = 2               # default 2: `dashboard relaunch`es of a task's
                                  # flake doesn't reproduce); budget = 2 (see [budget])
 
 [player]
+runs = "sequential"              # default. "sequential": one task in flight at a time (others
+                                 # stay `pending` instead of `ready`); "parallel": any number
+                                 # (spec §4); "queued": parallel, but test runs go through a
+                                 # queue the player serves (see `dashboard test`)
 agent_cmd = "claude --dangerously-skip-permissions"        # the worker; default
 task_agent_cmd = "claude --dangerously-skip-permissions"   # the task agent (spec §17); default.
                                                            # "" turns task agents off
@@ -334,6 +339,19 @@ ignored — no `deny_unknown_fields` anywhere.
 - `dashboard ask <slug> <question…>` — pastes the director's question into
   the task agent's session; the answer comes back as an `agent_report`
   event.
+- `dashboard test [--no-wait] [--timeout SECS]` — `runs = "queued"` only, run
+  from a worker's or task agent's worktree (branch `task/<slug>` or
+  `agent/<slug>`): snapshots the working tree (a deterministic commit in a
+  private index, ref `refs/dashboard/test/<id>` in the workspace), files
+  `queue/<id>.req` in the home and waits for `queue/<id>.result` (`PASS`/`FAIL`
+  line, then every check's output), which it prints; exit 1 on a failing
+  suite, 2 on timeout. The player serves one request per tick
+  (`Player::serve_queue`: fetch the ref into the hub, `run_suite`), so runs
+  never overlap; it is no strike, event or hub record. The agent reads the
+  output itself; nothing is pasted into its session. The player adds
+  `worker.queued` / `task-agent.queued` (prompts.kdl) to worker and task-agent
+  prompts when queued, and sets
+  `dashboard.home` in the worker workspace so `test` finds the home.
 - `dashboard wait [--timeout SECS] [--all]` — the director's blocking
   listener (see Decisions). Prints every event past the director's cursor,
   advances it, and exits; `--timeout` exits 2 after N idle seconds; `--all`

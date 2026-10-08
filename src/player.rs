@@ -25,6 +25,7 @@ use crate::fsm::{self, Move, Verdict};
 use crate::git::Git;
 use crate::paths::{self, Home};
 use crate::prompts::{self, Prompts};
+use crate::queue;
 use crate::records::{self, Actor, RejectionRecord, Transition};
 use crate::sandbox::Sandbox;
 use crate::spike;
@@ -1071,8 +1072,52 @@ impl<S: Sessions> Player<S> {
         self.import_workers(&mut report)?;
         self.unblock_merges(&mut report)?;
         self.run_task_agents(&mut report)?;
+        self.serve_queue()?;
         self.emit_events(&report)?;
         Ok(report)
+    }
+
+    /// Whether `[player] runs` is `queued` at main's tip.
+    fn queued(&self) -> bool {
+        self.hub
+            .rev_parse("refs/heads/main")
+            .and_then(|tip| self.roadmap_at(&tip).ok())
+            .is_some_and(|r| r.player.runs == config::Runs::Queued)
+    }
+
+    /// `[player] runs = "queued"`: runs the oldest waiting `dashboard test`
+    /// request (one per tick, so runs never overlap) and writes its result
+    /// for the agent to read. Never a strike, an event or a hub record.
+    fn serve_queue(&mut self) -> Result<(), String> {
+        if !self.queued() {
+            return Ok(());
+        }
+        let Some(req) = queue::next(&self.home) else {
+            return Ok(());
+        };
+        let local = format!("refs/dashboard/queue/{}", req.id);
+        let fetched = path_str(&req.repo).and_then(|repo| {
+            self.hub
+                .run(&["fetch", "--quiet", repo, &format!("+{}:{local}", req.ref_name())])
+                .map_err(|e| e.to_string())
+        });
+        let (pass, report) = match fetched
+            .ok()
+            .and_then(|_| self.hub.rev_parse(&local))
+            .filter(|sha| *sha == req.commit)
+        {
+            Some(sha) => {
+                let suite = self.runner.run_suite(&sha);
+                (suite.pass, queue::render(&suite))
+            }
+            None => (
+                false,
+                "the snapshot could not be fetched from your worktree; run `dashboard test` again\n"
+                    .to_string(),
+            ),
+        };
+        let _ = self.hub.delete_ref(&local);
+        queue::finish(&self.home, &req, pass, &report)
     }
 
     // ---- events (spec's "the director must not poll"; step 7) ----
@@ -4003,6 +4048,12 @@ impl<S: Sessions> Player<S> {
         }
 
         let workspace = Git::new(&workspace_dir);
+        // So `dashboard test` finds the home from any worktree of it.
+        if let Some(home) = self.home.root.to_str() {
+            workspace
+                .config_set("dashboard.home", home)
+                .map_err(|e| format!("git config dashboard.home (worker workspace): {e}"))?;
+        }
         workspace
             .run(&["fetch", "--quiet", "origin"])
             .map_err(|e| format!("fetching hub into the worker workspace: {e}"))?;
@@ -4166,8 +4217,12 @@ impl<S: Sessions> Player<S> {
                 }
                 _ => None,
             });
+            let mut preamble = prompts.render("worker.launch", &vars);
+            if self.queued() {
+                preamble = prompts::Prompts::with_block(&preamble, &prompts.render("worker.queued", &[]));
+            }
             prompts.worker_launch(
-                &prompts.render("worker.launch", &vars),
+                &preamble,
                 flaky.as_deref(),
                 &prompt_body,
             )
@@ -5263,6 +5318,11 @@ impl<S: Sessions> Player<S> {
         );
         let relaunched =
             relaunched.then(|| prompts.render("task-agent.relaunched", &[("slug", slug)]));
+        let preamble = if roadmap.player.runs == config::Runs::Queued {
+            Prompts::with_block(&preamble, &prompts.render("task-agent.queued", &[]))
+        } else {
+            preamble
+        };
         let text = prompts.agent_launch(
             &preamble,
             relaunched.as_deref(),

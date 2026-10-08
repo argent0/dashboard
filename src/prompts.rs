@@ -17,6 +17,7 @@ pub const STARTER: &str = include_str!("prompts.kdl");
 /// Every template, as `section.name`, with the placeholders it may use.
 const TEMPLATES: &[(&str, &[&str])] = &[
     ("worker.launch", &["slug", "project", "pinned"]),
+    ("worker.queued", &[]),
     ("worker.flaky", &["fix_paths", "replacements"]),
     ("worker.test-speedup", &["slow"]),
     ("worker.finish-accepted", &[]),
@@ -45,6 +46,7 @@ const TEMPLATES: &[(&str, &[&str])] = &[
         ],
     ),
     ("task-agent.relaunched", &["slug"]),
+    ("task-agent.queued", &[]),
     ("task-agent.post", &["slug", "check"]),
     ("task-agent.post-check-task", &["slug"]),
     ("task-agent.post-check-flaky", &[]),
@@ -288,6 +290,8 @@ impl Prompts {
                 "worker prompt".to_string(),
                 s("worker.launch")
                     + JOIN.len()
+                    + s("worker.queued")
+                    + JOIN.len()
                     + max(&["worker.flaky", "worker.test-speedup"])
                     + RULE.len(),
             ),
@@ -304,6 +308,8 @@ impl Prompts {
                 s("task-agent.preamble")
                     + JOIN.len()
                     + s("task-agent.relaunched")
+                    + JOIN.len()
+                    + s("task-agent.queued")
                     + RULE.len()
                     + step,
             ),

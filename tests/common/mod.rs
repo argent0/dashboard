@@ -38,7 +38,7 @@ impl DirectorRepo {
 /// Appended to every fixture `roadmap.toml`: these tests drive the
 /// director's own posts and send-backs, so task agents (spec §17) are off
 /// unless a test turns them on.
-pub const NO_TASK_AGENTS: &str = "\n[player]\ntask_agent_cmd = \"\"\n";
+pub const NO_TASK_AGENTS: &str = "\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"\"\n";
 
 pub fn director_repo() -> DirectorRepo {
     let dir = TempDir::new().expect("tempdir");

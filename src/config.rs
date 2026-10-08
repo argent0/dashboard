@@ -207,6 +207,24 @@ pub struct PlayerConfig {
     /// the result and lets the suite judge it; any other conflict still goes
     /// to the director. Default none.
     pub lock_regen: BTreeMap<String, String>,
+    /// How tasks run (spec §4). Default sequential.
+    pub runs: Runs,
+}
+
+/// `[player] runs`: how many tasks may be in flight, and who runs tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Runs {
+    /// One task in flight at a time: while one is staged, posted, being
+    /// worked, under review, conflicted, contested or escalated, every
+    /// other task that would be `ready` stays `pending`.
+    #[default]
+    Sequential,
+    /// Any number of tasks in flight at once.
+    Parallel,
+    /// Parallel tasks, but test runs go through a queue the player serves
+    /// one at a time; agents ask the player to run them (no strikes).
+    Queued,
 }
 
 impl Default for PlayerConfig {
@@ -217,6 +235,7 @@ impl Default for PlayerConfig {
             idle_after: 900,
             lock_files: Vec::new(),
             lock_regen: BTreeMap::new(),
+            runs: Runs::Sequential,
         }
     }
 }
@@ -888,7 +907,7 @@ pub(crate) fn check_lock_files(lock_files: &[String], test_paths: &[String]) -> 
     }
 }
 
-pub(crate) fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> {
+pub fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> {
     let cfg: RoadmapConfig = toml::from_str(s).map_err(|e| e.to_string())?;
     cfg.sandbox.validate()?;
     cfg.budget.validate()?;
