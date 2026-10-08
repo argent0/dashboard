@@ -20,6 +20,7 @@ use crate::checks;
 use crate::config::{self, path_under_test_paths, Reason, RoadmapConfig, TaskConfig, TaskKind};
 use crate::events::{self, EventKind};
 use crate::flaky;
+use crate::fsm::{self, Move, Verdict};
 use crate::git::Git;
 use crate::paths::{self, Home};
 use crate::prompts::{self, Prompts};
@@ -711,6 +712,8 @@ pub struct Player<S: Sessions> {
     /// The last stale-base commit of each task agent the player told to
     /// rebase (`import_task_agent`), so it says so once, not every tick.
     agent_rebase_told: BTreeMap<String, String>,
+    /// The agent commit last told it is held (`fsm::Verdict::Hold`), per slug.
+    agent_hold_told: BTreeMap<String, String>,
     /// The fingerprint of the last sandbox policy that passed its
     /// preflight, so a tick re-runs it only when `[sandbox]` changes.
     sandbox_preflighted: Option<String>,
@@ -759,6 +762,7 @@ impl<S: Sessions> Player<S> {
             clock: None,
             first_run,
             agent_rebase_told: BTreeMap::new(),
+            agent_hold_told: BTreeMap::new(),
             sandbox_preflighted: None,
             main_impure: BTreeMap::new(),
             main_verified: String::new(),
@@ -1935,6 +1939,16 @@ impl<S: Sessions> Player<S> {
                 }
                 let task_toml_path = format!("tasks/{slug}/task.toml");
                 if diffs.len() == 1 && diffs[0].1 == task_toml_path {
+                    let ctx = self.fsm_ctx(&hub_state, slug);
+                    if let Some(Verdict::Reject(reason)) =
+                        ctx.map(|c| fsm::decide(Actor::Director, Move::Replan, c))
+                    {
+                        let msg = format!(
+                            "{}: task/{slug}'s task agent is already running on this plan (its prompt was written at launch): retire the task to change it",
+                            reason.as_str()
+                        );
+                        return self.reject(slug, candidate, reason, msg, report);
+                    }
                     return self.try_replan(slug, tip, candidate, report);
                 }
                 let msg = format!(
@@ -2047,6 +2061,17 @@ impl<S: Sessions> Player<S> {
             );
         }
         Ok(())
+    }
+
+    /// `fsm`'s view of `slug` in `hub_state`, or none for an unknown task.
+    fn fsm_ctx(&self, hub_state: &state::HubState, slug: &str) -> Option<fsm::Ctx> {
+        let task = hub_state.tasks.iter().find(|t| t.slug == slug)?;
+        Some(fsm::Ctx {
+            status: task.status,
+            managed: state::task_agent_managed(&hub_state.roadmap, &task.config),
+            spike: task.spike.is_some(),
+            agent: task.agent.is_some(),
+        })
     }
 
     /// An empty commit on an existing branch: a marker (spec §5, §9). Only
@@ -4620,6 +4645,22 @@ impl<S: Sessions> Player<S> {
                 "contest reply"
             }
             other => {
+                if fsm::decide(Actor::TaskAgent, Move::Post, self.fsm_ctx(&hub_state, slug).unwrap())
+                    == Verdict::Hold
+                {
+                    // Not the agent's doing: the plan moved the task off
+                    // `staged`. Leave the commit unimported, tell it once.
+                    if self.agent_hold_told.get(slug) != Some(&candidate.to_string()) {
+                        let text = self.prompts()?.render(
+                            "task-agent.hold",
+                            &[("slug", slug), ("status", other.as_str())],
+                        );
+                        self.relay(&state::agent_key(slug), &text);
+                        self.agent_hold_told
+                            .insert(slug.to_string(), candidate.to_string());
+                    }
+                    return Ok(());
+                }
                 let msg = format!(
                     "ownership: task/{slug} is {}: there is nothing for its task agent to commit now",
                     other.as_str()

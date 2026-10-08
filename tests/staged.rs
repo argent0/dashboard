@@ -1,7 +1,7 @@
 // Integration tests for `staged`: a `ready` task never starts on its own; a
 // director's `stage:` marker releases it (status `staged`, its task agent is
 // launched). The status survives `main` moving under the branch (the
-// player's `merge_unblock` merge becomes the tip) and a replan. `unstage:`
+// player's `merge_unblock` merge becomes the tip). `unstage:`
 // puts it back while no task agent exists yet.
 
 mod common;
@@ -102,7 +102,7 @@ fn a_ready_task_never_starts_until_staged() {
 }
 
 #[test]
-fn staged_survives_main_moving_and_a_replan() {
+fn staged_survives_main_moving() {
     let (repo, _h, home, mut player) = setup();
     let hub = Git::new(home.hub());
     plan_only(&repo, &mut player);
@@ -118,17 +118,6 @@ fn staged_survives_main_moving_and_a_replan() {
     );
     assert_eq!(status(&hub, "s"), Status::Staged);
     move_main(&repo, &mut player, "Retitled twice");
-    assert_eq!(status(&hub, "s"), Status::Staged);
-
-    director_commit_on_branch(
-        repo.path(),
-        "task/s",
-        "tasks/s/task.toml",
-        &format!("{PLAN}brief = \"new\"\n"),
-        "replan: s",
-    );
-    let report = tick(&mut player);
-    assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(status(&hub, "s"), Status::Staged);
 }
 
@@ -291,4 +280,29 @@ fn a_dependent_task_waits_ready_after_its_dependency_is_accepted() {
     assert!(r.rejected.is_empty(), "{r}");
     assert_eq!(status(&hub, "t"), Status::Staged);
     assert!(r.agents_launched.contains(&"t".to_string()), "{r}");
+}
+
+// Once the task agent exists its prompt is written; a replan could only
+// desync it (and used to send the task back to `pending` under it).
+#[test]
+fn a_replan_is_refused_once_the_task_agent_exists() {
+    let (repo, _h, home, mut player) = setup();
+    let hub = Git::new(home.hub());
+    director_commit_on_branch(repo.path(), "task/b", "tasks/b/task.toml", PLAN, "plan: b");
+    plan_only(&repo, &mut player);
+    stage(&repo, &mut player);
+    director_pull_task_branch(repo.path(), "s");
+    assert!(records::agent_launched(&hub, "s"));
+
+    director_commit_on_branch(
+        repo.path(),
+        "task/s",
+        "tasks/s/task.toml",
+        &format!("{PLAN}depends_on = [\"b\"]\n"),
+        "replan: s",
+    );
+    let report = tick(&mut player);
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Plan);
+    assert_eq!(status(&hub, "s"), Status::Staged);
 }

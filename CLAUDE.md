@@ -29,6 +29,9 @@ src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based 
 src/records.rs  provenance/enforcement records: import notes, rejections, pins, retirements, accepted-merge lookup,
                 spike base commits and exploration notes
 src/flaky.rs    flaky-test-fix (spec §15): inventory comparison, evidence verdict text
+src/fsm.rs      the status gate as a table: who (director/task agent/worker) may do what at which
+                status -> allow / reject(reason) / ignore / hold; tests walk every cell. Partly
+                wired into player.rs (see handover-fsm-wiring.md)
 src/prompts.rs  prompts.kdl (spec §19): template validation, the max-bytes cap, rendering
 src/prompts.kdl the starter prompts.kdl `dashboard init` commits (embedded with include_str!)
 src/sandbox.rs  the check jail (spec §20): bubblewrap command lines, policy fingerprint, preflight

@@ -346,6 +346,14 @@ task-agent max-bytes=512 {
         your post is affected, and leave the result committed.
         """#
 
+    // {slug} {status}
+    hold #"""
+        task/{slug} is {status}, not staged: the director changed its plan (a new dependency) or a
+        dependency was retired. Nothing was rejected and no strike was counted; your commit is held,
+        not imported. Wait here: if the task returns to staged the player will ask you to rebase
+        (git fetch origin && git rebase origin/task/{slug}) and then import your post.
+        """#
+
     // {commit}
     imported-post "The player imported your post at {commit}; the worker is launched. Write your report if you haven't yet, then wait: the player pastes the next review request here."
     // {commit}

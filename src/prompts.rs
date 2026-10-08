@@ -59,6 +59,7 @@ const TEMPLATES: &[(&str, &[&str])] = &[
     ("task-agent.recovery-history", &["slug"]),
     ("task-agent.recovery-other", &["slug"]),
     ("task-agent.rebase", &["slug"]),
+    ("task-agent.hold", &["slug", "status"]),
     ("task-agent.imported-post", &["commit"]),
     ("task-agent.imported-send-back", &["commit"]),
     ("task-agent.imported-reply", &["commit"]),

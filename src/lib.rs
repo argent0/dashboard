@@ -6,6 +6,7 @@ pub mod checks;
 pub mod config;
 pub mod events;
 pub mod flaky;
+pub mod fsm;
 pub mod git;
 pub mod init;
 pub mod paths;

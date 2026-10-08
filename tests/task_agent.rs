@@ -430,19 +430,25 @@ fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
     let mut player = open_player(&home);
     plan(&repo, &mut player);
 
-    // The task agent posts on the planned tip while the director replans.
-    agent_post(&repo);
+    // Main moves and the player merges it into the staged branch; the task
+    // agent, still on the old tip, then posts (a replan is refused once the
+    // agent exists, so the hub moves by a merge).
     director_commit_on_branch(
         repo.path(),
-        "task/s",
-        "tasks/s/task.toml",
-        &format!("{PLAN}milestone = true\n"),
-        "replan: s",
+        "main",
+        "roadmap.toml",
+        "title = \"Retitled\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\ntask_agent_cmd = \"fake-task-agent\"\n",
+        "retitle",
     );
+    push_main_to_hub(repo.path());
     let report = player.tick().expect("tick");
     assert!(report.rejected.is_empty(), "{report}");
-    assert_eq!(report.imported.len(), 1, "only the replan: {report}");
-    assert_eq!(report.imported[0].2, Transition::Replan);
+    assert_eq!(report.imported.len(), 1, "only the merge: {report}");
+    assert_eq!(report.imported[0].2, Transition::MergeUnblock);
+    agent_post(&repo);
+    let report = player.tick().expect("tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert!(report.imported.is_empty(), "{report}");
     let asked: Vec<String> = agent_sent(&player)
         .into_iter()
         .filter(|m| m.contains("git rebase origin/task/s"))
@@ -459,7 +465,7 @@ fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
         1
     );
 
-    // The agent rebases its post onto the replan; it still keeps the plan.
+    // The agent rebases its post onto the merge.
     let dir = agent_dir(&repo);
     Git::new(&dir).run(&["fetch", "-q", "origin"]).unwrap();
     Git::new(&dir)
@@ -471,7 +477,7 @@ fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
             ("tasks/s/prompt.md", "make feature.txt\n"),
             (
                 "tasks/s/task.toml",
-                &format!("{PLAN}milestone = true\n{CHECK}"),
+                &format!("{PLAN}{CHECK}"),
             ),
             (
                 "tests.d/s.toml",
