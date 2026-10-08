@@ -233,6 +233,14 @@ fn an_impure_task_check_cannot_stand_in_for_a_failing_one_at_post() {
 }
 
 #[test]
+fn preflight_passes_with_its_scratch_under_the_real_tmp() {
+    // The jail's /tmp is a tmpfs holding bwrap's mount points for a
+    // scratch dir under /tmp: the private-/tmp probe mustn't collide.
+    // (The suite usually runs with TMPDIR elsewhere, so use /tmp itself.)
+    jail(&[]).preflight(Path::new("/tmp")).unwrap();
+}
+
+#[test]
 fn init_refuses_without_bwrap_unless_the_jail_is_off() {
     // A PATH with git and sh but no bwrap.
     let bin = TempDir::new().unwrap();

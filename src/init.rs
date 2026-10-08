@@ -77,7 +77,12 @@ pub fn init(
     // way roadmap.toml asks gets no hub at all.
     let sandbox =
         Sandbox::from_config(&roadmap.sandbox).map_err(|e| format!("roadmap.toml: {e}"))?;
-    sandbox.preflight(&std::env::temp_dir())?;
+    // Scratch in the director's git dir, not /tmp: the jail's private
+    // /tmp would hide an "outside" dir there, proving nothing.
+    let git_dir = director
+        .run(&["rev-parse", "--absolute-git-dir"])
+        .map_err(|e| format!("cannot find the director's git dir: {e}"))?;
+    sandbox.preflight(Path::new(&git_dir))?;
 
     config::suite_at(&director, "refs/heads/main")?; // tests.toml + tests.d/; also runs Check::validate on every entry
 

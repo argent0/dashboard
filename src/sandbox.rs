@@ -233,11 +233,14 @@ impl Sandbox {
         const HINT: &str = "install bubblewrap (Arch: pacman -S bubblewrap; Debian/Ubuntu: \
              apt install bubblewrap, and on Ubuntu also allow unprivileged user namespaces), or \
              turn the jail off with `[sandbox] enabled = false` in roadmap.toml";
-        let host_tmp = Path::new("/tmp").join(nonce);
+        // Not `nonce` itself: with `scratch` under /tmp, bwrap creates
+        // `/tmp/<nonce>/inside` in the jail's tmpfs as a mount point.
+        let tmp_probe = format!("{nonce}.tmp-probe");
+        let host_tmp = Path::new("/tmp").join(&tmp_probe);
         let script = format!(
             "echo ok > ./inside-ok || exit 10\n\
              echo leak > {out} 2>/dev/null\n\
-             echo leak > /tmp/{nonce} || exit 11\n\
+             echo leak > /tmp/{tmp_probe} || exit 11\n\
              {net}\n\
              exit 0\n",
             out = sh_quote(&outside.join("leak").display().to_string()),
