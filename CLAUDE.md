@@ -319,9 +319,16 @@ ignored — no `deny_unknown_fields` anywhere.
 - `dashboard` / `dashboard status [--no-color] [--width N]` — the default:
   renders the roadmap derived from the hub.
 - `dashboard watch [-n SECS]` — `status` re-rendered in place every N
-  seconds (default 2) until Ctrl-C. Flicker-free: alternate screen, and each
+  seconds (default 2) until `q`/Esc/Ctrl-C. Flicker-free: alternate screen, and each
   frame overwrites the last in one write (cursor-home + per-line clear-to-EOL)
-  rather than clearing first; redraws immediately on terminal resize.
+  rather than clearing first; re-renders immediately on terminal resize.
+  A frame taller than the terminal scrolls (`ui::Viewport`, crossterm raw
+  mode): ↑↓/j/k, PgUp/PgDn/space/b/Ctrl-U/Ctrl-D, g/G/Home/End, with a
+  footer showing the visible range. The offset survives refreshes, and a
+  view scrolled to the end stays pinned there. The mouse is never captured
+  (text selection stays native); the wheel scrolls wherever the terminal
+  turns it into arrow keys on the alternate screen (e.g. Alacritty, and
+  tmux with `mouse off`), but not inside tmux with `mouse on`.
 - `dashboard player [--once] [--interval SECS]` — the player loop (default
   interval 2s). `--once` runs a single tick, prints its report, and exits;
   this is what drives `scripts/e2e.sh` and what a supervisor (systemd timer,

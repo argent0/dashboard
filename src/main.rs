@@ -213,90 +213,172 @@ fn render_status(home: Option<PathBuf>, color: bool, width: Option<u32>) -> Resu
 // dashboard watch
 // --------------------------------------------------------------------------
 
-/// Set from a signal handler: SIGINT/SIGTERM ask the loop to stop, SIGWINCH
-/// asks for an immediate redraw at the new size.
+/// Set from a signal handler: SIGTERM asks the loop to stop (Ctrl-C is a
+/// key press in raw mode, not a signal).
 static WATCH_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static WATCH_RESIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(unix)]
 fn install_watch_signals() {
-    use std::sync::atomic::Ordering;
-    const SIGINT: i32 = 2;
     const SIGTERM: i32 = 15;
-    const SIGWINCH: i32 = 28;
     unsafe extern "C" {
         fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
     }
-    extern "C" fn on_signal(signum: i32) {
-        if signum == SIGWINCH {
-            WATCH_RESIZED.store(true, Ordering::SeqCst);
-        } else {
-            WATCH_STOP.store(true, Ordering::SeqCst);
-        }
+    extern "C" fn on_signal(_: i32) {
+        WATCH_STOP.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     unsafe {
-        signal(SIGINT, on_signal);
         signal(SIGTERM, on_signal);
-        signal(SIGWINCH, on_signal);
     }
 }
 
 #[cfg(not(unix))]
 fn install_watch_signals() {}
 
-/// Like `while true; do dashboard; sleep N; clear; done`, minus the flicker:
-/// draws on the alternate screen, and each frame homes the cursor and
-/// overwrites the previous one in a single write (clearing only each line's
-/// tail and whatever is left below), instead of blanking the screen first.
+/// Puts the terminal back (raw mode off, auto-wrap, cursor, main screen) —
+/// on drop and, through the panic hook, before a panic message prints.
+fn restore_terminal() {
+    use crossterm::{cursor, execute, terminal};
+    let _ = terminal::disable_raw_mode();
+    let _ = execute!(
+        std::io::stdout(),
+        terminal::EnableLineWrap,
+        cursor::Show,
+        terminal::LeaveAlternateScreen
+    );
+}
+
+struct WatchTerminal;
+
+impl WatchTerminal {
+    fn enter() -> std::io::Result<Self> {
+        use crossterm::{cursor, execute, terminal};
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal();
+            hook(info);
+        }));
+        // Alternate screen, hide cursor, disable auto-wrap (so an overlong
+        // line can't push the frame down a row), raw mode for key presses.
+        execute!(
+            std::io::stdout(),
+            terminal::EnterAlternateScreen,
+            cursor::Hide,
+            terminal::DisableLineWrap
+        )?;
+        terminal::enable_raw_mode()?;
+        Ok(WatchTerminal)
+    }
+}
+
+impl Drop for WatchTerminal {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+/// What a key press asks `watch` to do.
+fn watch_key(key: crossterm::event::KeyEvent) -> Option<Result<ui::Scroll, ()>> {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    use ui::Scroll;
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    Some(Ok(match key.code {
+        KeyCode::Char('c') if ctrl => return Some(Err(())),
+        KeyCode::Char('q') | KeyCode::Esc => return Some(Err(())),
+        KeyCode::Up | KeyCode::Char('k') => Scroll::Lines(-1),
+        KeyCode::Down | KeyCode::Char('j') => Scroll::Lines(1),
+        KeyCode::PageUp | KeyCode::Char('b') => Scroll::Pages(-1),
+        KeyCode::Char('u') if ctrl => Scroll::Pages(-1),
+        KeyCode::PageDown | KeyCode::Char(' ') => Scroll::Pages(1),
+        KeyCode::Char('d') if ctrl => Scroll::Pages(1),
+        KeyCode::Home | KeyCode::Char('g') => Scroll::Top,
+        KeyCode::End | KeyCode::Char('G') => Scroll::Bottom,
+        _ => return None,
+    }))
+}
+
+/// Like `while true; do dashboard; sleep N; clear; done`, minus the flicker
+/// and with scrolling: draws on the alternate screen, and each frame homes
+/// the cursor and overwrites the previous one in a single write (clearing
+/// only each line's tail and whatever is left below), instead of blanking
+/// the screen first. A frame taller than the terminal scrolls by keyboard
+/// (`ui::Viewport`); the wheel works too wherever the terminal turns it into
+/// arrow keys on the alternate screen (its "alternate scroll" mode), since
+/// the mouse is never captured and text selection stays native.
 fn run_watch(home: Option<PathBuf>, no_color: bool, width: Option<u32>, interval: u64) {
+    use crossterm::event::{self, Event};
     use std::io::Write;
     use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
 
     if !std::io::stdout().is_terminal() {
         eprintln!("error: `dashboard watch` needs a terminal — use `dashboard status` instead");
         std::process::exit(1);
     }
     install_watch_signals();
+    let _terminal = match WatchTerminal::enter() {
+        Ok(t) => t,
+        Err(e) => {
+            restore_terminal();
+            eprintln!("error: cannot set up the terminal: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let mut out = std::io::stdout().lock();
-    // Alternate screen, hide cursor, disable auto-wrap (so an overlong line
-    // can't push the frame down a row).
-    let _ = write!(out, "\x1b[?1049h\x1b[?25l\x1b[?7l");
-    let _ = out.flush();
-
-    let tick = std::time::Duration::from_millis(100);
-    let interval = std::time::Duration::from_secs(interval.max(1));
+    let interval = Duration::from_secs(interval.max(1));
+    // Checked between polls, so a SIGTERM is noticed within this.
+    let tick = Duration::from_millis(200);
+    let mut viewport = ui::Viewport::default();
+    let mut text = String::new();
+    let mut next_render = Instant::now();
+    let mut dirty = true;
     while !WATCH_STOP.load(Ordering::SeqCst) {
-        let text =
-            render_status(home.clone(), !no_color, width).unwrap_or_else(|e| format!("error: {e}"));
-        let mut lines: Vec<&str> = text.lines().collect();
-        if let Some(rows) = ui::detect_height() {
-            lines.truncate(rows);
+        let rows = crossterm::terminal::size().map_or(24, |(_, r)| r as usize).max(1);
+        if Instant::now() >= next_render {
+            text = render_status(home.clone(), !no_color, width)
+                .unwrap_or_else(|e| format!("error: {e}"));
+            next_render = Instant::now() + interval;
+            dirty = true;
         }
-        let mut frame = String::from("\x1b[H");
-        for (i, line) in lines.iter().enumerate() {
-            if i > 0 {
-                frame.push_str("\r\n");
+        let lines: Vec<&str> = text.lines().collect();
+        if dirty {
+            let (body, footer) = viewport.frame(&lines, rows, !no_color);
+            let mut frame = String::from("\x1b[H");
+            for (i, line) in body.iter().chain(footer.as_deref().iter()).enumerate() {
+                if i > 0 {
+                    frame.push_str("\r\n");
+                }
+                frame.push_str(line);
+                frame.push_str("\x1b[0m\x1b[K");
             }
-            frame.push_str(line);
-            frame.push_str("\x1b[0m\x1b[K");
+            frame.push_str("\x1b[J");
+            let _ = out.write_all(frame.as_bytes());
+            let _ = out.flush();
+            dirty = false;
         }
-        frame.push_str("\x1b[J");
-        let _ = out.write_all(frame.as_bytes());
-        let _ = out.flush();
 
-        let next = std::time::Instant::now() + interval;
-        while std::time::Instant::now() < next
-            && !WATCH_STOP.load(Ordering::SeqCst)
-            && !WATCH_RESIZED.swap(false, Ordering::SeqCst)
-        {
-            std::thread::sleep(tick);
+        let wait = next_render.saturating_duration_since(Instant::now()).min(tick);
+        if !event::poll(wait).unwrap_or(false) {
+            continue;
+        }
+        match event::read() {
+            Ok(Event::Key(key)) => match watch_key(key) {
+                Some(Ok(by)) => {
+                    viewport.scroll(by, lines.len(), rows);
+                    dirty = true;
+                }
+                Some(Err(())) => break,
+                None => {}
+            },
+            // A new width re-renders (the layout depends on it), not just redraws.
+            Ok(Event::Resize(..)) => next_render = Instant::now(),
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
-
-    // Restore auto-wrap, cursor, and the main screen.
-    let _ = write!(out, "\x1b[?7h\x1b[?25h\x1b[?1049l");
-    let _ = out.flush();
 }
 
 // --------------------------------------------------------------------------
