@@ -84,7 +84,10 @@ pub fn init(
         .map_err(|e| format!("cannot find the director's git dir: {e}"))?;
     sandbox.preflight(Path::new(&git_dir))?;
 
-    config::suite_at(&director, "refs/heads/main")?; // tests.toml + tests.d/; also runs Check::validate on every entry
+    // tests.toml + tests.d/; also runs Check::validate on every entry
+    let suite = config::suite_at(&director, "refs/heads/main")?;
+    config::check_lock_files(&roadmap.player.lock_files, &suite.test_paths)
+        .map_err(|e| format!("roadmap.toml: {e}"))?;
 
     if let Some(text) = director.show_file("refs/heads/main", prompts::FILE) {
         Prompts::parse(&text)?;

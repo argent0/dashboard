@@ -313,6 +313,51 @@ fn a_conflict_stops_the_accept_and_a_targeted_resolution_lands_it() {
     );
 }
 
+fn declare_lock_regen(repo: &DirectorRepo, regen: &str) {
+    write_file(
+        repo.path(),
+        "roadmap.toml",
+        &format!(
+            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}\n[player.lock_regen]\n\"shared.txt\" = \"{regen}\"\n"
+        ),
+    );
+    commit(repo.path(), "declare lock_regen");
+}
+
+#[test]
+fn a_conflict_only_in_a_lock_regen_file_is_resolved_by_the_player() {
+    let repo = director_repo();
+    declare_lock_regen(&repo, "cat shared.txt > /dev/null; printf 'regenerated\\n' > shared.txt");
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
+
+    let report = accept(&repo, &mut player, "b");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(task_status(&hub, "b"), Status::Accepted, "{report}");
+    assert!(events_of(&home, EventKind::Conflict).is_empty());
+    let shared = hub.show_file("refs/heads/main", "shared.txt").unwrap();
+    assert_eq!(shared.trim(), "regenerated");
+}
+
+#[test]
+fn a_failing_lock_regen_leaves_the_conflict_to_the_director() {
+    let repo = director_repo();
+    declare_lock_regen(&repo, "exit 3");
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
+
+    let report = accept(&repo, &mut player, "b");
+    assert_eq!(task_status(&hub, "b"), Status::Conflicted, "{report}");
+    assert!(
+        report.errors.iter().any(|e| e.contains("lock_regen")),
+        "{report}"
+    );
+}
+
 #[test]
 fn a_resolution_must_merge_the_recorded_main_commit() {
     let repo = director_repo();

@@ -2,6 +2,7 @@
 // with serde defaults so every section and field is optional.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 // --------------------------------------------------------------------------
@@ -162,6 +163,18 @@ pub struct PlayerConfig {
     /// before it's reported idle (its tmux pane unchanged: hung, or sitting
     /// on a dialog), whatever the agent. 0 turns this off.
     pub idle_after: u64,
+    /// Lock files (`Cargo.lock`, …) a task agent may commit with a post,
+    /// send-back or contest reply, because a test-only dependency's check
+    /// rewrites them. Read from main's tip, so an agent can't widen it. The
+    /// impurity check still proves a committed lock is the one the build
+    /// produces. Default none.
+    pub lock_files: Vec<String>,
+    /// Lock file path -> command that regenerates it. When an accept's merge
+    /// of `main` conflicts *only* in paths named here, the player checks out
+    /// the branch's version of each, runs its command in the jail, stages
+    /// the result and lets the suite judge it; any other conflict still goes
+    /// to the director. Default none.
+    pub lock_regen: BTreeMap<String, String>,
 }
 
 impl Default for PlayerConfig {
@@ -170,6 +183,8 @@ impl Default for PlayerConfig {
             agent_cmd: "claude --dangerously-skip-permissions".to_string(),
             task_agent_cmd: "claude --dangerously-skip-permissions".to_string(),
             idle_after: 900,
+            lock_files: Vec::new(),
+            lock_regen: BTreeMap::new(),
         }
     }
 }
@@ -772,6 +787,29 @@ pub(crate) fn baseline_file_from_str(s: &str) -> Result<BaselineFile, String> {
 // Loading helpers
 // --------------------------------------------------------------------------
 
+/// `path` is exactly one of `test_paths` (spec §6.2), or falls under one of
+/// them treated as a directory prefix. Used by the send-back path check.
+pub(crate) fn path_under_test_paths(path: &str, test_paths: &[String]) -> bool {
+    test_paths.iter().any(|t| {
+        let prefix = t.trim_end_matches('/');
+        path == prefix || path.starts_with(&format!("{prefix}/"))
+    })
+}
+
+/// A `[player] lock_files` entry under `test_paths` would be pinned against
+/// the worker, who then couldn't add the product's own dependencies.
+pub(crate) fn check_lock_files(lock_files: &[String], test_paths: &[String]) -> Result<(), String> {
+    match lock_files
+        .iter()
+        .find(|f| path_under_test_paths(f, test_paths))
+    {
+        Some(f) => Err(format!(
+            "[player] lock_files: {f:?} is under test_paths, so it is pinned against the worker; a lock file is the task agent's and the worker's both"
+        )),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> {
     let cfg: RoadmapConfig = toml::from_str(s).map_err(|e| e.to_string())?;
     cfg.sandbox.validate()?;
@@ -838,6 +876,9 @@ mod tests {
             [player]
             agent_cmd = "codex run"
             idle_after = 0
+            lock_files = ["Cargo.lock"]
+            [player.lock_regen]
+            "Cargo.lock" = "cargo metadata --offline"
         "#;
         let cfg = roadmap_config_from_str(toml).unwrap();
         assert_eq!(cfg.title.as_deref(), Some("My Project"));
@@ -853,6 +894,8 @@ mod tests {
         assert_eq!(cfg.limits.strikes.history, 2);
         assert_eq!(cfg.player.agent_cmd, "codex run");
         assert_eq!(cfg.player.idle_after, 0);
+        assert_eq!(cfg.player.lock_files, vec!["Cargo.lock".to_string()]);
+        assert_eq!(cfg.player.lock_regen["Cargo.lock"], "cargo metadata --offline");
     }
 
     #[test]

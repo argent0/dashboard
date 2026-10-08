@@ -17,7 +17,7 @@
 // send-backs into its tmux session. Step 7 adds events and `dashboard wait`.
 
 use crate::checks;
-use crate::config::{self, Reason, RoadmapConfig, TaskConfig, TaskKind};
+use crate::config::{self, path_under_test_paths, Reason, RoadmapConfig, TaskConfig, TaskKind};
 use crate::events::{self, EventKind};
 use crate::flaky;
 use crate::git::Git;
@@ -1506,7 +1506,15 @@ impl<S: Sessions> Player<S> {
         }
         match self.hub.show_file(candidate, "roadmap.toml") {
             Some(text) => {
-                config::roadmap_config_from_str(&text)
+                let new = config::roadmap_config_from_str(&text)
+                    .map_err(|e| (Reason::Ownership, format!("ownership: roadmap.toml: {e}")))?;
+                let test_paths = self
+                    .hub
+                    .show_file(candidate, "tests.toml")
+                    .and_then(|t| config::tests_config_from_str(&t).ok())
+                    .map(|c| c.test_paths)
+                    .unwrap_or_default();
+                config::check_lock_files(&new.player.lock_files, &test_paths)
                     .map_err(|e| (Reason::Ownership, format!("ownership: roadmap.toml: {e}")))?;
             }
             None => {
@@ -2653,10 +2661,27 @@ impl<S: Sessions> Player<S> {
 
         let mut sync: Option<String> = None;
         if !self.hub.is_ancestor(&main_tip, candidate) {
-            let (tree, conflicts) = self
+            let (mut tree, mut conflicts) = self
                 .hub
                 .merge_tree_conflicts(candidate, &main_tip)
                 .map_err(|e| e.to_string())?;
+            // Conflicts only in lock files the roadmap can regenerate are
+            // the player's to resolve; the suite judges the result.
+            if !conflicts.is_empty() {
+                let regen = self.roadmap_at(&main_tip)?.player.lock_regen;
+                if conflicts.iter().all(|c| regen.contains_key(c)) {
+                    match self.runner.regen_locks(candidate, &main_tip, &regen) {
+                        Ok(t) => {
+                            tree = t;
+                            conflicts.clear();
+                        }
+                        Err(e) => report.errors.push(format!(
+                            "task/{slug}: lock_regen could not resolve {}: {e}",
+                            conflicts.join(", ")
+                        )),
+                    }
+                }
+            }
             if !conflicts.is_empty() {
                 self.hub
                     .update_ref_cas(&hub_ref, candidate, tip)
@@ -4570,7 +4595,8 @@ impl<S: Sessions> Player<S> {
     /// Where a task agent may write: `tests.toml`, `tests.d/`, the hub's
     /// `test_paths` (read at `tip`, so a commit can't widen them for itself)
     /// and `tasks/<slug>/`; and in `task.toml` only `[check]`, the rest
-    /// being the director's plan.
+    /// being the director's plan. Also the roadmap's `[player] lock_files`,
+    /// read at `tip` like `test_paths`.
     fn agent_paths_ok(
         &self,
         slug: &str,
@@ -4584,11 +4610,16 @@ impl<S: Sessions> Player<S> {
             .and_then(|t| config::tests_config_from_str(&t).ok())
             .map(|c| c.test_paths)
             .unwrap_or_default();
+        let lock_files = self
+            .roadmap_at(tip)
+            .map(|r| r.player.lock_files)
+            .unwrap_or_default();
         let task_prefix = format!("tasks/{slug}/");
         for (_, path) in diffs {
             if !(path == "tests.toml"
                 || config::is_suite_fragment(path)
                 || path.starts_with(&task_prefix)
+                || lock_files.contains(path)
                 || path_under_test_paths(path, &test_paths))
             {
                 return Err(format!(
@@ -5219,14 +5250,6 @@ fn path_allowed(path: &str, docs_paths: &[String]) -> bool {
     })
 }
 
-/// `path` is exactly one of `test_paths` (spec §6.2), or falls under one of
-/// them treated as a directory prefix. Used by the send-back path check.
-fn path_under_test_paths(path: &str, test_paths: &[String]) -> bool {
-    test_paths.iter().any(|t| {
-        let prefix = t.trim_end_matches('/');
-        path == prefix || path.starts_with(&format!("{prefix}/"))
-    })
-}
 
 /// `path`'s basename looks like a review note (`tasks/<slug>/reviews/r<N>.md`):
 /// used only to tell "no review file at all" apart from "wrong round number"

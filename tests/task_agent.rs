@@ -298,6 +298,45 @@ fn a_director_post_is_ownership_when_task_agents_are_on() {
     );
 }
 
+fn repo_with_lock_files() -> DirectorRepo {
+    let repo = repo_with_task_agents();
+    write_file(
+        repo.path(),
+        "roadmap.toml",
+        "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\ntask_agent_cmd = \"fake-task-agent\"\nlock_files = [\"Cargo.lock\"]\n",
+    );
+    commit(repo.path(), "name the lock file");
+    repo
+}
+
+#[test]
+fn a_task_agent_may_commit_a_lock_file_only_when_the_roadmap_names_it() {
+    // Named: the post with its lock entry is not an ownership rejection.
+    let repo = repo_with_lock_files();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(&repo, &mut player);
+    agent_post(&repo);
+    agent_commit(&repo, &[("Cargo.lock", "# locked\n")], "lock the test dep");
+    let report = player.tick().expect("tick");
+    assert!(
+        !report.rejected.iter().any(|r| r.reason == Reason::Ownership),
+        "{report}"
+    );
+
+    // Not named: the same commit is ownership.
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(&repo, &mut player);
+    agent_post(&repo);
+    agent_commit(&repo, &[("Cargo.lock", "# locked\n")], "lock the test dep");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Ownership);
+    assert!(report.rejected[0].message.contains("Cargo.lock"));
+}
+
 #[test]
 fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
     let repo = repo_with_task_agents();
@@ -1112,4 +1151,15 @@ fn another_tasks_agent_commits_merged_in_from_main_still_ask_for_a_rebase() {
         "t's agent is asked to rebase"
     );
     assert!(task(&hub, "t").strikes.is_empty());
+}
+
+#[test]
+fn a_lock_file_under_test_paths_is_refused_at_init() {
+    let repo = repo_with_lock_files();
+    write_file(repo.path(), "tests.toml", "test_paths = [\"Cargo.lock\"]\n");
+    commit(repo.path(), "pin the lock file");
+    let home_dir = temp_home();
+    let err = init::init(repo.path(), Some("proj"), Some(home_dir.path().join("home")))
+        .expect_err("overlap is refused");
+    assert!(err.contains("lock_files") && err.contains("test_paths"), "{err}");
 }

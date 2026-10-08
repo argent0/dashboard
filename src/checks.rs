@@ -367,6 +367,49 @@ impl Runner {
             .collect())
     }
 
+    /// Resolves the conflicts of merging `theirs` into `ours` when every
+    /// conflicted path is a key of `regen` (`[player] lock_regen`): in the
+    /// scratch worktree it merges, takes our side of each such file, runs its
+    /// command in the jail and stages the result. Returns the merged tree for
+    /// the caller's merge commit (the suite then judges it), or why it
+    /// couldn't. Only the named files are taken from the worktree.
+    pub fn regen_locks(
+        &self,
+        ours: &str,
+        theirs: &str,
+        regen: &std::collections::BTreeMap<String, String>,
+    ) -> Result<String, String> {
+        self.prepare(ours)?;
+        let work = Git::new(&self.work);
+        // Exit 1 is the conflict we are here to resolve.
+        let _ = work.run(&["merge", "--no-commit", "--no-ff", theirs]);
+        let result = (|| {
+            let unmerged = work
+                .run(&["diff", "--name-only", "--diff-filter=U"])
+                .map_err(|e| e.to_string())?;
+            let unmerged: Vec<&str> = unmerged.lines().filter(|l| !l.is_empty()).collect();
+            if let Some(p) = unmerged.iter().find(|p| !regen.contains_key(**p)) {
+                return Err(format!("{p} is not a lock_regen file"));
+            }
+            for path in &unmerged {
+                work.run(&["checkout", "--ours", "--", path])
+                    .map_err(|e| e.to_string())?;
+                let (code, _, out) = run_command(&self.sandbox, &regen[*path], &self.work, None);
+                if code != 0 {
+                    return Err(format!(
+                        "lock_regen for {path} exited {code}: {}",
+                        tail_str(&out)
+                    ));
+                }
+                work.run(&["add", "--", path]).map_err(|e| e.to_string())?;
+            }
+            work.run(&["write-tree"]).map_err(|e| e.to_string())
+        })();
+        let _ = work.run(&["merge", "--abort"]);
+        let _ = work.run(&["reset", "--hard", "-q"]);
+        result
+    }
+
     /// Runs a spike claim at `commit` (cached like any check, under the
     /// claim's prefixed name), killing any run that exceeds its timeout.
     pub fn run_claim(&self, commit: &str, claim: &Claim) -> CheckResult {

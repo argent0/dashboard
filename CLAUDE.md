@@ -202,6 +202,13 @@ task_agent_cmd = "claude --dangerously-skip-permissions"   # the task agent (spe
                                                            # "" turns task agents off
 idle_after = 900                 # default: a session owing work whose tmux pane hasn't
                                  # changed for this many seconds is reported idle; 0: off
+lock_files = ["Cargo.lock"]      # default none: lock files a task agent may commit
+                                 # (a test-only dependency's check rewrites them);
+                                 # read at main's tip, so an agent can't widen it
+                                 # (refused under test_paths: the worker would be pinned out)
+[player.lock_regen]              # default none: a merge of main into a task at accept
+"Cargo.lock" = "cargo metadata --offline"  # that conflicts only in these paths is resolved by
+                                 # the player: branch's version, then this command in the jail
 
 [sandbox]                        # the check jail (spec §20)
 enabled = true                   # default; false runs checks as plain `sh -c`
@@ -561,6 +568,13 @@ back here):
   director merge is `history`. The walk over a task branch's new commits
   skips anything already on `main`. `status` lists every in-flight task,
   conflicted ones with their conflict.
+  `[player] lock_regen` (path -> command) lets the player resolve a
+  conflict confined to those paths (`Runner::regen_locks`: merge in the
+  scratch worktree, `checkout --ours`, the command in the jail, stage); the
+  suite judges the result, and a failed command leaves the ordinary
+  `conflicted` stop plus an error line. `lock_files` is the task agent's
+  write allowance (`agent_paths_ok`); `config::check_lock_files` refuses one
+  under `test_paths`, at `init` and on every `main` import.
 
 - **Task agents** (spec §17): the director's per-task delegates, launched
   and mediated by the player instead of living inside the director's
@@ -572,7 +586,7 @@ back here):
   Its `Sessions` key is `state::agent_key(slug)` (`<slug>_agent`; `_` never
   occurs in a slug). Its commits (`Actor::TaskAgent`) go through the same
   post/send-back validation as a director's, plus: only `tests.toml`,
-  `tests.d/`, the hub's `test_paths` and `tasks/<slug>/`, only `[check]` in
+  `tests.d/`, the hub's `test_paths`, `[player] lock_files` and `tasks/<slug>/`, only `[check]` in
   `task.toml`, no markers, all `ownership`. A hub tip that moved under its
   unimported commit gets a rebase request, not a strike. While task agents
   are on, a director post/send-back on an agent-managed task is
