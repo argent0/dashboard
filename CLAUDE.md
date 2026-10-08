@@ -188,19 +188,10 @@ max_contest_rounds = 2           # default 2: worker contests per task (spec §1
 max_relaunches = 2               # default 2: `dashboard relaunch`es of a task's worker, and
                                  # apart of its task agent, since that session's last progress
 
-[limits.strikes]                 # each defaults to 2 (spec §10)
-history = 2
-ownership = 2
-pins = 2
-suite = 2
-plan = 2
-post = 2
-review = 2
-accept = 2
-retire = 2
-claims = 2                       # a spike's finish whose claims/findings don't validate
-evidence = 1                     # a flaky-test-fix post whose flake doesn't reproduce
-budget = 2                       # a suite that timed out or ran past [budget] suite_fail
+[limits.strikes]                 # one limit per rejection reason (spec §10), default 2:
+                                 # history ownership pins suite plan post review accept
+                                 # retire claims; evidence = 1 (a flaky-test-fix post whose
+                                 # flake doesn't reproduce); budget = 2 (see [budget])
 
 [player]
 agent_cmd = "claude --dangerously-skip-permissions"        # the worker; default
@@ -291,40 +282,11 @@ name = "…"                       # to tests.d/<slug>.toml in the same post com
 cmd = "…"
 ```
 
-A flaky-test-fix's extra `task.toml` fields (spec §15; `[check]` is the
-stability proof and is *not* added to the suite; `tests.toml` needs `list_cmd`):
-```toml
-fix_paths = ["tests/a.rs"]       # plain files unpinned for this task
-[[replace]]
-old = "flaky"                    # test names (last `::` segment is enough)
-new = "flaky_stable"
-[[evidence]]                     # run on main at post and launch; must flake
-name = "…"
-cmd = "…"
-runs = 100
-min_pass = 1                     # 1 <= min_pass <= max_pass < runs
-max_pass = 99
-```
-A post whose evidence doesn't reproduce is an `evidence` rejection (limit 1),
-and the player retires the task itself: a marker commit with the post-mortem
-`evidence did not reproduce (k/N)` goes under `refs/retired/<slug>`.
-
-A spike's per-round files (spec §14), all under `tasks/<slug>/`:
-```toml
-# questions/<n>.toml (director, pinned)   baseline/<n>.toml (director, pinned)
-question = "…"                            [[claim]]
-why = "…"                                 name = "…"
-answers = ["yes", "no"]                   cmd = "…"   # + runs/min_pass/timeout
-refines = 1                               # on current code; must pass on main
-
-# claims/<n>.toml (worker)              findings/<n>.md (worker, free-form,
-answer = "yes"                            #   must exist and be non-empty)
-[[claim]]
-name = "…"
-kind = "spike"                   # or "baseline"
-supports = "yes"                 # spike claims: the answer this backs
-cmd = "…"                        # last stdout line may be `METRICS {json}`
-```
+A flaky-test-fix's extra `task.toml` fields (`fix_paths`, `[[replace]]`,
+`[[evidence]]`; `tests.toml` needs `list_cmd`) are described in spec §15, a
+spike's per-round files (`questions/`, `baseline/`, `claims/`, `findings/`) in
+spec §14. A post whose flaky evidence doesn't reproduce is an `evidence`
+rejection (limit 1) and the player retires the task itself.
 
 Every struct uses `#[serde(default)]` field-by-field, and unknown fields are
 ignored — no `deny_unknown_fields` anywhere.
@@ -534,12 +496,8 @@ back here):
   through `tmux load-buffer`/`paste-buffer`/`send-keys` into that same
   session.
 
-- **flaky-test-fix** (spec §15): pins exclude `fix_paths`, and a finish
-  changing any other path (new files under `test_paths` aside) is a `pins`
-  strike: a product-code flake takes the regular path; at finish, on top
-  of the suite, the task check must pass and the `list_cmd` inventory at the
-  pins commit minus the `old` names must still be in the branch's, with every
-  `new` present (a `suite` strike otherwise). Evidence runs in full, never
+- **flaky-test-fix** (spec §15): `src/flaky.rs` plus `flaky_scope_violations`
+  / `validate_flaky_finish` in `player.rs`. Evidence runs in full, never
   early-stopping, so its cached result and k/N are exact.
 - **Suite time budget**: `[budget]` in `roadmap.toml` (not `tests.toml`: task
   agents edit the suite), read from main's tip each tick in `check_sandbox`
@@ -558,137 +516,71 @@ back here):
   timeout still fails them as before. `suite_warn` puts a `suite_slow` event
   (informational, no hint) in the report: per worker finish, and once per
   main tip from `verify_main`. Tests: `tests/budget.rs`.
-- **Check retries**: `retry_failed = N` re-runs a failing check (all its
-  `runs`) up to N more times; any passing attempt passes it, a check failing
-  every attempt is still one `suite` strike. `retry_on` limits retries to
-  failures whose output matches a regex. Never applied to a task's own
-  `[check]` (`Runner::run_task_check`) or evidence. Every retry is in the
-  cached result; a pass after a retry goes in the flake ledger
-  (`records::record_flake`, per task or `_main`), shown in `status` as
-  `flaky: N`, a "Flaky checks" list and `passed on retry k/N`. The worker
-  is never told about retries.
-- **Spikes** (spec §14): `kind = "spike"`, operator-initiated by process
-  rule (the player doesn't check it), nothing may depend on one, never
-  merges. The player runs the claims itself: baseline claims against the
+- **Check retries** (spec §16): `Runner::execute` loops attempts; never
+  applied to `run_task_check` (`Check::without_retries`) or evidence. Every
+  retry is in the cached result; a pass after one goes in the flake ledger
+  (`records::record_flake`, per task or `_main`). The worker is never told.
+- **Spikes** (spec §14): `src/spike.rs`. Baseline claims run against the
   base commit with `tasks/<slug>/` overlaid (`spike::overlay_commit`, a
-  deterministic commit so the check cache hits), spike claims on the branch
-  and again on the overlay where they must fail. Claim runs have a timeout
-  (`Runner::run_claim`). A concluded spike's branch moves to
-  `refs/explored/<slug>`; its answer is read from the
-  `dashboard-explorations` note, never from the free-form findings. No
-  CLI change: a spike is just different director commit shapes
-  (`kind = "spike"`, `questions/`, `conclude:`).
-
-- **Staged tasks**: a `ready` task never starts on its own (a dependency's
-  accept used to launch its agent in the same tick, leaving no window to
-  hold it). The director releases it with an empty `stage: <why>` commit on
-  `task/<slug>` (`Transition::Stage`, `Player::try_stage`): status `staged`,
-  and `run_task_agents` launches its agent. `unstage:` puts it back to
-  `ready`, refused once a task agent exists (`task.agent`). Only a `ready`
-  non-spike task can be staged, and only a `staged` one unstaged (`plan`
-  rejection otherwise); a task agent's marker is still `ownership`, and a
-  task agent may post only while `staged`. A managed `ready` task emits a
-  `ready` event. `Status::Staged` counts as pending in Overall.
-  `state::staged_at` walks first-parent history from the tip past
-  `merge_unblock`/`replan` commits to the last marker, because the player's
-  merge of `main` becomes the tip and would shadow the note there; a replan
-  keeps a task staged, and `unblock_merges` keeps feeding a staged branch
-  `main`.
-
-- **Parallel tasks** (spec §4, §11): any number of tasks may be posted
-  at once; there is no in-flight limit. The player does every merge:
-  `Player::land` (called for an `accept:`) merges a moved `main` into the
-  branch itself (a player `sync` commit), then merges the branch into
-  `main` once the suite passes on the result. If the suite fails because of
-  that merge, the tip becomes a `sync_revision` (`in_revision`, re-pinned,
-  relayed to the worker, no review round, a `merge_failed` event). If the
-  merge has a textual conflict, the marker is imported with a
-  `dashboard-conflicts` note: the task is `conflicted` (a `conflict`
-  event, no strike). Conflict events come from the tick report, not a
-  status change, so a repeat conflict is still reported. The director's
-  only merge is `Player::try_resolve`. It applies only on a conflicted
-  task, must merge exactly the recorded `main` commit, and may differ from
-  `git::merge_tree_conflicts`'s result only on the recorded paths
-  (`ownership` otherwise). It re-pins, then goes through `land` again,
-  which may merge a newer `main` or record a new conflict. Any other
-  director merge is `history`. The walk over a task branch's new commits
-  skips anything already on `main`. `status` lists every in-flight task,
-  conflicted ones with their conflict.
-  `[player] lock_regen` (path -> command) lets the player resolve a
-  conflict confined to those paths (`Runner::regen_locks`: merge in the
-  scratch worktree, `checkout --ours`, the command in the jail, stage); the
-  suite judges the result, and a failed command leaves the ordinary
-  `conflicted` stop plus an error line. `lock_files` is the task agent's
-  write allowance (`agent_paths_ok`); `config::check_lock_files` refuses one
-  under `test_paths`, at `init` and on every `main` import.
-
-- **Task agents** (spec §17): the director's per-task delegates, launched
-  and mediated by the player instead of living inside the director's
-  session, so the operator can watch them (`tmux attach -t
-  dash-<project>-<slug>_agent`) and the hub records everything they do.
-  Launched automatically when an agent-managed task (any kind but a spike,
-  with `task_agent_cmd` non-empty) becomes `staged` (a `ready` one waits for
-  the director's `stage:`), or is found `tested`
-  without one; the player pastes a review request on every new tested tip.
-  Its `Sessions` key is `state::agent_key(slug)` (`<slug>_agent`; `_` never
-  occurs in a slug). Its commits (`Actor::TaskAgent`) go through the same
-  post/send-back validation as a director's, plus: only `tests.toml`,
-  `tests.d/`, the hub's `test_paths`, `[player] lock_files` and `tasks/<slug>/`, only `[check]` in
-  `task.toml`, no markers, all `ownership`. A hub tip that moved under its
-  unimported commit gets a rebase request, not a strike. While task agents
-  are on, a director post/send-back on an agent-managed task is
-  `ownership`, and `tested` events give way to `agent_launched` /
-  `agent_report`. Tests turn task agents off in their fixture roadmap
-  (`tests/common`'s `NO_TASK_AGENTS`) unless they're about them
-  (`tests/task_agent.rs`).
-
-- **Contests** (spec §18): a worker's `contest:` marker (clean, like
-  `block:`) says a test it must pass is wrong. The task goes `contested`
-  (`Transition::Contest`), not escalated; the task agent (or, task agents
-  off, the director) replies with one commit adding
-  `tasks/<slug>/contests/c<N>.md` and optionally fixed tests
-  (`Transition::ContestReply` → `in_revision`, re-pinned, relayed, no
-  suite requirement, no review round). `TaskState::contest_round` counts
-  the `contests/c*.md` at the tip; a contest past `max_contest_rounds`
-  escalates without being imported.
-
+  deterministic commit so the check cache hits); claim runs go through
+  `Runner::run_claim` (timeout). A spike's answer is read from the
+  `dashboard-explorations` note, never from the free-form findings. No CLI
+  change: a spike is just different director commit shapes. The "operator
+  only" rule isn't checked by the player.
+- **Staged tasks** (spec §17): `Transition::Stage`, `Player::try_stage`;
+  `Status::Staged` counts as pending in Overall. `state::staged_at` walks
+  first-parent history from the tip past `merge_unblock`/`replan` commits to
+  the last marker, because the player's merge of `main` becomes the tip and
+  would shadow the note there; a replan keeps a task staged, and
+  `unblock_merges` keeps feeding a staged branch `main`. A managed `ready`
+  task emits a `ready` event.
+- **Parallel tasks** (spec §4, §11): `Player::land` (for an `accept:`)
+  merges a moved `main` into the branch (a player `sync` commit), then the
+  branch into `main` once the suite passes on the result. A suite failing
+  because of that merge makes the tip a `sync_revision` (`merge_failed`
+  event). A textual conflict imports the marker with a `dashboard-conflicts`
+  note; conflict events come from the tick report, not a status change, so a
+  repeat conflict is still reported. The director's only merge is
+  `Player::try_resolve`: it must merge exactly the recorded `main` commit,
+  and may differ from `git::merge_tree_conflicts`'s result only on the
+  recorded paths (`ownership` otherwise); any other director merge is
+  `history`. The walk over a task branch's new commits skips anything
+  already on `main`. `[player] lock_regen` lets the player resolve a conflict
+  confined to those paths (`Runner::regen_locks`: merge in the scratch
+  worktree, `checkout --ours`, the command in the jail, stage); the suite
+  judges the result. `lock_files` is the task agent's write allowance
+  (`agent_paths_ok`); `config::check_lock_files` refuses one under
+  `test_paths`, at `init` and on every `main` import.
+- **Task agents** (spec §17): `Sessions` key `state::agent_key(slug)`
+  (`<slug>_agent`; `_` never occurs in a slug); commits are `Actor::TaskAgent`
+  and go through the director's post/send-back validation plus the path
+  allowance (`agent_paths_ok`). A hub tip that moved under an unimported
+  agent commit gets a rebase request, not a strike. Tests turn task agents
+  off in their fixture roadmap (`tests/common`'s `NO_TASK_AGENTS`) unless
+  they're about them (`tests/task_agent.rs`).
+- **Contests** (spec §18): `Transition::Contest` / `ContestReply`;
+  `TaskState::contest_round` counts the `contests/c*.md` at the tip; a
+  contest past `max_contest_rounds` escalates without being imported.
 - **Check isolation** (spec §20): `Runner::set_sandbox` jails every
   `run_command` under `bwrap` (`Sandbox::command`); the policy comes from
   main's `roadmap.toml` each tick (`Player::check_sandbox`), never from the
-  suite, since task agents may edit `tests.toml`. `Sandbox::preflight`
-  runs in `init` (before anything is created) and in the player at start
-  and on every policy change; a failure stops the tick. Independently,
-  `Runner::attempt` runs `git status` after each run: anything left in the
-  worktree is `CheckResult::leaked`, a failure that's never retried, and
-  `impurity()` keeps it from counting as a required failure (post, launch,
-  send-back, spike base, evidence). `CheckResult::isolation` (the policy
-  fingerprint) is part of the cache key. Tests need a working `bwrap`;
-  `tests/sandbox.rs` covers the jail, and `tests/flaky.rs`'s fixture adds a
-  `writable` dir for its counter files.
+  suite. `Sandbox::preflight` runs in `init` and in the player at start and
+  on every policy change; a failure stops the tick. `Runner::attempt` runs
+  `git status` after each run: leftovers are `CheckResult::leaked`, never
+  retried, and `impurity()` keeps it from counting as a required failure.
+  `CheckResult::isolation` (the policy fingerprint) is part of the cache
+  key. Tests need a working `bwrap`; `tests/sandbox.rs` covers the jail, and
+  `tests/flaky.rs`'s fixture adds a `writable` dir for its counter files.
 - **An impure `main`** (spec §20): `Player::verify_main` runs main's suite
-  under the current sandbox every tick (a cache hit unless main, the
-  policy or the leak check changed) — before and after `import_main` —
-  and at `dashboard player` startup, where it prints the result. Impure
-  checks there don't stop the player (only a task can fix a test on
-  main); they're a `main_impure` event once per (tip, policy, set) and a
-  `status` section. `held_by_main`: a suite failing *only* on checks
-  impure both here and on main is main's problem. A director main commit
-  then imports anyway; a worker finish is held (`refs/dashboard/held`,
-  `worker.held`, a `held` event, no strike); an accept is held in memory
-  (`held_accepts`, keyed by main tip, so it isn't re-merged every tick).
-  `release_held` un-holds a finish once those checks are clean on main by
-  merging main into the branch (a `sync_revision`, re-pinned,
-  `worker.released`: rebase); a merge conflict there just un-holds it.
+  every tick (before and after `import_main`) and at `dashboard player`
+  startup, which prints the result. `held_by_main` decides a failure is
+  main's; a worker finish is then held (`refs/dashboard/held`,
+  `worker.held`, a `held` event), an accept in memory (`held_accepts`, keyed
+  by main tip). `release_held` merges main into a held branch once clean (a
+  `sync_revision`, `worker.released`); a conflict there just un-holds it.
   Tests: `tests/main_impure.rs`.
-- **Impurity beyond leaks** (spec §20): a failing run whose output
-  `Sandbox::walls_hit` matches (EROFS; with the network off, unreachable
-  network / failed name lookup) sets `CheckResult::blocked`, impure like
-  `leaked` (`impurity()`, `impure_evidence()`); the fingerprint's `v2`
-  makes results from the leak-only detector re-run. Every impure result
-  goes in the impurity ledger (`records::record_impurity`, via
-  `note_ledgers` and at post/launch), shown as `impure: N` and an "Impure
-  checks" list. `hold_launch` reports a launch held at the same tip for
-  the same reason once (`launch_told`).
-
-Still undecided (spec §13): timeout/crash handling beyond manual relaunch,
-scope enforcement beyond pins, and suite-runtime cost at scale.
+- **Impurity beyond leaks** (spec §20): `Sandbox::walls_hit` sets
+  `CheckResult::blocked`, impure like `leaked`; the fingerprint's `v2` makes
+  results from the leak-only detector re-run. Every impure result goes in
+  the impurity ledger (`records::record_impurity`, via `note_ledgers` and at
+  post/launch). `hold_launch` reports a held launch once (`launch_told`).
