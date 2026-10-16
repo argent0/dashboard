@@ -8,7 +8,8 @@
 #   -> accept -> plan+post beta (depends on alpha) -> block -> escalated
 #   -> retire -> a spike (answer, send back, conclude) -> two tasks in
 #   parallel, a conflicting accept, its resolution -> task agents on: a
-#   fake task agent posts and reviews a task in its own tmux session -> a
+#   fake task agent posts and reviews a task in its own tmux session -> an
+#   `arch check` suite check whose module view links a build cache -> a
 #   director rejection on main
 #
 # asserting each transition via `dashboard status --no-color` and raw git
@@ -312,6 +313,10 @@ cat >"$DIR_REPO/tests.toml" <<'EOF'
 name = "baseline"
 cmd = "true"
 EOF
+
+# Step 7c's suite check builds this cache in the checkout: ignored build
+# output, which the jail's clean-worktree check allows.
+echo "/cache/" >"$DIR_REPO/.gitignore"
 
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "initial roadmap and test suite"
@@ -710,6 +715,63 @@ git -C "$DIR_REPO" merge -q --ff-only hub/task/epsilon
 git -C "$DIR_REPO" commit -q --allow-empty -m "accept: epsilon" -m "the task agent recommends it"
 wait_until "task/epsilon accepted" task_status_is epsilon accepted
 wait_until "epsilon's task agent session ended" session_gone epsilon_agent
+
+# --------------------------------------------------------------------------
+# 7c. Module views link build caches: the director commits an
+#     architecture.toml with `linked = ["cache"]`; zeta's post adds a suite
+#     check that builds cache/ and runs `dashboard arch check` (in the jail),
+#     whose module test_cmd only passes if its view links the cache and has
+#     DASHBOARD_MODULE set. Failing at post (no zeta/lib.rs), passing once the
+#     worker writes it, accepted.
+# --------------------------------------------------------------------------
+
+log "step 7c: arch check views link a build cache (zeta)"
+git -C "$DIR_REPO" checkout -q main
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/main
+cat >"$DIR_REPO/architecture.toml" <<'EOF'
+max_modules = 1
+linked = ["cache"]
+
+[[module]]
+name = "zeta"
+lang = "rust"
+paths = ["zeta"]
+max_ast = 100000
+max_bytes = 100000
+test_cmd = 'test -L cache && test "$(cat cache/built)" = ok && test "$DASHBOARD_MODULE" = zeta && test -f zeta/lib.rs'
+EOF
+git -C "$DIR_REPO" add architecture.toml
+git -C "$DIR_REPO" commit -q -m "architecture: one module, a linked cache"
+hub_has_arch() { git --git-dir "$HOME_DIR/hub.git" cat-file -e refs/heads/main:architecture.toml 2>/dev/null; }
+wait_until "architecture.toml on main" hub_has_arch
+
+arch_cmd="mkdir -p cache && echo ok > cache/built && $BIN arch check --root ."
+mkdir -p "$TA_TEMPLATES/zeta/tasks/zeta" "$TA_TEMPLATES/zeta/tests.d"
+echo "Create zeta/lib.rs and zeta.txt." >"$TA_TEMPLATES/zeta/tasks/zeta/prompt.md"
+printf '#!/bin/sh\nmkdir -p zeta\necho "pub fn z() {}" > zeta/lib.rs\necho ok > zeta.txt\n' >"$TA_TEMPLATES/zeta/tasks/zeta/agent.sh"
+printf '[[check]]\nname = "zeta-arch"\ncmd = "%s"\n' "$arch_cmd" >"$TA_TEMPLATES/zeta/tests.d/zeta.toml"
+
+git -C "$DIR_REPO" checkout -q -b task/zeta main
+mkdir -p "$DIR_REPO/tasks/zeta"
+printf 'title = "zeta"\nphase = "p1"\nbrief = "a module test in a view with a linked cache"\n\n[check]\nname = "zeta-arch"\ncmd = "%s"\n' "$arch_cmd" >"$DIR_REPO/tasks/zeta/task.toml"
+git -C "$DIR_REPO" add -A
+git -C "$DIR_REPO" commit -q -m "plan: zeta"
+wait_until "zeta is ready" task_status_is zeta ready
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/task/zeta
+git -C "$DIR_REPO" commit -q --allow-empty -m "stage: zeta" -m "start its task agent"
+wait_until "zeta's worker session exists" session_alive zeta
+wait_until "task/zeta tested" task_status_is zeta tested
+
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/task/zeta
+git -C "$DIR_REPO" commit -q --allow-empty -m "accept: zeta" -m "arch check passes in the view"
+wait_until "task/zeta accepted" task_status_is zeta accepted
+git --git-dir "$HOME_DIR/hub.git" cat-file -e refs/heads/main:zeta/lib.rs || { echo "e2e: zeta/lib.rs missing on main" >&2; exit 1; }
+if git --git-dir "$HOME_DIR/hub.git" cat-file -e refs/heads/main:cache/built 2>/dev/null; then
+  echo "e2e: the linked cache was committed to main" >&2; exit 1
+fi
 
 # --------------------------------------------------------------------------
 # 8. A director rejection path: commit a non-doc file on main ->
