@@ -44,6 +44,19 @@ struct Args {
 }
 
 #[derive(Subcommand)]
+enum ArchAction {
+    /// Check the checkout in --root against `architecture.toml`: total
+    /// modules, each module's byte and AST budgets, file ownership, and each
+    /// module's tests in its jail view. Prints every budget's headroom; exit 1
+    /// on any violation.
+    Check {
+        /// The checkout (default: the current directory).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Create this project's hub from the director clone containing (or
     /// above) the current directory.
@@ -111,6 +124,12 @@ enum Command {
         #[arg(long)]
         timeout: Option<u64>,
     },
+    /// Architecture checks (architect-v3.md): budgets and module boundaries
+    /// from `architecture.toml`. Meant to run as an ordinary suite check.
+    Arch {
+        #[command(subcommand)]
+        action: ArchAction,
+    },
     /// The director's listener: blocks until the player appends a new event,
     /// prints every event past the cursor, advances it, and exits (step 7 —
     /// the director runs this as a background command instead of polling).
@@ -140,6 +159,7 @@ fn main() {
         }
         Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
         Some(Command::Test { no_wait, timeout }) => run_test(args.home, no_wait, timeout),
+        Some(Command::Arch { action: ArchAction::Check { root } }) => run_arch_check(&root),
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
     }
 }
@@ -674,4 +694,39 @@ fn run_wait(home: Option<PathBuf>, timeout: Option<u64>, all: bool) {
 
         std::thread::sleep(WAIT_POLL_INTERVAL);
     }
+}
+
+fn run_arch_check(root: &std::path::Path) {
+    let manifest = match std::fs::read_to_string(root.join("architecture.toml")) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("dashboard: architecture.toml: {e}");
+            std::process::exit(1);
+        }
+    };
+    let cfg = match config::arch_config_from_str(&manifest) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("dashboard: architecture.toml: {e}");
+            std::process::exit(1);
+        }
+    };
+    // The suite already jails this check; views run plain inside it.
+    let scratch = std::env::temp_dir();
+    let rep = dashboard::arch::check(root, &cfg, &dashboard::sandbox::Sandbox::off(), &scratch);
+    println!(
+        "modules {}{}",
+        cfg.modules.len(),
+        if cfg.max_modules > 0 { format!("/{}", cfg.max_modules) } else { String::new() }
+    );
+    for h in &rep.headroom {
+        println!("{h}");
+    }
+    for p in &rep.problems {
+        eprintln!("FAIL {p}");
+    }
+    if !rep.pass() {
+        std::process::exit(1);
+    }
+    println!("architecture ok");
 }

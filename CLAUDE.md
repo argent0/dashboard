@@ -26,6 +26,8 @@ src/git.rs      thin sync wrapper over the `git` CLI (rev-parse, diff, notes, me
 src/paths.rs    XDG home layout and `--home` / `dashboard.home` resolution
 src/init.rs     `dashboard init`: creates the hub and wires up the director <-> hub links
 src/queue.rs    queued runs: `dashboard test` snapshot + request files, results
+src/arch.rs     `dashboard arch check` (architect-v3.md): modules budget, per-module bytes/AST (tree-sitter),
+                file ownership, tests in each module's jail view
 src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based result cache
 src/records.rs  provenance/enforcement records: import notes, rejections, pins, retirements, accepted-merge lookup,
                 spike base commits and exploration notes
@@ -352,6 +354,10 @@ ignored — no `deny_unknown_fields` anywhere.
   `worker.queued` / `task-agent.queued` (prompts.kdl) to worker and task-agent
   prompts when queued, and sets
   `dashboard.home` in the worker workspace so `test` finds the home.
+- `dashboard arch check [--root DIR]` — reads `architecture.toml` (modules, APIs, budgets; `config::ArchConfig`)
+  and fails on any budget overrun, a file in two modules, or a module whose `test_cmd` fails with only its own
+  files, its APIs' files and `shared` present. Prints headroom. Run it as an ordinary suite check; the player is
+  not involved yet (pins, director allowance and raise validation are later steps).
 - `dashboard wait [--timeout SECS] [--all]` — the director's blocking
   listener (see Decisions). Prints every event past the director's cursor,
   advances it, and exits; `--timeout` exits 2 after N idle seconds; `--all`

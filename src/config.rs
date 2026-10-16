@@ -907,6 +907,104 @@ pub(crate) fn check_lock_files(lock_files: &[String], test_paths: &[String]) -> 
     }
 }
 
+// --------------------------------------------------------------------------
+// architecture.toml (architect-v3.md)
+// --------------------------------------------------------------------------
+
+/// `architecture.toml` on `main`: the modules, the API between each connected
+/// pair, and every budget. Pinned like `test_paths`. A budget of 0 is off.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ArchConfig {
+    /// Total modules budget: the most modules the project may have.
+    pub max_modules: u64,
+    /// Paths visible in every module's jail view (build files, lock files).
+    pub shared: Vec<String>,
+    #[serde(rename = "module")]
+    pub modules: Vec<ModuleConfig>,
+    #[serde(rename = "api")]
+    pub apis: Vec<ApiConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ModuleConfig {
+    pub name: String,
+    /// `rust`, `typescript` or `kotlin`: picks the AST grammar for `.rs`,
+    /// `.ts`/`.tsx` and `.kt`/`.kts` files.
+    pub lang: String,
+    /// Files and directories (relative to the repo root) that make up the module.
+    pub paths: Vec<String>,
+    pub max_ast: u64,
+    pub max_bytes: u64,
+    /// Run in the module's jail view (only its files, its APIs' files and
+    /// `shared`): a stray import of another module fails to resolve.
+    pub test_cmd: Option<String>,
+}
+
+/// One API per connected pair: `consumer` consumes `generator`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ApiConfig {
+    pub name: String,
+    pub generator: String,
+    pub consumer: String,
+    pub paths: Vec<String>,
+    pub max_constructors: u64,
+    pub max_types: u64,
+}
+
+impl ArchConfig {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let mut names = std::collections::BTreeSet::new();
+        for m in &self.modules {
+            if m.name.is_empty() || !names.insert(m.name.as_str()) {
+                return Err(format!("[[module]] name {:?}: empty or duplicate", m.name));
+            }
+            if m.paths.is_empty() {
+                return Err(format!("[[module]] {}: no paths", m.name));
+            }
+            if !matches!(m.lang.as_str(), "rust" | "typescript" | "kotlin") {
+                return Err(format!(
+                    "[[module]] {}: lang {:?} must be rust, typescript or kotlin",
+                    m.name, m.lang
+                ));
+            }
+        }
+        let mut api_names = std::collections::BTreeSet::new();
+        let mut pairs = std::collections::BTreeSet::new();
+        for a in &self.apis {
+            if a.name.is_empty() || !api_names.insert(a.name.as_str()) {
+                return Err(format!("[[api]] name {:?}: empty or duplicate", a.name));
+            }
+            for end in [&a.generator, &a.consumer] {
+                if !names.contains(end.as_str()) {
+                    return Err(format!("[[api]] {}: unknown module {end:?}", a.name));
+                }
+            }
+            if a.generator == a.consumer {
+                return Err(format!("[[api]] {}: generator and consumer are the same", a.name));
+            }
+            if !pairs.insert((a.generator.as_str(), a.consumer.as_str())) {
+                return Err(format!(
+                    "[[api]] {}: a second API for {} -> {} (one API per connected pair)",
+                    a.name, a.generator, a.consumer
+                ));
+            }
+            if a.paths.is_empty() {
+                return Err(format!("[[api]] {}: no paths", a.name));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn arch_config_from_str(s: &str) -> Result<ArchConfig, String> {
+    let cfg: ArchConfig = toml::from_str(s).map_err(|e| e.to_string())?;
+    cfg.validate()?;
+    Ok(cfg)
+}
+
 pub fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> {
     let cfg: RoadmapConfig = toml::from_str(s).map_err(|e| e.to_string())?;
     cfg.sandbox.validate()?;

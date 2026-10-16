@@ -2,6 +2,7 @@
 // lets integration tests in tests/ exercise these modules directly instead of
 // only through the CLI. See CLAUDE.md and spec.md for the overall design.
 
+pub mod arch;
 pub mod checks;
 pub mod config;
 pub mod events;
