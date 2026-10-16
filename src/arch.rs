@@ -194,19 +194,23 @@ pub fn bindings(root: &Path, cfg: &ArchConfig) -> (Vec<ApiBindings>, Vec<String>
         langs.dedup();
         let mut files = Vec::new();
         for lang in langs {
-            if lang != "rust" {
-                errs.push(format!("{who}: no {lang} generator yet"));
-                continue;
-            }
+            let (ext, text) = match lang {
+                "rust" => ("rs", idl.rust(is_wire(a))),
+                "typescript" => ("ts", idl.typescript(is_wire(a))),
+                _ => {
+                    errs.push(format!("{who}: no {lang} generator yet"));
+                    continue;
+                }
+            };
             let file = path
                 .parent()
                 .unwrap_or(Path::new(""))
                 .join("gen")
-                .join(format!("{}.rs", a.name.replace('-', "_")));
+                .join(format!("{}.{ext}", a.name.replace('-', "_")));
             if !a.paths.iter().any(|p| path_under_test_paths(&file.to_string_lossy(), std::slice::from_ref(p))) {
                 errs.push(format!("{who}: {} is not under the api's paths, so it would not be pinned", file.display()));
             }
-            files.push((file, idl.rust(is_wire(a))));
+            files.push((file, text));
         }
         out.push(ApiBindings { name: a.name.clone(), idl: idl.clone(), files });
     }
@@ -443,10 +447,10 @@ mod tests {
         write(d.path(), "api/gen/ab.rs", "pub enum Ab {}");
         let all = run(d.path(), MANIFEST).problems.join("\n");
         assert!(all.contains("api/gen/ab.rs: generated binding"), "{all}");
-        // A pair crossing languages gets wire code (and, for now, no TS generator).
-        let m = MANIFEST.replace("name = \"b\"\n        lang = \"rust\"", "name = \"b\"\n        lang = \"typescript\"");
+        // A pair crossing languages gets wire code (and, for now, no Kotlin generator).
+        let m = MANIFEST.replace("name = \"b\"\n        lang = \"rust\"", "name = \"b\"\n        lang = \"kotlin\"");
         let all = run(d.path(), &m).problems.join("\n");
-        assert!(all.contains("no typescript generator yet"), "{all}");
+        assert!(all.contains("no kotlin generator yet"), "{all}");
     }
 
     #[test]
