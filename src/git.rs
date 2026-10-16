@@ -264,6 +264,17 @@ impl Git {
         }
     }
 
+    /// The objects `notes_ref` has a note on (empty if the ref doesn't exist).
+    pub fn notes_list(&self, notes_ref: &str) -> Vec<String> {
+        self.run(&["notes", "--ref", notes_ref, "list"])
+            .map(|out| {
+                out.lines()
+                    .filter_map(|l| l.split_whitespace().nth(1).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn notes_show(&self, notes_ref: &str, sha: &str) -> Option<String> {
         self.run(&["notes", "--ref", notes_ref, "show", sha]).ok()
     }

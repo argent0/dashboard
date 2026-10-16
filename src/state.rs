@@ -152,6 +152,8 @@ pub struct HubState {
     /// for its timeout, or the total past `suite_fail`), one line each;
     /// empty when it isn't. Work failing only there is held too.
     pub main_over_budget: Vec<String>,
+    /// Every budget raise the director committed (architect-v3.md), oldest first.
+    pub budget_raises: Vec<crate::raise::Raise>,
     /// Tasks whose finish is held on those checks (`refs/dashboard/held/*`).
     pub held: Vec<String>,
     /// `dashboard.project` from the hub's git config — used to name tmux
@@ -296,6 +298,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         impurities,
         main_impure,
         main_over_budget,
+        budget_raises: records::budget_raises(hub),
         held: records::held_slugs(hub),
         project,
     })

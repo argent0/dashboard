@@ -16,6 +16,7 @@ pub mod paths;
 pub mod player;
 pub mod prompts;
 pub mod queue;
+pub mod raise;
 pub mod records;
 pub mod render;
 pub mod sandbox;

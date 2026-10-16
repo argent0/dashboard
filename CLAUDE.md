@@ -27,6 +27,7 @@ src/paths.rs    XDG home layout and `--home` / `dashboard.home` resolution
 src/init.rs     `dashboard init`: creates the hub and wires up the director <-> hub links
 src/queue.rs    queued runs: `dashboard test` snapshot + request files, results
 src/idl.rs      the API IDL (`<name>.api.kdl`, KDL): parse/validate, constructor and T-slot counts, Rust binding generator
+src/raise.rs    budget raises (architect-v3.md): fields-only, `raise:` reason, step cap (pure)
 src/lint.rs     consumer-contract lints (tree-sitter): wildcard arms over an API's sum type, wire-helper leaks
 src/arch.rs     `dashboard arch check` (architect-v3.md): modules budget, per-module bytes/AST (tree-sitter),
                 file ownership, tests in each module's jail view
@@ -159,6 +160,7 @@ refs/notes/dashboard-speedups    on a test-speedup finish: the removed tests and
 refs/notes/dashboard-conflicts   on a conflicted task's tip: the exact main commit an accept couldn't
                                  merge in, and the conflicted paths ({main, paths, at})
 refs/notes/dashboard-agent-reports  task agent reports read at a task tip: [{verdict, text, at}]
+refs/notes/dashboard-budget-raises  on a main commit raising an architecture.toml budget: [{budget, old, new, reason, task, at}]
 refs/notes/dashboard-relaunches  `dashboard relaunch`es at a task tip: [{agent, reports, at}]
                                  (`reports`: the agent reports noted there at the time;
                                  `reset: true`: a `--reset`, the session's count restarts after it)
@@ -362,7 +364,7 @@ ignored — no `deny_unknown_fields` anywhere.
   not involved in the check itself. The player does: `architecture.toml` is a path the director may commit on
   `main` (validated on import: `ownership` if it doesn't parse), and the manifest plus every API path in it is
   pinned against workers (`records::pinned_files`, a `pins` strike; not for spikes). A task agent may write API
-  paths (read at the tip) but never the manifest (`agent_paths_ok`). Raise validation is a later step.
+  paths (read at the tip) but never the manifest (`agent_paths_ok`). Budget raises: see below.
 - `dashboard arch gen [--root DIR] [--check]` — regenerates each API's bindings from its one `*.api.kdl`
   (written to `gen/<api>.rs` beside it, so under the API's pinned paths). `--check` writes nothing and exits 1 on a
   stale binding; `arch check` runs the same drift check, plus the IDL's constructor count (`max_constructors`) and
@@ -386,6 +388,14 @@ ignored — no `deny_unknown_fields` anywhere.
   optional `lint_cmd` adds the project's own adapter (e.g. clippy): it runs in the checkout root with
   `DASHBOARD_MODULE` set and prints a JSON array of `{file, line, message}` findings; any finding, or a non-JSON
   failure, fails the check.
+- **Budget raises** (`src/raise.rs`, judged in `Player::validate_main_commit` via `main_raises`): a director `main`
+  commit that raises a budget in `architecture.toml` (a limit going up, or a nonzero one turned off; turning one
+  on, lowering, and edits that raise nothing are free) must change only budget fields and no other file, have a
+  `raise: <reason>` / `raise(<slug>): <reason>` message (reason = rest of the subject plus body), and keep each new
+  value within `step_cap(old)` (+25%, or +1). Otherwise `ownership`. An imported raise is noted on the commit in
+  `refs/notes/dashboard-budget-raises` (`[{budget, old, new, reason, task?, at}]`, `records::budget_raises`) and
+  `status` shows "Budget raises". The player cannot check that the operator was consulted; the `dashboard`
+  skill makes that the director's rule.
 - `dashboard wait [--timeout SECS] [--all]` — the director's blocking
   listener (see Decisions). Prints every event past the director's cursor,
   advances it, and exits; `--timeout` exits 2 after N idle seconds; `--all`

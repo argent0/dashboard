@@ -558,6 +558,34 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
         out.push(String::new());
     }
 
+    // ---- budget raises (architect-v3.md) ----
+    if !state.budget_raises.is_empty() {
+        let mut per: std::collections::BTreeMap<&str, (u32, u64)> = std::collections::BTreeMap::new();
+        for r in &state.budget_raises {
+            let e = per.entry(r.budget.as_str()).or_insert((0, r.old));
+            e.0 += 1;
+        }
+        let last: std::collections::BTreeMap<&str, &crate::raise::Raise> =
+            state.budget_raises.iter().map(|r| (r.budget.as_str(), r)).collect();
+        out.push(style(
+            &format!("Budget raises ({})", state.budget_raises.len()),
+            &[c::BOLD, c::YELLOW],
+            color,
+        ));
+        for (budget, (n, first_old)) in per {
+            let r = last[budget];
+            out.push(format!(
+                "  {budget} raised {n}x ({first_old} -> {}) — {}",
+                r.new,
+                truncate(
+                    r.reason.lines().next().unwrap_or(""),
+                    width.saturating_sub(40 + budget.len()).max(10)
+                )
+            ));
+        }
+        out.push(String::new());
+    }
+
     // ---- impure checks (the impurity ledger) ----
     if !state.impurities.is_empty() {
         out.push(style(
@@ -987,6 +1015,7 @@ mod tests {
             impurities: vec![],
             main_impure: vec![],
             main_over_budget: vec![],
+            budget_raises: vec![],
             held: vec![],
             project: "widget".to_string(),
         }

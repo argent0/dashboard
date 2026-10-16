@@ -26,6 +26,7 @@ use crate::git::Git;
 use crate::paths::{self, Home};
 use crate::prompts::{self, Prompts};
 use crate::queue;
+use crate::raise;
 use crate::records::{self, Actor, RejectionRecord, Transition};
 use crate::sandbox::Sandbox;
 use crate::spike;
@@ -1622,6 +1623,9 @@ impl<S: Sessions> Player<S> {
                         .update_ref_cas(hub_ref, &c, &hub_tip)
                         .map_err(|e| e.to_string())?;
                     records::record_import(&self.hub, &c, Actor::Director, Transition::Docs, None)?;
+                    if let Ok(raises) = self.main_raises(&hub_tip, &c) {
+                        records::record_budget_raises(&self.hub, &c, &raises)?;
+                    }
                     report
                         .imported
                         .push((hub_ref.to_string(), c.clone(), Transition::Docs));
@@ -1641,6 +1645,23 @@ impl<S: Sessions> Player<S> {
             }
         }
         Ok(())
+    }
+
+    /// The budget raises `candidate` makes over `base`, judged by
+    /// `raise::judge` (an `ownership` message if it breaks the rules).
+    fn main_raises(&self, base: &str, candidate: &str) -> Result<Vec<raise::Raise>, String> {
+        let Some(new) = self.hub.show_file(candidate, config::ARCH_FILE) else {
+            return Ok(Vec::new());
+        };
+        let files: Vec<String> = self.hub.diff_names(base, candidate).into_iter().map(|(_, p)| p).collect();
+        raise::judge(
+            self.hub.show_file(base, config::ARCH_FILE).as_deref(),
+            &new,
+            &self.hub.commit_subject(candidate).unwrap_or_default(),
+            &self.hub.commit_body(candidate).unwrap_or_default(),
+            &files,
+            self.now(),
+        )
     }
 
     /// `base` is "the current hub main" at this point in the cumulative walk
@@ -1684,6 +1705,7 @@ impl<S: Sessions> Player<S> {
             config::arch_config_from_str(&text)
                 .map_err(|e| (Reason::Ownership, format!("ownership: {}: {e}", config::ARCH_FILE)))?;
         }
+        self.main_raises(base, candidate).map_err(|e| (Reason::Ownership, e))?;
         match self.hub.show_file(candidate, prompts::FILE) {
             Some(text) => {
                 Prompts::parse(&text)

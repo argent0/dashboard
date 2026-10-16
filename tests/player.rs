@@ -767,3 +767,56 @@ fn main_commit_of_architecture_toml_is_imported_and_a_bad_one_rejected() {
     assert_eq!(report.rejected[0].reason, Reason::Ownership);
     assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(good.as_str()));
 }
+
+#[test]
+fn a_budget_raise_needs_a_reason_and_a_small_step_and_is_noted_and_shown() {
+    use dashboard::{render, state};
+    let manifest = |ast: u32| {
+        format!("max_modules = 3\n[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\nmax_ast = {ast}\n")
+    };
+    let repo = director_repo();
+    write_file(repo.path(), "architecture.toml", &manifest(100));
+    commit(repo.path(), "add architecture");
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    let base = repo.git().rev_parse("HEAD").unwrap();
+
+    // No `raise:` reason: ownership.
+    write_file(repo.path(), "architecture.toml", &manifest(110));
+    commit(repo.path(), "make room");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Ownership);
+    assert!(report.rejected[0].message.contains("raise: <reason>"), "{}", report.rejected[0].message);
+    assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(base.as_str()));
+
+    // Past the step cap (+25%): ownership.
+    repo.git().run(&["reset", "--hard", &base]).unwrap();
+    write_file(repo.path(), "architecture.toml", &manifest(126));
+    commit(repo.path(), "raise: too much");
+    let report = player.tick().expect("tick");
+    assert!(report.rejected[0].message.contains("step cap"), "{}", report.rejected[0].message);
+
+    // Lowering needs nothing.
+    repo.git().run(&["reset", "--hard", &base]).unwrap();
+    write_file(repo.path(), "architecture.toml", &manifest(90));
+    commit(repo.path(), "tighten");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.imported.len(), 1, "{report}");
+    assert!(records::budget_raises(&hub).is_empty());
+
+    // A reasoned raise within the cap is imported and noted.
+    write_file(repo.path(), "architecture.toml", &manifest(110));
+    commit(repo.path(), "raise(parser): the parser grew; operator agreed");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.imported.len(), 1, "{report}");
+    let raises = records::budget_raises(&hub);
+    assert_eq!(raises.len(), 1);
+    assert_eq!((raises[0].budget.as_str(), raises[0].old, raises[0].new), ("module a max_ast", 90, 110));
+    assert_eq!(raises[0].task.as_deref(), Some("parser"));
+
+    let st = state::derive(&hub, &|_| false).expect("derive");
+    let text = render::render(&st, &[], false, 100);
+    assert!(text.contains("Budget raises (1)") && text.contains("module a max_ast raised 1x (90 -> 110)"), "{text}");
+}

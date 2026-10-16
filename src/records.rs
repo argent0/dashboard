@@ -8,6 +8,7 @@
 
 use crate::config::{self, ClaimKind, Reason, TaskKind};
 use crate::git::Git;
+use crate::raise::Raise;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -769,6 +770,35 @@ pub fn record_speedup(hub: &Git, commit: &str, text: &str) -> Result<(), String>
 /// The note `record_speedup` left on `commit`, if any.
 pub fn speedup_notes(hub: &Git, commit: &str) -> Option<String> {
     hub.notes_show(SPEEDUPS_NOTES_REF, commit)
+}
+
+// --------------------------------------------------------------------------
+// Budget raises (architect-v3.md): refs/notes/dashboard-budget-raises
+// --------------------------------------------------------------------------
+
+const RAISES_NOTES_REF: &str = "refs/notes/dashboard-budget-raises";
+
+/// Notes the budget raises the imported `main` commit made.
+pub fn record_budget_raises(hub: &Git, commit: &str, raises: &[Raise]) -> Result<(), String> {
+    if raises.is_empty() {
+        return Ok(());
+    }
+    let text = serde_json::to_string(raises).map_err(|e| e.to_string())?;
+    hub.notes_add(RAISES_NOTES_REF, commit, &text)
+        .map_err(|e| e.to_string())
+}
+
+/// Every recorded budget raise, oldest first.
+pub fn budget_raises(hub: &Git) -> Vec<Raise> {
+    let mut out: Vec<Raise> = hub
+        .notes_list(RAISES_NOTES_REF)
+        .iter()
+        .filter_map(|c| hub.notes_show(RAISES_NOTES_REF, c))
+        .filter_map(|t| serde_json::from_str::<Vec<Raise>>(&t).ok())
+        .flatten()
+        .collect();
+    out.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.budget.cmp(&b.budget)));
+    out
 }
 
 // --------------------------------------------------------------------------
