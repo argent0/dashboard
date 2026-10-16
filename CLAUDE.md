@@ -27,6 +27,7 @@ src/paths.rs    XDG home layout and `--home` / `dashboard.home` resolution
 src/init.rs     `dashboard init`: creates the hub and wires up the director <-> hub links
 src/queue.rs    queued runs: `dashboard test` snapshot + request files, results
 src/idl.rs      the API IDL (`<name>.api.kdl`, KDL): parse/validate, constructor and T-slot counts, Rust binding generator
+src/lint.rs     consumer-contract lints (tree-sitter): wildcard arms over an API's sum type, wire-helper leaks
 src/arch.rs     `dashboard arch check` (architect-v3.md): modules budget, per-module bytes/AST (tree-sitter),
                 file ownership, tests in each module's jail view
 src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based result cache
@@ -377,6 +378,14 @@ ignored — no `deny_unknown_fields` anywhere.
   Each generator's output was compiled and round-tripped against the others' JSON by hand (cargo, deno, kotlinc).
   The wire code's `to_value`/`toValue` read a `T`'s inner value, so it exists only on cross-language APIs; the
   adapters (step 4) should ban calling it outside the generated file.
+- `dashboard arch check` also lints each module's own (non-API) files (`src/lint.rs`): in a module that consumes an
+  API, a match over its sum type with a wildcard or catch-all binding arm (Rust `_`/lone binding, TypeScript
+  `default`, Kotlin `else`) fails, and so does any `.to_value()` / `.toValue()` call (the wire helper that reads a
+  T). A match "is over an API" when an arm/case/branch names one of its constructors (`Ab::X`, `case "X"`,
+  `Ab.X`), so a glob-imported `use Ab::*` escapes the Rust check: a heuristic, not a type check. A module's
+  optional `lint_cmd` adds the project's own adapter (e.g. clippy): it runs in the checkout root with
+  `DASHBOARD_MODULE` set and prints a JSON array of `{file, line, message}` findings; any finding, or a non-JSON
+  failure, fails the check.
 - `dashboard wait [--timeout SECS] [--all]` — the director's blocking
   listener (see Decisions). Prints every event past the director's cursor,
   advances it, and exits; `--timeout` exits 2 after N idle seconds; `--all`

@@ -62,7 +62,7 @@ fn walk(root: &Path, at: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-fn language(lang: &str, file: &Path) -> Option<Language> {
+pub(crate) fn language(lang: &str, file: &Path) -> Option<Language> {
     let ext = file.extension()?.to_str()?;
     match (lang, ext) {
         ("rust", "rs") => Some(tree_sitter_rust::LANGUAGE.into()),
@@ -319,6 +319,7 @@ pub fn check(root: &Path, cfg: &ArchConfig, sandbox: &Sandbox, scratch: &Path) -
             rep.headroom.push(format!("api {}: constructors {}{c}, T slots {}{t}", b.name, b.idl.constructors(), b.idl.slots()));
         }
     }
+    lint(root, cfg, &files_of, sandbox, &mut rep);
     for m in &cfg.modules {
         if let Some(cmd) = &m.test_cmd {
             if let Err(e) = run_view(root, cfg, m, cmd, sandbox, scratch) {
@@ -327,6 +328,62 @@ pub fn check(root: &Path, cfg: &ArchConfig, sandbox: &Sandbox, scratch: &Path) -
         }
     }
     rep
+}
+
+/// The consumer contract (no wildcard over an API's constructors, no wire
+/// helper reading a T) in every module's own files, plus any `lint_cmd`.
+fn lint(
+    root: &Path,
+    cfg: &ArchConfig,
+    files_of: &BTreeMap<&str, Vec<PathBuf>>,
+    sandbox: &Sandbox,
+    rep: &mut Report,
+) {
+    let (bs, _) = bindings(root, cfg);
+    for m in &cfg.modules {
+        let Some(files) = files_of.get(m.name.as_str()) else { continue };
+        let consumed: Vec<&ApiBindings> = bs
+            .iter()
+            .filter(|b| cfg.apis.iter().any(|a| a.name == b.name && a.consumer == m.name))
+            .collect();
+        let api_paths = cfg.api_paths();
+        for f in files.iter().filter(|f| !api_paths.iter().any(|p| path_under_test_paths(&f.to_string_lossy(), std::slice::from_ref(p)))) {
+            let Ok(src) = std::fs::read(root.join(f)) else { continue };
+            let mut found = crate::lint::wire_leaks(&String::from_utf8_lossy(&src));
+            if let Some(l) = language(&m.lang, f) {
+                for b in &consumed {
+                    found.extend(crate::lint::wildcard_arms(&m.lang, l.clone(), &src, &b.idl));
+                }
+            }
+            for x in found {
+                rep.problems.push(format!("{}:{}: {}", f.display(), x.line, x.message));
+            }
+        }
+        if let Some(cmd) = &m.lint_cmd {
+            let out = sandbox.command(&format!("DASHBOARD_MODULE={} {cmd}", m.name), root).output();
+            match out {
+                Err(e) => rep.problems.push(format!("module {}: lint_cmd: {e}", m.name)),
+                Ok(o) => {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    match serde_json::from_str::<Vec<serde_json::Value>>(stdout.trim()) {
+                        Ok(list) => {
+                            for f in list {
+                                let g = |k: &str| f.get(k).map(|v| v.to_string().trim_matches('"').to_string()).unwrap_or_default();
+                                rep.problems.push(format!("{}:{}: {}", g("file"), g("line"), g("message")));
+                            }
+                        }
+                        Err(_) if o.status.success() && stdout.trim().is_empty() => {}
+                        Err(e) => rep.problems.push(format!(
+                            "module {}: lint_cmd gave no JSON findings ({e}), exit {:?}: {}",
+                            m.name,
+                            o.status.code(),
+                            String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")
+                        )),
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Copies only `m`'s files, its APIs' files and `shared` into a fresh
@@ -460,6 +517,24 @@ mod tests {
         let names: Vec<String> = bs[0].files.iter().map(|(p, _)| p.display().to_string()).collect();
         assert_eq!(names, ["api/gen/ab.rs", "api/gen/Ab.kt"]);
         assert!(bs[0].files.iter().all(|(_, t)| t.contains("fromJson") || t.contains("from_json")));
+    }
+
+    #[test]
+    fn consumer_wildcards_and_lint_cmd_fail() {
+        let d = fixture();
+        write(d.path(), "b/lib.rs", "fn g(x: Ab) { match x { Ab::X(_) => 1, _ => 2 }; }");
+        let m = MANIFEST.replace(
+            "test_cmd = \"test -e api/ab.api.kdl\"",
+            "lint_cmd = \"echo '[{\\\"file\\\":\\\"b/lib.rs\\\",\\\"line\\\":3,\\\"message\\\":\\\"custom\\\"}]'\"",
+        );
+        let all = run(d.path(), &m).problems.join("\n");
+        assert!(all.contains("b/lib.rs:1: wildcard arm in a match over Ab"), "{all}");
+        assert!(all.contains("b/lib.rs:3: custom"), "{all}");
+        // The generator side may match however it likes.
+        write(d.path(), "b/lib.rs", "pub fn g() {}");
+        write(d.path(), "a/lib.rs", "fn f(x: Ab) { match x { Ab::X(_) => 1, _ => 2 }; }");
+        let all = run(d.path(), MANIFEST).problems.join("\n");
+        assert!(!all.contains("wildcard"), "{all}");
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod fsm;
 pub mod git;
 pub mod idl;
 pub mod init;
+pub mod lint;
 pub mod paths;
 pub mod player;
 pub mod prompts;

@@ -940,6 +940,11 @@ pub struct ModuleConfig {
     /// Run in the module's jail view (only its files, its APIs' files and
     /// `shared`): a stray import of another module fails to resolve.
     pub test_cmd: Option<String>,
+    /// A project's own lint adapter, run in the checkout root with
+    /// `DASHBOARD_MODULE` set. It prints a JSON array of
+    /// `{"file", "line", "message"}` findings on stdout; any finding fails
+    /// the check. Runs beside the built-in contract checks, not instead.
+    pub lint_cmd: Option<String>,
 }
 
 /// One API per connected pair: `consumer` consumes `generator`.
@@ -966,8 +971,14 @@ impl ArchConfig {
     pub(crate) fn validate(&self) -> Result<(), String> {
         let mut names = std::collections::BTreeSet::new();
         for m in &self.modules {
-            if m.name.is_empty() || !names.insert(m.name.as_str()) {
-                return Err(format!("[[module]] name {:?}: empty or duplicate", m.name));
+            if m.name.is_empty()
+                || !m.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+                || !names.insert(m.name.as_str())
+            {
+                return Err(format!(
+                    "[[module]] name {:?}: empty, duplicate, or not lowercase letters, digits, - and _",
+                    m.name
+                ));
             }
             if m.paths.is_empty() {
                 return Err(format!("[[module]] {}: no paths", m.name));
