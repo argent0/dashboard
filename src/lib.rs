@@ -9,6 +9,7 @@ pub mod events;
 pub mod flaky;
 pub mod fsm;
 pub mod git;
+pub mod idl;
 pub mod init;
 pub mod paths;
 pub mod player;

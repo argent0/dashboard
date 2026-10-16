@@ -54,6 +54,14 @@ enum ArchAction {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
+    /// Regenerate every API's bindings from its IDL (`*.api.kdl`). With
+    /// --check, write nothing and exit 1 if any binding is stale.
+    Gen {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -160,6 +168,7 @@ fn main() {
         Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
         Some(Command::Test { no_wait, timeout }) => run_test(args.home, no_wait, timeout),
         Some(Command::Arch { action: ArchAction::Check { root } }) => run_arch_check(&root),
+        Some(Command::Arch { action: ArchAction::Gen { root, check } }) => run_arch_gen(&root, check),
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
     }
 }
@@ -729,4 +738,31 @@ fn run_arch_check(root: &std::path::Path) {
         std::process::exit(1);
     }
     println!("architecture ok");
+}
+
+fn load_arch(root: &std::path::Path) -> config::ArchConfig {
+    match std::fs::read_to_string(root.join("architecture.toml"))
+        .map_err(|e| e.to_string())
+        .and_then(|t| config::arch_config_from_str(&t))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("dashboard: architecture.toml: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_arch_gen(root: &std::path::Path, check: bool) {
+    let cfg = load_arch(root);
+    let (changed, errs) = dashboard::arch::sync_bindings(root, &cfg, !check);
+    for f in &changed {
+        println!("{} {f}", if check { "stale" } else { "wrote" });
+    }
+    for e in &errs {
+        eprintln!("FAIL {e}");
+    }
+    if !errs.is_empty() || (check && !changed.is_empty()) {
+        std::process::exit(1);
+    }
 }

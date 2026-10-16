@@ -26,6 +26,7 @@ src/git.rs      thin sync wrapper over the `git` CLI (rev-parse, diff, notes, me
 src/paths.rs    XDG home layout and `--home` / `dashboard.home` resolution
 src/init.rs     `dashboard init`: creates the hub and wires up the director <-> hub links
 src/queue.rs    queued runs: `dashboard test` snapshot + request files, results
+src/idl.rs      the API IDL (`<name>.api.kdl`, KDL): parse/validate, constructor and T-slot counts, Rust binding generator
 src/arch.rs     `dashboard arch check` (architect-v3.md): modules budget, per-module bytes/AST (tree-sitter),
                 file ownership, tests in each module's jail view
 src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based result cache
@@ -361,6 +362,15 @@ ignored — no `deny_unknown_fields` anywhere.
   `main` (validated on import: `ownership` if it doesn't parse), and the manifest plus every API path in it is
   pinned against workers (`records::pinned_files`, a `pins` strike; not for spikes). A task agent may write API
   paths (read at the tip) but never the manifest (`agent_paths_ok`). Raise validation is a later step.
+- `dashboard arch gen [--root DIR] [--check]` — regenerates each API's bindings from its one `*.api.kdl`
+  (written to `gen/<api>.rs` beside it, so under the API's pinned paths). `--check` writes nothing and exits 1 on a
+  stale binding; `arch check` runs the same drift check, plus the IDL's constructor count (`max_constructors`) and
+  T slots, i.e. argument slots across constructors (`max_types`), and ref validity (known, linked, acyclic API;
+  declared type). IDL: `type "T" repr="string|bytes|i64|f64|bool" [display=#true]` or `ref="api.Type"`, and
+  `constructor "C" "T"...`. Every generated T is opaque (private field, no trait impls, no accessors; `display`
+  opts into Display). The JSON wire code (`to_json`/`from_json`, needs `serde_json`; bytes as hex) is emitted only
+  for a pair whose two modules differ in `lang`, and such an API may ref only other cross-language APIs. Only the
+  Rust generator exists; any other language is reported as "no <lang> generator yet" (TypeScript, Kotlin next).
 - `dashboard wait [--timeout SECS] [--all]` — the director's blocking
   listener (see Decisions). Prints every event past the director's cursor,
   advances it, and exits; `--timeout` exits 2 after N idle seconds; `--all`

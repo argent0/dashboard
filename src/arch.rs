@@ -5,7 +5,8 @@
 // a module's tests pass when only its own files, its APIs' files and
 // `shared` are visible, so a stray import of another module cannot resolve.
 
-use crate::config::{ArchConfig, ModuleConfig};
+use crate::config::{ArchConfig, ModuleConfig, path_under_test_paths};
+use crate::idl::Idl;
 use crate::sandbox::Sandbox;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -113,6 +114,148 @@ fn over(what: &str, who: &str, used: u64, max: u64, rep: &mut Report) -> String 
     }
 }
 
+/// An API with its parsed IDL and the bindings it should have.
+pub struct ApiBindings {
+    pub name: String,
+    pub idl: Idl,
+    /// `(root-relative path, expected content)`.
+    pub files: Vec<(PathBuf, String)>,
+}
+
+/// Parses every API's IDL, cross-checks refs, and renders the bindings each
+/// should have. Errors are one line each.
+pub fn bindings(root: &Path, cfg: &ArchConfig) -> (Vec<ApiBindings>, Vec<String>) {
+    let mut errs = Vec::new();
+    let mut idls: BTreeMap<&str, (Idl, PathBuf)> = BTreeMap::new();
+    for a in &cfg.apis {
+        let files = match expand(root, &a.paths) {
+            Ok(f) => f,
+            Err(e) => {
+                errs.push(format!("api {}: {e}", a.name));
+                continue;
+            }
+        };
+        let kdl: Vec<&PathBuf> =
+            files.iter().filter(|f| f.to_string_lossy().ends_with(".api.kdl")).collect();
+        let [path] = kdl.as_slice() else {
+            errs.push(format!("api {}: expected exactly one *.api.kdl in its paths, found {}", a.name, kdl.len()));
+            continue;
+        };
+        match std::fs::read_to_string(root.join(path))
+            .map_err(|e| e.to_string())
+            .and_then(|t| Idl::parse(&t))
+        {
+            Ok(idl) if idl.api != a.name => {
+                errs.push(format!("api {}: {} declares api {:?}", a.name, path.display(), idl.api))
+            }
+            Ok(idl) => {
+                idls.insert(&a.name, (idl, (*path).clone()));
+            }
+            Err(e) => errs.push(format!("api {}: {}: {e}", a.name, path.display())),
+        }
+    }
+    let lang_of = |m: &str| cfg.modules.iter().find(|x| x.name == m).map(|x| x.lang.as_str());
+    let is_wire = |a: &crate::config::ApiConfig| lang_of(&a.generator) != lang_of(&a.consumer);
+    let mut out = Vec::new();
+    for a in &cfg.apis {
+        let Some((idl, path)) = idls.get(a.name.as_str()) else { continue };
+        let who = format!("api {}", a.name);
+        if a.max_constructors > 0 && idl.constructors() > a.max_constructors {
+            errs.push(format!("{who}: constructors {} exceeds budget {}", idl.constructors(), a.max_constructors));
+        }
+        if a.max_types > 0 && idl.slots() > a.max_types {
+            errs.push(format!("{who}: T slots {} exceeds budget {}", idl.slots(), a.max_types));
+        }
+        for (target, ty) in idl.refs() {
+            let Some(ta) = cfg.apis.iter().find(|x| x.name == target) else {
+                errs.push(format!("{who}: ref to unknown api {target:?}"));
+                continue;
+            };
+            let linked = [&a.generator, &a.consumer]
+                .iter()
+                .any(|m| **m == ta.generator || **m == ta.consumer);
+            if !linked {
+                errs.push(format!("{who}: ref {target}.{ty}: {target} shares no module with {}", a.name));
+            }
+            if target == a.name {
+                errs.push(format!("{who}: refs its own type {ty}"));
+            }
+            match idls.get(target) {
+                Some((t, _)) if t.type_decl(ty).is_none() => {
+                    errs.push(format!("{who}: ref {target}.{ty}: {target} declares no such type"))
+                }
+                _ => {}
+            }
+            if is_wire(a) && !is_wire(ta) {
+                errs.push(format!("{who}: crosses languages but refs {target}.{ty}, whose api does not"));
+            }
+        }
+        let mut langs = vec![lang_of(&a.generator).unwrap_or(""), lang_of(&a.consumer).unwrap_or("")];
+        langs.dedup();
+        let mut files = Vec::new();
+        for lang in langs {
+            if lang != "rust" {
+                errs.push(format!("{who}: no {lang} generator yet"));
+                continue;
+            }
+            let file = path
+                .parent()
+                .unwrap_or(Path::new(""))
+                .join("gen")
+                .join(format!("{}.rs", a.name.replace('-', "_")));
+            if !a.paths.iter().any(|p| path_under_test_paths(&file.to_string_lossy(), std::slice::from_ref(p))) {
+                errs.push(format!("{who}: {} is not under the api's paths, so it would not be pinned", file.display()));
+            }
+            files.push((file, idl.rust(is_wire(a))));
+        }
+        out.push(ApiBindings { name: a.name.clone(), idl: idl.clone(), files });
+    }
+    // A ref cycle between APIs would make the generated modules recursive.
+    for a in &cfg.apis {
+        let mut seen = vec![a.name.as_str()];
+        let mut stack = vec![a.name.as_str()];
+        while let Some(cur) = stack.pop() {
+            let Some((idl, _)) = idls.get(cur) else { continue };
+            for (t, _) in idl.refs() {
+                if t == a.name {
+                    errs.push(format!("api {}: ref cycle through {cur}", a.name));
+                } else if !seen.contains(&t) {
+                    seen.push(t);
+                    stack.push(t);
+                }
+            }
+        }
+    }
+    errs.sort();
+    errs.dedup();
+    (out, errs)
+}
+
+/// Writes the expected bindings (`write`), or lists those that differ, and
+/// returns the paths it wrote or found stale beside any errors (bindings
+/// that could be rendered are still synced when others could not).
+pub fn sync_bindings(root: &Path, cfg: &ArchConfig, write: bool) -> (Vec<String>, Vec<String>) {
+    let (bs, mut errs) = bindings(root, cfg);
+    let mut stale = Vec::new();
+    for b in bs {
+        for (path, content) in b.files {
+            let full = root.join(&path);
+            if std::fs::read_to_string(&full).ok().as_deref() == Some(content.as_str()) {
+                continue;
+            }
+            if write {
+                let done = std::fs::create_dir_all(full.parent().unwrap())
+                    .and_then(|_| std::fs::write(&full, content));
+                if let Err(e) = done {
+                    errs.push(format!("{}: {e}", path.display()));
+                }
+            }
+            stale.push(path.display().to_string());
+        }
+    }
+    (stale, errs)
+}
+
 /// Checks the checkout at `root` against `cfg`. `scratch` is an existing
 /// directory for jail views.
 pub fn check(root: &Path, cfg: &ArchConfig, sandbox: &Sandbox, scratch: &Path) -> Report {
@@ -153,9 +296,18 @@ pub fn check(root: &Path, cfg: &ArchConfig, sandbox: &Sandbox, scratch: &Path) -
             Err(e) => rep.problems.push(format!("{who}: {e}")),
         }
     }
-    for a in &cfg.apis {
-        if let Err(e) = expand(root, &a.paths) {
-            rep.problems.push(format!("api {}: {e}", a.name));
+    let (stale, errs) = sync_bindings(root, cfg, false);
+    for f in stale {
+        rep.problems.push(format!("{f}: generated binding is missing or differs from its IDL (run `dashboard arch gen`)"));
+    }
+    rep.problems.extend(errs);
+    {
+        let (bs, _) = bindings(root, cfg);
+        for b in &bs {
+            let a = cfg.apis.iter().find(|a| a.name == b.name).unwrap();
+            let c = if a.max_constructors > 0 { format!("/{}", a.max_constructors) } else { String::new() };
+            let t = if a.max_types > 0 { format!("/{}", a.max_types) } else { String::new() };
+            rep.headroom.push(format!("api {}: constructors {}{c}, T slots {}{t}", b.name, b.idl.constructors(), b.idl.slots()));
         }
     }
     for m in &cfg.modules {
@@ -227,19 +379,23 @@ mod tests {
         name = "b"
         lang = "rust"
         paths = ["b"]
-        test_cmd = "test -e api/ab.rs"
+        test_cmd = "test -e api/ab.api.kdl"
         [[api]]
         name = "ab"
         generator = "a"
         consumer = "b"
-        paths = ["api/ab.rs"]
+        paths = ["api"]
     "#;
+
+    const IDL: &str = "api \"ab\"\ntype \"Id\" repr=\"string\"\nconstructor \"X\" \"Id\"\nconstructor \"Y\"\n";
 
     fn fixture() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "a/lib.rs", "pub fn f() -> u32 { 1 }");
         write(d.path(), "b/lib.rs", "pub fn g() {}");
-        write(d.path(), "api/ab.rs", "pub enum Ab { X }");
+        write(d.path(), "api/ab.api.kdl", IDL);
+        let cfg = arch_config_from_str(MANIFEST).unwrap();
+        sync_bindings(d.path(), &cfg, true);
         write(d.path(), "shared.txt", "");
         d
     }
@@ -274,6 +430,23 @@ mod tests {
         let m = MANIFEST.replace("test ! -e b/lib.rs", "test -e b/lib.rs");
         let rep = run(d.path(), &m);
         assert!(rep.problems.iter().any(|p| p.contains("module a: tests in its jail view")));
+    }
+
+    #[test]
+    fn api_budgets_drift_and_languages() {
+        let d = fixture();
+        let m = MANIFEST.replace("paths = [\"api\"]", "paths = [\"api\"]\n        max_constructors = 1\n        max_types = 1");
+        let all = run(d.path(), &m).problems.join("\n");
+        assert!(all.contains("constructors 2 exceeds budget 1"), "{all}");
+        assert!(!all.contains("T slots"), "{all}");
+        // Hand-editing a binding is drift.
+        write(d.path(), "api/gen/ab.rs", "pub enum Ab {}");
+        let all = run(d.path(), MANIFEST).problems.join("\n");
+        assert!(all.contains("api/gen/ab.rs: generated binding"), "{all}");
+        // A pair crossing languages gets wire code (and, for now, no TS generator).
+        let m = MANIFEST.replace("name = \"b\"\n        lang = \"rust\"", "name = \"b\"\n        lang = \"typescript\"");
+        let all = run(d.path(), &m).problems.join("\n");
+        assert!(all.contains("no typescript generator yet"), "{all}");
     }
 
     #[test]
