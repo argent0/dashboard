@@ -360,7 +360,8 @@ ignored — no `deny_unknown_fields` anywhere.
   `dashboard.home` in the worker workspace so `test` finds the home.
 - `dashboard arch check [--root DIR]` — reads `architecture.toml` (modules, APIs, budgets; `config::ArchConfig`)
   and fails on any budget overrun, a file in two modules, or a module whose `test_cmd` fails with only its own
-  files, its APIs' files and `shared` present. Prints headroom. Run it as an ordinary suite check; the player is
+  files, its APIs' files and `shared` present (plus symlinks to the checkout's `linked` build caches, if they exist;
+  `test_cmd` gets `DASHBOARD_MODULE`/`DASHBOARD_ROOT`). Prints headroom. Run it as an ordinary suite check; the player is
   not involved in the check itself. The player does: `architecture.toml` is a path the director may commit on
   `main` (validated on import: `ownership` if it doesn't parse), and the manifest plus every API path in it is
   pinned against workers (`records::pinned_files`, a `pins` strike; not for spikes). A task agent may write API

@@ -920,6 +920,9 @@ pub struct ArchConfig {
     pub max_modules: u64,
     /// Paths visible in every module's jail view (build files, lock files).
     pub shared: Vec<String>,
+    /// Build caches (`node_modules`, `target`) every view links to: symlinks
+    /// into the checkout, never copied and never counted toward a budget.
+    pub linked: Vec<String>,
     #[serde(rename = "module")]
     pub modules: Vec<ModuleConfig>,
     #[serde(rename = "api")]
@@ -1012,6 +1015,20 @@ impl ArchConfig {
             }
             if a.paths.is_empty() {
                 return Err(format!("[[api]] {}: no paths", a.name));
+            }
+        }
+        // A link must never expose another module's sources into a view.
+        let owned: Vec<&String> = self.modules.iter().flat_map(|m| &m.paths).chain(self.apis.iter().flat_map(|a| &a.paths)).collect();
+        for l in &self.linked {
+            let l = l.trim_end_matches('/');
+            if l.is_empty() || l.starts_with('/') || l.split('/').any(|c| c == ".." || c == ".") {
+                return Err(format!("linked {l:?}: must be a relative path without . or .."));
+            }
+            if let Some(p) = owned.iter().find(|p| {
+                let p = p.trim_end_matches('/');
+                path_under_test_paths(l, &[p.to_string()]) || path_under_test_paths(p, &[l.to_string()])
+            }) {
+                return Err(format!("linked {l:?}: overlaps module or API path {p:?}"));
             }
         }
         Ok(())

@@ -387,7 +387,8 @@ fn lint(
 }
 
 /// Copies only `m`'s files, its APIs' files and `shared` into a fresh
-/// directory under `scratch` and runs `cmd` there (jailed if the sandbox is on).
+/// directory under `scratch`, links each existing `linked` cache back into
+/// `root`, and runs `cmd` there (jailed if the sandbox is on).
 fn run_view(
     root: &Path,
     cfg: &ArchConfig,
@@ -408,7 +409,19 @@ fn run_view(
         std::fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
         std::fs::copy(root.join(&f), &to).map_err(|e| format!("{}: {e}", f.display()))?;
     }
-    let out = sandbox.command(cmd, &view).output().map_err(|e| e.to_string());
+    // A missing cache is skipped: the suite check's own `cmd` builds it first.
+    for l in &cfg.linked {
+        let Ok(target) = root.join(l).canonicalize() else { continue };
+        let to = view.join(l.trim_end_matches('/'));
+        std::fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(&target, &to).map_err(|e| format!("linked {l}: {e}"))?;
+    }
+    let out = sandbox
+        .command(cmd, &view)
+        .env("DASHBOARD_MODULE", &m.name)
+        .env("DASHBOARD_ROOT", root)
+        .output()
+        .map_err(|e| e.to_string());
     let _ = std::fs::remove_dir_all(&view);
     let out = out?;
     if out.status.success() {
@@ -538,7 +551,26 @@ mod tests {
     }
 
     #[test]
+    fn views_link_caches_and_get_module_env() {
+        let d = fixture();
+        write(d.path(), "cache/x.txt", "");
+        let m = MANIFEST
+            .replace("shared = [\"shared.txt\"]", "shared = [\"shared.txt\"]\n        linked = [\"cache\", \"absent\"]")
+            .replace("test ! -e b/lib.rs", "test -L cache && test -e cache/x.txt && test ! -e absent && test \\\"$DASHBOARD_MODULE\\\" = a");
+        let rep = run(d.path(), &m);
+        assert!(rep.pass(), "{:?}", rep.problems);
+        // Links are never copied into a budget.
+        assert!(rep.headroom[0].contains("bytes 23/1000"), "{:?}", rep.headroom);
+    }
+
+    #[test]
     fn rejects_bad_manifests() {
+        for (linked, err) in [("a", "overlaps"), ("a/sub", "overlaps"), (".", "relative"), ("../x", "relative"), ("/abs", "relative")] {
+            let m = MANIFEST.replace("shared = [\"shared.txt\"]", &format!("linked = [{linked:?}]"));
+            assert!(arch_config_from_str(&m).unwrap_err().contains(err), "{linked}");
+        }
+        let m = MANIFEST.replace("shared = [\"shared.txt\"]", "linked = [\"\"]");
+        assert!(arch_config_from_str(&m).unwrap_err().contains("relative"));
         let dup = format!("{MANIFEST}\n[[api]]\nname=\"x\"\ngenerator=\"a\"\nconsumer=\"b\"\npaths=[\"api\"]");
         assert!(arch_config_from_str(&dup).unwrap_err().contains("one API per connected pair"));
     }
