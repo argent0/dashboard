@@ -6,7 +6,7 @@ Third version. `architect.md` is the original; `architect-refined.md` is the sec
 
 - The director defines the modules. A module is a set of files.
 - Modules talk to each other only through APIs.
-- **Budgets:** total AST size and total byte size per module. Budgets are set per project. Units are deferred until there is an implementation.
+- **Budgets:** total AST size and total byte size per module, and a **total modules budget**: the maximum number of modules in the project. Budgets are set per project. Units are deferred until there is an implementation.
 
 ## APIs
 
@@ -68,6 +68,36 @@ Steps 2 and 3 depend only on the API from step 1, not on each other, so they can
   - The no-wildcard rule needs a per-language check (compiler or linter); which one is a project choice, not part of this design.
   - Rust: `clippy::wildcard_enum_match_arm` and `clippy::match_wildcard_for_single_variants` at deny.
 - Opaque `T`s are checked by the API check: each `T` is a wrapped newtype with no derive, no public inner field and no accessors, or another API's type.
+
+## Budget increase path
+
+Budgets exist to force a split, so a raise is the last resort and always an explicit, audited act.
+
+### Where budgets live
+In the pinned `architecture.toml` (its own file). A worker or task agent that edits it gets a `pins` strike. Only a director commit on `main` changes it; the player's ownership gate allows that one path, like `docs_paths`.
+
+### When work hits a budget
+The suite check fails (a worker finish is rejected with an `arch` budget reason). Neither the worker nor the task agent may touch the budget. In order, the options are:
+
+1. Refactor within the module.
+2. Split the module (the director adds a module to the manifest). This consumes the total modules budget.
+3. Insert an intermediary module, if the pressure is on an API. An API is fixed per (generator, consumer) pair, so it cannot be sharded; reduce it by changing the topology.
+4. Ask for a raise: a `block:` that escalates, with the measured overage in the reason.
+
+### The raise
+- **Every budget raise is discussed with the operator** before the director commits it. This covers module AST and byte budgets, API constructor and `T` budgets, and the total modules budget. The player does not check this (best effort): it is a rule of the director playbook, and the audit note below makes violations visible.
+- API budgets (constructors, `T`s) are the most sensitive: a constructor bounds the decision space of every consumer, so one raise grows the match arms of N modules. The raise discussion lists the affected consumers (the manifest knows them). The director never raises these on its own judgment.
+- The total modules budget is the project's complexity ceiling. Raise it only after trying to merge or remove modules.
+- The commit changes only budget fields in `architecture.toml`; mixing in any other edit is an `ownership` rejection.
+- It carries a required `raise:` reason, recorded by the player in `refs/notes/dashboard-budget-raises` (budget, old, new, reason, triggering task, at). `status` shows how many times each budget was raised.
+- A single raise is bounded by a step cap (at most +25% of the old value; for small counts, +1). A larger jump takes several visible raises.
+- `main` must stay green: a raise never lands together with work that depends on it going red.
+
+### Lowering and headroom
+Lowering a budget is always allowed. If it puts `main` over, the over-budget-`main` handling applies: work is held, not blamed, until a task fixes it. `dashboard arch` prints each budget's headroom, and flags budgets with long-unused headroom as candidates to tighten, so budgets do not drift upward.
+
+### Units
+Units stay deferred. The raise machinery only compares a number against its previous value, so it works with whatever units are chosen.
 
 ## Tests
 
