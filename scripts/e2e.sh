@@ -661,14 +661,14 @@ for t in gamma delta; do
 done
 
 # --------------------------------------------------------------------------
-# 7b. Task agents (spec §17): a roadmap commit on main turns them on; the
+# 7d. Task agents (spec §17): a roadmap commit on main turns them on; the
 #     player launches a fake task agent for the newly planned epsilon in
 #     its own tmux session; it posts (imported as the task agent's), the
 #     worker finishes, the task agent reports accept, the director accepts
 #     on it, and the task agent's session ends with the task.
 # --------------------------------------------------------------------------
 
-log "step 7b: a task agent posts and reviews epsilon"
+log "step 7d: a task agent posts and reviews epsilon"
 git -C "$DIR_REPO" checkout -q main
 git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" merge -q --ff-only hub/main
@@ -717,7 +717,7 @@ wait_until "task/epsilon accepted" task_status_is epsilon accepted
 wait_until "epsilon's task agent session ended" session_gone epsilon_agent
 
 # --------------------------------------------------------------------------
-# 7c. Module views link build caches: the director commits an
+# 7e. Module views link build caches: the director commits an
 #     architecture.toml with `linked = ["cache"]`; zeta's post adds a suite
 #     check that builds cache/ and runs `dashboard arch check` (in the jail),
 #     whose module test_cmd only passes if its view links the cache and has
@@ -725,7 +725,7 @@ wait_until "epsilon's task agent session ended" session_gone epsilon_agent
 #     worker writes it, accepted.
 # --------------------------------------------------------------------------
 
-log "step 7c: arch check views link a build cache (zeta)"
+log "step 7e: arch check views link a build cache (zeta)"
 git -C "$DIR_REPO" checkout -q main
 git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" merge -q --ff-only hub/main
@@ -780,6 +780,8 @@ fi
 
 log "step 8: a non-doc commit on main is rejected"
 git -C "$DIR_REPO" checkout -q main
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/main
 echo "not a doc" >"$DIR_REPO/random.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "oops: accidental non-doc commit on main"
@@ -787,6 +789,7 @@ tick
 
 wait_out=$(dash wait --timeout 5)
 assert_contains "$wait_out" "director_rejected" "dashboard wait output"
+assert_contains "$wait_out" "ownership" "dashboard wait output"
 
 # --------------------------------------------------------------------------
 # Final report
