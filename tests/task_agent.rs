@@ -1289,3 +1289,24 @@ fn a_worker_push_while_contested_is_ignored_not_struck() {
     assert_eq!(hub.rev_parse("refs/heads/task/s").unwrap(), tip);
     assert_eq!(task(&hub, "s").status, Status::Contested);
 }
+
+#[test]
+fn a_task_agent_may_commit_api_files_but_never_the_manifest() {
+    for (target, ownership) in [("api/ab.rs", false), ("architecture.toml", true)] {
+        let repo = repo_with_task_agents();
+        write_file(
+            repo.path(),
+            "architecture.toml",
+            "[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n[[module]]\nname = \"b\"\nlang = \"rust\"\npaths = [\"b\"]\n[[api]]\nname = \"ab\"\ngenerator = \"a\"\nconsumer = \"b\"\npaths = [\"api\"]\n",
+        );
+        commit(repo.path(), "add architecture");
+        let (_home_dir, home) = init_hub(&repo);
+        let mut player = open_player(&home);
+        plan(&repo, &mut player);
+        agent_post(&repo);
+        agent_commit(&repo, &[(target, "changed\n")], "touch the architecture");
+        let report = player.tick().expect("tick");
+        let rejected = report.rejected.iter().any(|r| r.reason == Reason::Ownership);
+        assert_eq!(rejected, ownership, "{target}: {report}");
+    }
+}

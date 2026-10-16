@@ -357,7 +357,10 @@ ignored — no `deny_unknown_fields` anywhere.
 - `dashboard arch check [--root DIR]` — reads `architecture.toml` (modules, APIs, budgets; `config::ArchConfig`)
   and fails on any budget overrun, a file in two modules, or a module whose `test_cmd` fails with only its own
   files, its APIs' files and `shared` present. Prints headroom. Run it as an ordinary suite check; the player is
-  not involved yet (pins, director allowance and raise validation are later steps).
+  not involved in the check itself. The player does: `architecture.toml` is a path the director may commit on
+  `main` (validated on import: `ownership` if it doesn't parse), and the manifest plus every API path in it is
+  pinned against workers (`records::pinned_files`, a `pins` strike; not for spikes). A task agent may write API
+  paths (read at the tip) but never the manifest (`agent_paths_ok`). Raise validation is a later step.
 - `dashboard wait [--timeout SECS] [--all]` — the director's blocking
   listener (see Decisions). Prints every event past the director's cursor,
   advances it, and exits; `--timeout` exits 2 after N idle seconds; `--all`

@@ -736,3 +736,34 @@ fn player_once_via_binary_prints_a_report() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("no changes"), "unexpected stdout: {stdout}");
 }
+
+#[test]
+fn main_commit_of_architecture_toml_is_imported_and_a_bad_one_rejected() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    write_file(
+        repo.path(),
+        "architecture.toml",
+        "max_modules = 2\n[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n",
+    );
+    commit(repo.path(), "add architecture");
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.imported.len(), 1, "{report}");
+    let good = repo.git().rev_parse("HEAD").unwrap();
+    assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(good.as_str()));
+
+    // An unparsable manifest (unknown module in an API) is an ownership rejection.
+    write_file(
+        repo.path(),
+        "architecture.toml",
+        "[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n[[api]]\nname = \"x\"\ngenerator = \"a\"\nconsumer = \"nope\"\npaths = [\"api\"]\n",
+    );
+    commit(repo.path(), "break architecture");
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Ownership);
+    assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(good.as_str()));
+}

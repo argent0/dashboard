@@ -1655,7 +1655,7 @@ impl<S: Sessions> Player<S> {
                 return Err((
                     Reason::Ownership,
                     format!(
-                        "ownership: main commit touches {path:?}, which is neither roadmap.toml, prompts.kdl nor a docs_paths entry"
+                        "ownership: main commit touches {path:?}, which is neither roadmap.toml, prompts.kdl, architecture.toml nor a docs_paths entry"
                     ),
                 ));
             }
@@ -1679,6 +1679,10 @@ impl<S: Sessions> Player<S> {
                     "ownership: roadmap.toml missing".to_string(),
                 ));
             }
+        }
+        if let Some(text) = self.hub.show_file(candidate, config::ARCH_FILE) {
+            config::arch_config_from_str(&text)
+                .map_err(|e| (Reason::Ownership, format!("ownership: {}: {e}", config::ARCH_FILE)))?;
         }
         match self.hub.show_file(candidate, prompts::FILE) {
             Some(text) => {
@@ -5150,9 +5154,16 @@ impl<S: Sessions> Player<S> {
             .roadmap_at(tip)
             .map(|r| r.player.lock_files)
             .unwrap_or_default();
+        // API files (read at `tip`, so a commit can't widen them for itself):
+        // an API change is the failing-at-post step of an inter-module change.
+        // The manifest itself stays the director's.
+        let api_paths = records::arch_at(&self.hub, tip)
+            .map(|a| a.api_paths())
+            .unwrap_or_default();
         let task_prefix = format!("tasks/{slug}/");
         for (_, path) in diffs {
             if !(path == "tests.toml"
+                || path_under_test_paths(path, &api_paths)
                 || config::is_suite_fragment(path)
                 || path.starts_with(&task_prefix)
                 || lock_files.contains(path)
@@ -5791,7 +5802,7 @@ fn valid_slug(s: &str) -> bool {
 /// `path` is allowed on a director `main` commit: exactly `roadmap.toml`, or
 /// under a `docs_paths` entry (an exact file match, or a directory prefix).
 fn path_allowed(path: &str, docs_paths: &[String]) -> bool {
-    if path == "roadmap.toml" || path == prompts::FILE {
+    if path == "roadmap.toml" || path == prompts::FILE || path == config::ARCH_FILE {
         return true;
     }
     docs_paths.iter().any(|d| {

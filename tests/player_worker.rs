@@ -1188,3 +1188,26 @@ fn tmux_smoke_test() {
         "session should be gone after kill"
     );
 }
+
+#[test]
+fn finish_touching_an_api_file_or_the_manifest_is_rejected_with_pins() {
+    for target in ["api/ab.rs", "architecture.toml"] {
+        let repo = director_repo();
+        write_file(
+            repo.path(),
+            "architecture.toml",
+            "[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n[[module]]\nname = \"b\"\nlang = \"rust\"\npaths = [\"b\"]\n[[api]]\nname = \"ab\"\ngenerator = \"a\"\nconsumer = \"b\"\npaths = [\"api\"]\n",
+        );
+        write_file(repo.path(), "api/ab.rs", "pub enum Ab { X }\n");
+        commit(repo.path(), "add architecture");
+        let (_home_dir, home) = init_hub(&repo);
+        let mut player = open_player(&home);
+
+        plan_and_post(&repo, &mut player, "y");
+        commit_in_clone(&repo, "y", target, "changed\n", "touch the architecture");
+
+        let report = player.tick().expect("tick should succeed");
+        assert_eq!(report.rejected.len(), 1, "{target}: {report}");
+        assert_eq!(report.rejected[0].reason, Reason::Pins, "{target}");
+    }
+}

@@ -890,6 +890,17 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     }
     add_pinned_path(hub, &commit, &format!("tasks/{slug}/"), &mut map);
 
+    // The architecture (architect-v3.md): the manifest and every API file are
+    // the director's and task agent's, never a worker's. A spike never merges.
+    if !is_spike_at(hub, &commit, slug) {
+        add_pinned_path(hub, &commit, config::ARCH_FILE, &mut map);
+        if let Some(arch) = arch_at(hub, &commit) {
+            for api in arch.api_paths() {
+                add_pinned_path(hub, &commit, &api, &mut map);
+            }
+        }
+    }
+
     // A flaky-test-fix unpins exactly its `fix_paths` (plain files): the
     // worker replaces the flaky test there. Everything else stays pinned.
     if let Some(cfg) =
@@ -901,6 +912,12 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     }
 
     Some(map)
+}
+
+/// `architecture.toml` at `commit`, if it exists and parses.
+pub fn arch_at(hub: &Git, commit: &str) -> Option<config::ArchConfig> {
+    hub.show_file(commit, config::ARCH_FILE)
+        .and_then(|text| config::arch_config_from_str(&text).ok())
 }
 
 /// `tasks/<slug>/task.toml` at `commit`, if it exists and parses.

@@ -954,7 +954,15 @@ pub struct ApiConfig {
     pub max_types: u64,
 }
 
+/// The manifest's file name on `main`.
+pub const ARCH_FILE: &str = "architecture.toml";
+
 impl ArchConfig {
+    /// Every path an API is made of, as written in the manifest.
+    pub fn api_paths(&self) -> Vec<String> {
+        self.apis.iter().flat_map(|a| a.paths.iter().cloned()).collect()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), String> {
         let mut names = std::collections::BTreeSet::new();
         for m in &self.modules {
