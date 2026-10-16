@@ -197,6 +197,7 @@ pub fn bindings(root: &Path, cfg: &ArchConfig) -> (Vec<ApiBindings>, Vec<String>
             let (ext, text) = match lang {
                 "rust" => ("rs", idl.rust(is_wire(a))),
                 "typescript" => ("ts", idl.typescript(is_wire(a))),
+                "kotlin" => ("kt", idl.kotlin(is_wire(a))),
                 _ => {
                     errs.push(format!("{who}: no {lang} generator yet"));
                     continue;
@@ -206,7 +207,11 @@ pub fn bindings(root: &Path, cfg: &ArchConfig) -> (Vec<ApiBindings>, Vec<String>
                 .parent()
                 .unwrap_or(Path::new(""))
                 .join("gen")
-                .join(format!("{}.{ext}", a.name.replace('-', "_")));
+                .join(if lang == "kotlin" {
+                    format!("{}.kt", crate::idl::pascal(&a.name))
+                } else {
+                    format!("{}.{ext}", a.name.replace('-', "_"))
+                });
             if !a.paths.iter().any(|p| path_under_test_paths(&file.to_string_lossy(), std::slice::from_ref(p))) {
                 errs.push(format!("{who}: {} is not under the api's paths, so it would not be pinned", file.display()));
             }
@@ -447,10 +452,14 @@ mod tests {
         write(d.path(), "api/gen/ab.rs", "pub enum Ab {}");
         let all = run(d.path(), MANIFEST).problems.join("\n");
         assert!(all.contains("api/gen/ab.rs: generated binding"), "{all}");
-        // A pair crossing languages gets wire code (and, for now, no Kotlin generator).
+        // A pair crossing languages gets a binding per language, with wire code.
         let m = MANIFEST.replace("name = \"b\"\n        lang = \"rust\"", "name = \"b\"\n        lang = \"kotlin\"");
-        let all = run(d.path(), &m).problems.join("\n");
-        assert!(all.contains("no kotlin generator yet"), "{all}");
+        let cfg = arch_config_from_str(&m).unwrap();
+        let (bs, errs) = bindings(d.path(), &cfg);
+        assert!(errs.is_empty(), "{errs:?}");
+        let names: Vec<String> = bs[0].files.iter().map(|(p, _)| p.display().to_string()).collect();
+        assert_eq!(names, ["api/gen/ab.rs", "api/gen/Ab.kt"]);
+        assert!(bs[0].files.iter().all(|(_, t)| t.contains("fromJson") || t.contains("from_json")));
     }
 
     #[test]

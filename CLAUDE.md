@@ -372,7 +372,11 @@ ignored — no `deny_unknown_fields` anywhere.
   for a pair whose two modules differ in `lang`, and such an API may ref only other cross-language APIs. Rust
   (`gen/<api>.rs`) and TypeScript (`gen/<api>.ts`: ES2022 `#private` class fields, a `kind`-tagged union, i64 as
   `bigint`, refs as extensionless `./<api>` imports) generators exist; any other language is reported as "no <lang>
-  generator yet" (Kotlin next).
+  generator yet". Kotlin (`gen/<Api>.kt`): package `api.<name>`, a `sealed interface`, plain classes
+  (not `data`/`value`, so no value equality) with a private `v`, and a file-private JSON codec (no dependency).
+  Each generator's output was compiled and round-tripped against the others' JSON by hand (cargo, deno, kotlinc).
+  The wire code's `to_value`/`toValue` read a `T`'s inner value, so it exists only on cross-language APIs; the
+  adapters (step 4) should ban calling it outside the generated file.
 - `dashboard wait [--timeout SECS] [--all]` — the director's blocking
   listener (see Decisions). Prints every event past the director's cursor,
   advances it, and exits; `--timeout` exits 2 after N idle seconds; `--all`
