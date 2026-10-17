@@ -920,10 +920,12 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     }
     add_pinned_path(hub, &commit, &format!("tasks/{slug}/"), &mut map);
 
-    // The architecture (architect-v3.md): the manifest and every API file are
-    // the director's and task agent's, never a worker's. A spike never merges.
+    // The architecture (architect-v3.md): the manifest (TOML, or the whole
+    // Lean package) and every API file are the director's and task agent's,
+    // never a worker's. A spike never merges.
     if !is_spike_at(hub, &commit, slug) {
         add_pinned_path(hub, &commit, config::ARCH_FILE, &mut map);
+        add_pinned_path(hub, &commit, &format!("{}/", config::ARCH_DIR), &mut map);
         if let Some(arch) = arch_at(hub, &commit) {
             for api in arch.api_paths() {
                 add_pinned_path(hub, &commit, &api, &mut map);
@@ -944,10 +946,51 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     Some(map)
 }
 
-/// `architecture.toml` at `commit`, if it exists and parses.
+/// The architecture at `commit`, if there is one and it parses: the TOML
+/// manifest, or the Lean package's export cached by the player
+/// (`arch_source_at`; nothing is run here).
 pub fn arch_at(hub: &Git, commit: &str) -> Option<config::ArchConfig> {
-    hub.show_file(commit, config::ARCH_FILE)
-        .and_then(|text| config::arch_config_from_str(&text).ok())
+    arch_source_at(hub, commit, None).ok().flatten().map(|s| s.cfg)
+}
+
+/// The notes ref caching a Lean package's export by its tree id.
+pub const ARCH_NOTES: &str = "refs/notes/dashboard-arch";
+
+/// The architecture at `commit` as the raise judge sees it: `Ok(None)` when
+/// the commit has none, `Err` when it has one that doesn't load. A Lean
+/// package is exported by `export` (given the package's tree id and a
+/// directory to run in) unless its export is already noted on that tree;
+/// with no exporter only the note is consulted.
+pub fn arch_source_at(
+    hub: &Git,
+    commit: &str,
+    export: Option<&dyn Fn(&str) -> Result<crate::lean::Exported, String>>,
+) -> Result<Option<crate::raise::Source>, String> {
+    let toml = hub.show_file(commit, config::ARCH_FILE);
+    let tree = hub.rev_parse(&format!("{commit}:{}", config::ARCH_DIR));
+    let lean = tree.is_some() && hub.show_file(commit, config::ARCH_LEAN_MANIFEST).is_some();
+    match (toml, lean) {
+        (Some(_), true) => Err(format!(
+            "both {} and {} exist: a project has one architecture",
+            config::ARCH_FILE,
+            config::ARCH_LEAN_MANIFEST
+        )),
+        (Some(text), false) => crate::raise::Source::from_toml(&text).map(Some).map_err(|e| format!("{}: {e}", config::ARCH_FILE)),
+        (None, true) => {
+            let tree = tree.unwrap();
+            if let Some(note) = hub.notes_show(ARCH_NOTES, &tree) {
+                let e = crate::lean::parse(&note)?;
+                return Ok(Some(crate::raise::Source::from_export(&e)));
+            }
+            let Some(export) = export else {
+                return Err(format!("{}: not exported yet (the player exports it on import)", config::ARCH_DIR));
+            };
+            let e = export(&tree)?;
+            let _ = hub.notes_add(ARCH_NOTES, &tree, &(e.json.to_string() + "\n"));
+            Ok(Some(crate::raise::Source::from_export(&e)))
+        }
+        (None, false) => Ok(None),
+    }
 }
 
 /// `tasks/<slug>/task.toml` at `commit`, if it exists and parses.

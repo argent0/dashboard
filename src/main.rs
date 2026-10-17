@@ -45,22 +45,32 @@ struct Args {
 
 #[derive(Subcommand)]
 enum ArchAction {
-    /// Check the checkout in --root against `architecture.toml`: total
-    /// modules, each module's byte and AST budgets, file ownership, and each
-    /// module's tests in its jail view. Prints every budget's headroom; exit 1
-    /// on any violation.
+    /// Check the checkout in --root against its architecture (the Lean
+    /// package `architecture/`, or `architecture.toml`): total modules and
+    /// roots, each one's byte and AST budgets, file ownership, every API's
+    /// budgets and bindings, and each module's tests in its jail view, in
+    /// generator-first order. Prints every budget's headroom; exit 1 on any
+    /// violation.
     Check {
         /// The checkout (default: the current directory).
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
-    /// Regenerate every API's bindings from its IDL (`*.api.kdl`). With
-    /// --check, write nothing and exit 1 if any binding is stale.
+    /// Regenerate every API's bindings from its IDL, and for a Lean
+    /// architecture the vendored `architecture/Dashboard.lean` library. With
+    /// --check, write nothing and exit 1 if anything is stale.
     Gen {
         #[arg(long, default_value = ".")]
         root: PathBuf,
         #[arg(long)]
         check: bool,
+    },
+    /// Write the Lean package `architecture/` from `architecture.toml` and
+    /// the `*.api.kdl` files (comments are not carried over). Refuses if the
+    /// package exists. Remove the TOML and KDL files once it checks.
+    Migrate {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
     },
 }
 
@@ -169,6 +179,7 @@ fn main() {
         Some(Command::Test { no_wait, timeout }) => run_test(args.home, no_wait, timeout),
         Some(Command::Arch { action: ArchAction::Check { root } }) => run_arch_check(&root),
         Some(Command::Arch { action: ArchAction::Gen { root, check } }) => run_arch_gen(&root, check),
+        Some(Command::Arch { action: ArchAction::Migrate { root } }) => run_arch_migrate(&root),
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
     }
 }
@@ -706,30 +717,24 @@ fn run_wait(home: Option<PathBuf>, timeout: Option<u64>, all: bool) {
 }
 
 fn run_arch_check(root: &std::path::Path) {
-    let manifest = match std::fs::read_to_string(root.join("architecture.toml")) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("dashboard: architecture.toml: {e}");
-            std::process::exit(1);
-        }
-    };
-    let cfg = match config::arch_config_from_str(&manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("dashboard: architecture.toml: {e}");
-            std::process::exit(1);
-        }
-    };
+    let loaded = load_arch(root);
+    let cfg = &loaded.cfg;
     // The suite already jails this check; views run plain inside it.
     let scratch = std::env::temp_dir();
-    let rep = dashboard::arch::check(root, &cfg, &dashboard::sandbox::Sandbox::off(), &scratch);
+    let rep = dashboard::arch::check(root, &loaded, &dashboard::sandbox::Sandbox::off(), &scratch);
     println!(
         "modules {}{}",
         cfg.modules.len(),
         if cfg.max_modules > 0 { format!("/{}", cfg.max_modules) } else { String::new() }
     );
+    if !cfg.roots.is_empty() || cfg.max_roots > 0 {
+        println!("roots {}{}", cfg.roots.len(), if cfg.max_roots > 0 { format!("/{}", cfg.max_roots) } else { String::new() });
+    }
     for h in &rep.headroom {
         println!("{h}");
+    }
+    if !rep.order.is_empty() {
+        println!("test order: {}", rep.order.join(", "));
     }
     for p in &rep.problems {
         eprintln!("FAIL {p}");
@@ -740,21 +745,63 @@ fn run_arch_check(root: &std::path::Path) {
     println!("architecture ok");
 }
 
-fn load_arch(root: &std::path::Path) -> config::ArchConfig {
-    match std::fs::read_to_string(root.join("architecture.toml"))
-        .map_err(|e| e.to_string())
-        .and_then(|t| config::arch_config_from_str(&t))
-    {
+fn load_arch(root: &std::path::Path) -> dashboard::arch::Loaded {
+    match dashboard::arch::load(root) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("dashboard: architecture.toml: {e}");
+            eprintln!("dashboard: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_arch_migrate(root: &std::path::Path) {
+    if dashboard::lean::present(root) {
+        eprintln!("dashboard: {} exists already", config::ARCH_LEAN_MANIFEST);
+        std::process::exit(1);
+    }
+    let loaded = load_arch(root);
+    if !loaded.errors.is_empty() {
+        for e in &loaded.errors {
+            eprintln!("FAIL {e}");
+        }
+        std::process::exit(1);
+    }
+    match dashboard::lean::migrate(root, &loaded.cfg, &loaded.idls) {
+        Ok(wrote) => {
+            for f in wrote {
+                println!("wrote {f}");
+            }
+            println!(
+                "now remove {} and every *.api.kdl, give every string and bytes type a max_len (`string 64`), \
+                 then run `dashboard arch gen` and `dashboard arch check`",
+                config::ARCH_FILE
+            );
+        }
+        Err(e) => {
+            eprintln!("dashboard: {e}");
             std::process::exit(1);
         }
     }
 }
 
 fn run_arch_gen(root: &std::path::Path, check: bool) {
+    // The vendored library first: a Lean package can't be loaded through a
+    // stale copy of it.
+    let mut vendored = Vec::new();
+    if !check && dashboard::lean::present(root) {
+        match dashboard::lean::write_vendored(root) {
+            Ok(w) => vendored = w,
+            Err(e) => {
+                eprintln!("dashboard: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let cfg = load_arch(root);
+    for f in &vendored {
+        println!("wrote {f}");
+    }
     let (changed, errs) = dashboard::arch::sync_bindings(root, &cfg, !check);
     for f in &changed {
         println!("{} {f}", if check { "stale" } else { "wrote" });

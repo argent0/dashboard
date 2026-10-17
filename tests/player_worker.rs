@@ -1191,13 +1191,17 @@ fn tmux_smoke_test() {
 
 #[test]
 fn finish_touching_an_api_file_or_the_manifest_is_rejected_with_pins() {
-    for target in ["api/ab.rs", "architecture.toml"] {
+    for target in ["api/ab.rs", "architecture.toml", "architecture/Apis/ab.lean", "architecture/Architecture.lean"] {
         let repo = director_repo();
-        write_file(
-            repo.path(),
-            "architecture.toml",
-            "[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n[[module]]\nname = \"b\"\nlang = \"rust\"\npaths = [\"b\"]\n[[api]]\nname = \"ab\"\ngenerator = \"a\"\nconsumer = \"b\"\npaths = [\"api\"]\n",
-        );
+        if target.starts_with("architecture/") {
+            write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)]);
+        } else {
+            write_file(
+                repo.path(),
+                "architecture.toml",
+                "[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n[[module]]\nname = \"b\"\nlang = \"rust\"\npaths = [\"b\"]\n[[api]]\nname = \"ab\"\ngenerator = \"a\"\nconsumer = \"b\"\npaths = [\"api\"]\n",
+            );
+        }
         write_file(repo.path(), "api/ab.rs", "pub enum Ab { X }\n");
         commit(repo.path(), "add architecture");
         let (_home_dir, home) = init_hub(&repo);

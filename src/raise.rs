@@ -1,13 +1,16 @@
 // Budget raises (architect-v3.md, "Budget increase path"): a director commit
-// on `main` that increases a budget in `architecture.toml`. It must change
-// nothing but budget fields (and no other file), carry a `raise: <reason>`
-// (or `raise(<slug>): <reason>`, naming the task that hit the budget), and
-// stay within the step cap. Lowering, turning a budget on, and any edit that
+// on `main` that increases a budget in the architecture (`architecture.toml`,
+// or the Lean package under `architecture/`). It must change nothing but
+// budget fields (and no other file), carry a `raise: <reason>` (or
+// `raise(<slug>): <reason>`, naming the task that hit the budget), and stay
+// within the step cap. Lowering, turning a budget on, and any edit that
 // raises nothing need none of that. Pure: the player (`validate_main_commit`)
-// feeds it the two manifests and the commit message, and notes what it returns.
+// feeds it the two architectures and the commit message, and notes what it
+// returns.
 
 use crate::config::{self, ArchConfig};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// One raised budget.
@@ -25,19 +28,75 @@ pub struct Raise {
     pub at: u64,
 }
 
+/// An architecture as the raise judge sees it: the parsed manifest and the
+/// document it came from (the TOML as JSON, or the Lean export), for the
+/// "only budgets changed" comparison.
+#[derive(Debug, Clone)]
+pub struct Source {
+    pub cfg: ArchConfig,
+    pub doc: Value,
+    /// Lean: the commit's files must all be under `architecture/`; TOML:
+    /// only `architecture.toml`.
+    pub lean: bool,
+}
+
+impl Source {
+    /// From `architecture.toml` text.
+    pub fn from_toml(text: &str) -> Result<Source, String> {
+        let cfg = config::arch_config_from_str(text)?;
+        let table: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
+        let doc = serde_json::to_value(table).map_err(|e| e.to_string())?;
+        Ok(Source { cfg, doc, lean: false })
+    }
+
+    /// From a Lean export.
+    pub fn from_export(e: &crate::lean::Exported) -> Source {
+        Source { cfg: e.arch.clone(), doc: e.json.clone(), lean: true }
+    }
+}
+
+const MODULE_BUDGETS: [&str; 2] = ["max_ast", "max_bytes"];
+const API_BUDGETS: [&str; 10] = [
+    "max_constructors",
+    "max_types",
+    "max_elements",
+    "max_fields",
+    "max_fns",
+    "max_inputs",
+    "max_string_len",
+    "max_bytes_len",
+    "max_rules",
+    "max_tokens",
+];
+
 /// Every budget in `cfg`, by display name. 0 means off.
 pub fn budgets(cfg: &ArchConfig) -> BTreeMap<String, u64> {
     let mut out = BTreeMap::new();
     out.insert("max_modules".to_string(), cfg.max_modules);
+    out.insert("max_roots".to_string(), cfg.max_roots);
     for m in &cfg.modules {
         out.insert(format!("module {} max_ast", m.name), m.max_ast);
         out.insert(format!("module {} max_bytes", m.name), m.max_bytes);
     }
+    for r in &cfg.roots {
+        out.insert(format!("root {} max_ast", r.name), r.max_ast);
+        out.insert(format!("root {} max_bytes", r.name), r.max_bytes);
+    }
     for a in &cfg.apis {
-        out.insert(format!("api {} max_constructors", a.name), a.max_constructors);
-        out.insert(format!("api {} max_types", a.name), a.max_types);
-        out.insert(format!("api {} max_elements", a.name), a.max_elements);
-        out.insert(format!("api {} max_fields", a.name), a.max_fields);
+        for (k, v) in [
+            ("max_constructors", a.max_constructors),
+            ("max_types", a.max_types),
+            ("max_elements", a.max_elements),
+            ("max_fields", a.max_fields),
+            ("max_fns", a.max_fns),
+            ("max_inputs", a.max_inputs),
+            ("max_string_len", a.max_string_len),
+            ("max_bytes_len", a.max_bytes_len),
+            ("max_rules", a.max_rules),
+            ("max_tokens", a.max_tokens),
+        ] {
+            out.insert(format!("api {} {k}", a.name), v);
+        }
     }
     out
 }
@@ -62,25 +121,30 @@ pub fn raised(old: &ArchConfig, new: &ArchConfig) -> Vec<(String, u64, u64)> {
         .collect()
 }
 
-/// `manifest` with every budget field removed, to compare what else changed.
-fn without_budgets(text: &str) -> Result<toml::Table, String> {
-    let mut t: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
-    t.remove("max_modules");
-    for (key, fields) in [
-        ("module", &["max_ast", "max_bytes"][..]),
-        ("api", &["max_constructors", "max_types", "max_elements", "max_fields"][..]),
-    ] {
-        if let Some(toml::Value::Array(items)) = t.get_mut(key) {
-            for item in items {
-                if let toml::Value::Table(tab) = item {
-                    for f in fields {
-                        tab.remove(*f);
+/// `doc` with every budget field removed, to compare what else changed.
+/// Works on a TOML table as JSON and on a Lean export (`{"arch": ...}`).
+fn without_budgets(doc: &Value) -> Value {
+    let mut v = doc.clone();
+    let arch = match v.get_mut("arch") {
+        Some(a) => a,
+        None => &mut v,
+    };
+    if let Some(obj) = arch.as_object_mut() {
+        obj.remove("max_modules");
+        obj.remove("max_roots");
+        for (key, fields) in [("module", &MODULE_BUDGETS[..]), ("root", &MODULE_BUDGETS[..]), ("api", &API_BUDGETS[..])] {
+            if let Some(Value::Array(items)) = obj.get_mut(key) {
+                for item in items {
+                    if let Some(tab) = item.as_object_mut() {
+                        for f in fields {
+                            tab.remove(*f);
+                        }
                     }
                 }
             }
         }
     }
-    Ok(t)
+    v
 }
 
 /// `raise: why` / `raise(slug): why` in a commit message: `(task, reason)`.
@@ -98,24 +162,21 @@ pub fn parse_reason(subject: &str, body: &str) -> Option<(Option<String>, String
     (!reason.is_empty()).then_some((task, reason))
 }
 
-/// Judges a main commit that changes `architecture.toml` from `old` to `new`
+/// Judges a main commit that changes the architecture from `old` to `new`
 /// (`None`: absent), touching `files`. `Ok` holds the raises to record
 /// (empty when it raises nothing); `Err` is the `ownership` rejection text.
 pub fn judge(
-    old: Option<&str>,
-    new: &str,
+    old: Option<&Source>,
+    new: &Source,
     subject: &str,
     body: &str,
     files: &[String],
     at: u64,
 ) -> Result<Vec<Raise>, String> {
-    let (Some(old_text), Ok(new_cfg)) = (old, config::arch_config_from_str(new)) else {
+    let Some(old) = old else {
         return Ok(Vec::new());
     };
-    let Ok(old_cfg) = config::arch_config_from_str(old_text) else {
-        return Ok(Vec::new());
-    };
-    let ups = raised(&old_cfg, &new_cfg);
+    let ups = raised(&old.cfg, &new.cfg);
     if ups.is_empty() {
         return Ok(Vec::new());
     }
@@ -126,16 +187,14 @@ pub fn judge(
             names.join(", ")
         )
     })?;
-    if let Some(other) = files.iter().find(|f| *f != config::ARCH_FILE) {
-        return Err(format!(
-            "ownership: a budget raise changes only {}, not {other:?}",
-            config::ARCH_FILE
-        ));
+    let what = if new.lean { config::ARCH_DIR.to_string() + "/" } else { config::ARCH_FILE.to_string() };
+    let allowed = |f: &str| if new.lean { f.starts_with("architecture/") } else { f == config::ARCH_FILE };
+    if let Some(other) = files.iter().find(|f| !allowed(f)) {
+        return Err(format!("ownership: a budget raise changes only {what}, not {other:?}"));
     }
-    if without_budgets(old_text)? != without_budgets(new)? {
+    if without_budgets(&old.doc) != without_budgets(&new.doc) {
         return Err(format!(
-            "ownership: a budget raise changes only budget fields in {}; make the other edits in their own commit",
-            config::ARCH_FILE
+            "ownership: a budget raise changes only budget fields in {what}; make the other edits in their own commit"
         ));
     }
     let mut out = Vec::new();
@@ -164,7 +223,8 @@ mod tests {
     }
 
     fn go(new: &str, subject: &str, f: &[&str]) -> Result<Vec<Raise>, String> {
-        judge(Some(OLD), new, subject, "", &files(f), 7)
+        let old = Source::from_toml(OLD).unwrap();
+        judge(Some(&old), &Source::from_toml(new).unwrap(), subject, "", &files(f), 7)
     }
 
     #[test]
@@ -198,6 +258,27 @@ mod tests {
         assert!(go(&off, "raise: x", ARCH).unwrap_err().contains("-> off"));
         let small = OLD.replace("max_constructors = 3", "max_constructors = 5");
         assert!(go(&small, "raise: x", ARCH).unwrap_err().contains("step cap (4"));
+    }
+
+    #[test]
+    fn a_lean_raise_is_judged_on_the_export() {
+        let doc = |max_ast: u64, extra: &str| {
+            let text = format!(
+                r#"{{"arch": {{"max_modules": 4, "module": [{{"name": "a", "lang": "rust", "paths": ["a"{extra}], "max_ast": {max_ast}}}]}},
+                    "idls": {{}}, "errors": []}}"#
+            );
+            Source::from_export(&crate::lean::parse(&text).unwrap())
+        };
+        let old = doc(100, "");
+        let arch = |f: &[&str]| files(f);
+        let r = judge(Some(&old), &doc(120, ""), "raise: grew", "", &arch(&["architecture/Architecture.lean"]), 1).unwrap();
+        assert_eq!((r[0].budget.as_str(), r[0].old, r[0].new), ("module a max_ast", 100, 120));
+        let e = judge(Some(&old), &doc(120, ""), "raise: grew", "", &arch(&["architecture/Architecture.lean", "src/x.rs"]), 1).unwrap_err();
+        assert!(e.contains("only architecture/, not \"src/x.rs\""), "{e}");
+        let e = judge(Some(&old), &doc(120, r#", "a2""#), "raise: grew", "", &arch(&["architecture/Architecture.lean"]), 1).unwrap_err();
+        assert!(e.contains("only budget fields in architecture/"), "{e}");
+        // A comment-only edit beside the raise is fine: the export is unchanged.
+        assert!(judge(Some(&old), &doc(120, ""), "raise: grew", "", &arch(&["architecture/Apis/ab.lean", "architecture/Architecture.lean"]), 1).is_ok());
     }
 
     #[test]

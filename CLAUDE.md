@@ -26,12 +26,19 @@ src/git.rs      thin sync wrapper over the `git` CLI (rev-parse, diff, notes, me
 src/paths.rs    XDG home layout and `--home` / `dashboard.home` resolution
 src/init.rs     `dashboard init`: creates the hub and wires up the director <-> hub links
 src/queue.rs    queued runs: `dashboard test` snapshot + request files, results
-src/idl.rs      the API IDL (`<name>.api.kdl`, KDL): parse/validate, constructor and T-slot counts, elements/containers/
-                class instances, Rust/TypeScript/Kotlin binding generators (class traits and law tests: Rust)
+src/idl.rs      the API IDL: parse/validate (KDL `<name>.api.kdl`, or the Lean export's JSON via serde), constructor,
+                T-slot, fn and input counts, string/bytes bounds, elements/containers/class instances, named sums
+                and fns, `where` refinements (the `Pred` AST: rule text and the check in each language), products,
+                tokens, Rust/TypeScript/Kotlin binding generators (class traits and law tests: Rust), a Lean printer
+src/lean.rs     the Lean architecture (handover §0): vendors `src/lean/Dashboard.lean` (the DSL) and
+                `src/lean/Export.lean` (the exporter) into a project's `architecture/` Lake package, runs
+                `lake build && lake env lean` on a generated runner, parses the JSON into `ArchConfig` + `Idl`s;
+                `migrate` writes the package from a TOML manifest and its KDLs
 src/raise.rs    budget raises (architect-v3.md): fields-only, `raise:` reason, step cap (pure)
 src/lint.rs     consumer-contract lints (tree-sitter): wildcard arms over an API's sum type or its elements, wire-helper leaks
-src/arch.rs     `dashboard arch check` (architect-v3.md): modules budget, per-module bytes/AST (tree-sitter),
-                file ownership, tests in each module's jail view
+src/arch.rs     `dashboard arch check` (architect-v3.md): `load` (TOML + KDL, or the Lean package), modules/roots
+                budgets, per-module/root bytes/AST (tree-sitter), file ownership and completeness, API budgets,
+                tests in each module's jail view in generator-first (DAG) order
 src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based result cache
 src/records.rs  provenance/enforcement records: import notes, rejections, pins, retirements, accepted-merge lookup,
                 spike base commits and exploration notes
@@ -80,6 +87,8 @@ launches/<key>      the latest launch id of a session (<slug>, or
                      <slug>_agent), written by whoever launched it
 player.heartbeat     unix time of the last tick, so `wait` can tell the
                      player looks dead (missing or >30s old)
+arch/architecture/   main's Lean package, extracted from the hub for export
+                     (its `.lake/` build cache persists between exports)
 ```
 
 Worker clones live *outside* this home, nested inside the **director's own
@@ -165,6 +174,8 @@ refs/notes/dashboard-budget-raises  on a main commit raising an architecture.tom
 refs/notes/dashboard-relaunches  `dashboard relaunch`es at a task tip: [{agent, reports, at}]
                                  (`reports`: the agent reports noted there at the time;
                                  `reset: true`: a `--reset`, the session's count restarts after it)
+refs/notes/dashboard-arch        on an `architecture/` tree object: its Lean export (the JSON
+                                 `lean::parse` reads), so the manifest is exported once per tree
 ```
 
 Every note write (`Git::notes_modify`) goes through a private
@@ -359,19 +370,44 @@ ignored — no `deny_unknown_fields` anywhere.
   `worker.queued` / `task-agent.queued` (prompts.kdl) to worker and task-agent
   prompts when queued, and sets
   `dashboard.home` in the worker workspace so `test` finds the home.
-- `dashboard arch check [--root DIR]` — reads `architecture.toml` (modules, APIs, budgets; `config::ArchConfig`)
-  and fails on any budget overrun, a file in two modules, or a module whose `test_cmd` fails with only its own
-  files, its APIs' files and `shared` present (plus symlinks to the checkout's `linked` build caches, if they exist;
-  `test_cmd` gets `DASHBOARD_MODULE`/`DASHBOARD_ROOT`). Prints headroom. Run it as an ordinary suite check; the player is
-  not involved in the check itself. The player does: `architecture.toml` is a path the director may commit on
-  `main` (validated on import: `ownership` if it doesn't parse), and the manifest plus every API path in it is
-  pinned against workers (`records::pinned_files`, a `pins` strike; not for spikes). A task agent may write API
-  paths (read at the tip) but never the manifest (`agent_paths_ok`). Budget raises: see below.
-- `dashboard arch gen [--root DIR] [--check]` — regenerates each API's bindings from its one `*.api.kdl`
-  (written to `gen/<api>.rs` beside it, so under the API's pinned paths). `--check` writes nothing and exits 1 on a
-  stale binding; `arch check` runs the same drift check, plus the IDL's constructor count (`max_constructors`) and
-  T slots, i.e. argument slots across constructors (`max_types`), and ref validity (known, linked, acyclic API;
-  declared type). Elements and containers (architect-v3.md, "Elements and containers"):
+- `dashboard arch check [--root DIR]` — loads the architecture (`arch::load`: the Lean package `architecture/`
+  when `architecture/Architecture.lean` exists, else `architecture.toml` + `*.api.kdl`; both is an error) and
+  fails on any budget overrun (modules, roots, bytes/AST, every API budget), a file in two modules/roots, a file
+  under `source_paths` nobody owns, or a module whose `test_cmd` fails with only its own files, its APIs' files
+  and `shared` present (plus symlinks to the checkout's `linked` build caches, if they exist; `test_cmd` gets
+  `DASHBOARD_MODULE`/`DASHBOARD_ROOT`). Module tests run generators before consumers (`ArchConfig::topological`;
+  a cycle fails validation) and the order is printed. Prints headroom. Run it as an ordinary suite check; the
+  player is not involved in the check itself. The player does: the architecture (`architecture.toml`, or anything
+  under `architecture/`) is a path the director may commit on `main` (validated on import: `ownership` if it
+  doesn't load; a Lean package is exported in `<home>/arch/`, jailed like a check, and the JSON cached on its
+  tree in `refs/notes/dashboard-arch`, `records::arch_source_at`; `Player::ensure_arch` does it once per main
+  tree at startup too), and the manifest plus every API path in it is pinned against workers
+  (`records::pinned_files`, a `pins` strike; not for spikes). A task agent may write API paths (read at the tip)
+  and `architecture/Apis/*.lean`, but never the manifest (`agent_paths_ok`, `config::is_arch_api_file`).
+  Budget raises: see below.
+- **The Lean architecture** (`src/lean.rs`, handover §0): `architecture/` is a Lake package: `Architecture.lean`
+  (the manifest: `architecture where max_modules = …`, `module x where lang = rust …`, `root r where …`,
+  `api «a-b» : a → b where paths = […] max_fns = …`) and `Apis/<name>.lean` (`idl «a-b» where type Id : i64
+  display store; type Name : string 64; element Row | V : i64 → string 16; container Rows := «fo».Seq Row;
+  container Seq : Foldable, Monoid; instance Functor for «fo».Seq; sum Written | Written : Id | Tick;
+  fn log : Rows → Written; constructor X : Id`). The DSL and the exporter are vendored from `src/lean/`
+  (`lean::write_vendored`: `Dashboard.lean`, `Dashboard/Export.lean`, `lakefile.toml`, `lean-toolchain`,
+  `.gitignore`); a copy that differs refuses to load (`lake` would download another toolchain) until `arch gen`
+  rewrites it. Lean checks what its types can (an API's modules exist, a ref'd type exists, fields are fields,
+  declare-before-use); `Idl::from_export` and `ArchConfig::validate` check the rest, plus Lean-only rules: every
+  string/bytes type and field has a `max_len` (`Idl::unbounded`), none above the API's `max_string_len` (default
+  256) / `max_bytes_len`. Bindings go under an API's first path (`gen/`). `lake` must be on the player host and
+  wherever `arch check` runs (`~/.elan/bin` is used if present). `dashboard arch migrate` writes the package from
+  a TOML + KDL architecture (comments lost; strings come out unbounded). Tests: `tests/lean_arch.rs`, plus Lean
+  cases in `tests/player.rs`, `tests/task_agent.rs`, `tests/player_worker.rs`.
+- `dashboard arch gen [--root DIR] [--check]` — regenerates each API's bindings from its IDL (`*.api.kdl`, or
+  `architecture/Apis/<name>.lean`), written to `gen/<api>.rs` under the API's first path (so pinned), and for a
+  Lean package the vendored library first. `--check` writes nothing and exits 1 on a stale binding; `arch check`
+  runs the same drift check, plus the IDL's constructor count across all sums (`max_constructors`) and T slots,
+  i.e. argument slots across constructors (`max_types`), fns and their input slots (`max_fns`, `max_inputs`),
+  refinement rules and tokens (`max_rules`, `max_tokens`), and ref validity (known, linked, acyclic API; declared
+  type or token). A `fn` taking a container means the generator must
+  consume that container's class API. Elements and containers (architect-v3.md, "Elements and containers"):
   `element "Row" { variant "V" "<repr>"...; }` (readable, Rust `#[derive(Debug, Clone, PartialEq)] pub enum`; budgets
   `max_elements` = variants, `max_fields` = fields), `container "Seq" classes="Foldable[,Functor,Traversable,Monoid]"`
   (a generic this API owns), `container "Rows" of="Row" ref="api.Seq"` (`pub type Rows = super::api::Seq<Row>`), and
@@ -392,6 +428,48 @@ ignored — no `deny_unknown_fields` anywhere.
   Each generator's output was compiled and round-tripped against the others' JSON by hand (cargo, deno, kotlinc).
   The wire code's `to_value`/`toValue` read a `T`'s inner value, so it exists only on cross-language APIs; the
   adapters (step 4) should ban calling it outside the generated file.
+  **Signatures** (architect-v3.md, "APIs are signatures"): a named `sum` is an enum / tagged union / sealed
+  interface like the default sum (its wire codec is `to_json`/`from_json` on the enum; TS `<sum>ToJson`/
+  `<sum>FromJson`, the default sum keeps `toJson`/`fromJson`; Kotlin `toJson(v)` overloads and `fromJson<Sum>`);
+  the `fn`s become the API's trait (`pub trait NutritionDb { fn insert_product(&mut self, name: Name, …) ->
+  Written; }`), TS `interface` (returns are `Promise<Sum>` on a cross-language pair) and Kotlin `interface`. A
+  cross-language pair also gets, Rust side, `pub fn dispatch(impl_: &mut dyn Trait, req: &str) -> String`
+  (`{"fn": name, "args": [...]}` in, the sum's JSON or `{"error": text}` out) and, TS side, `class
+  <Api>Client implements <Api>` whose constructor takes a `send: (json: string) => Promise<string>`. A bounded
+  `T` (`max_len`) gets a checking `new` (Rust `Result`, TS/Kotlin throw) and wire decode; `store` adds
+  `impl rusqlite::ToSql` (Rust only; the crate is the project's). **Elements and containers in TypeScript**
+  (handover §3): an element is a discriminated union of readable records (`{ v: "Meal"; f0: number; f1: string }`);
+  each ref'd generic container becomes a `class Seq<A>` in the consumer's binding with exactly the classes
+  the owner declares plus the instances of APIs the same module consumes (`foldr`/`new`, `fmap`, `traverse` over
+  a generated `Result`, `empty`/`append`/`foldMap`), with no length, index or iteration; `Rows = Seq<Row>` plus a
+  `Rows.new`; its laws go to `gen/<api>.laws.test.ts` (`node:test`). On the wire a container is a JSON array
+  of `{"v": variant, "f": [raw fields]}` (Rust walks it with `foldr`, rebuilds with `new`; `<rows>_to_value`
+  / `rowsFromValue` helpers), fields checked against their `max_len`. A TS API may not own classes or
+  instances; Kotlin still has no element/container generator. Tests: `tests/wire.rs` (cargo + deno for real).
+- **Proofs supplied by the caller** (architect-v3.md, Lean only; `src/idl.rs` `Pred`/`Token`): a callee never
+  branches on an input `T`, so the caller's proof travels in the type. `type Grams : f64 where 0 < v ∧ v ≤ 20000`
+  (`type Day : string 10 where v.length = 10`, `type Span : i64 × i64 where v.1 < v.2`, `type Unit : string 8 where
+  v ∈ ["g", "ml"]`) is a refinement: `Dashboard.lean`'s `idlPred` category (comparisons of `v`, `v.N`, `v.length`
+  and literals, `∧`/`∨`/`¬`/`∈ [literals]`; anything else fails to elaborate) becomes the reference subtype's `Prop`
+  and an exported AST (`Pred`, JSON `{"cmp": ["<", "v", {"num": "0"}]}` …), which every generator turns into the
+  smart constructor's check: Rust `new(v) -> Result<Self, Violation>` (the bound is a rule too, so a bounded string's
+  `new` is the same shape), TS/Kotlin constructors throw `Violation { type_name, rule }` with the rule as written
+  (`Pred::render`), and the wire decoder runs it. A product (`i64 × i64`, two to four prims) is a tuple in Rust/TS and
+  separate constructor parameters in Kotlin; no `display`/`store`. `token ProductRef : i64 permanent` is evidence: a
+  `T` with `mint` instead of `new` (`lint::mint_calls` fails a consumer or root file calling `<Token>::mint(` /
+  `.mint(`; the generator's own files may), `Clone` in Rust unless `linear spent=Ctor` (then moved: single use by the
+  compiler); `versioned stale=Ctor` carries `(id, version)` (`[id, version]` on the wire; `store` adds `version()`
+  beside `ToSql`). Every fn taking a versioned or linear token must return a sum containing its constructor
+  (`Idl::fns_missing`, also through a `ref` re-export in `arch::bindings`). A named `sum` may be a fn input (a
+  closed vocabulary the callee matches; sums got value-level codecs for it). Budgets: `max_rules` (comparisons and
+  memberships across the API's `where`s), `max_tokens`. In Lean a token is `{ id : T // Name.Fact id }` with an
+  opaque `Fact`, so there too only a fn of the API yields one. Tests: `tests/proofs.rs` (real `rustc`: a refined
+  `new` refuses, a linear token used twice does not compile), `tests/lean_arch.rs`, `tests/wire.rs`.
+- `dashboard arch check` also runs the **boundary lint** (`lint::serialized_boundary`, architect-v3.md "No
+  tunnels"): a `::new(` fed `serde_json::to_string`/`json!`, a `serde_json::from_str`/`from_value` of a
+  `.to_string()`, `JSON.stringify` inside `new T(`, `JSON.parse(String(t))`, `encodeToString` into a
+  constructor, `decodeFromString(t.toString())`: "serialized structure crosses the API as a string". Heuristic,
+  per module and root file.
 - `dashboard arch check` also lints each module's own (non-API) files (`src/lint.rs`): in a module that consumes an
   API, a match over its sum type with a wildcard or catch-all binding arm (Rust `_`/lone binding, TypeScript
   `default`, Kotlin `else`) fails, and so does any `.to_value()` / `.toValue()` call (the wire helper that reads a
@@ -401,10 +479,12 @@ ignored — no `deny_unknown_fields` anywhere.
   `DASHBOARD_MODULE` set and prints a JSON array of `{file, line, message}` findings; any finding, or a non-JSON
   failure, fails the check.
 - **Budget raises** (`src/raise.rs`, judged in `Player::validate_main_commit` via `main_raises`): a director `main`
-  commit that raises a budget in `architecture.toml` (a limit going up, or a nonzero one turned off; turning one
-  on, lowering, and edits that raise nothing are free) must change only budget fields and no other file, have a
-  `raise: <reason>` / `raise(<slug>): <reason>` message (reason = rest of the subject plus body), and keep each new
-  value within `step_cap(old)` (+25%, or +1). Otherwise `ownership`. An imported raise is noted on the commit in
+  commit that raises a budget in the architecture (a limit going up, or a nonzero one turned off; turning one
+  on, lowering, and edits that raise nothing are free) must change only budget fields and no other file
+  (`architecture.toml` alone, or files under `architecture/` only, with the export minus budgets unchanged:
+  `raise::Source` holds the TOML as JSON or the Lean export), have a `raise: <reason>` / `raise(<slug>): <reason>`
+  message (reason = rest of the subject plus body), and keep each new value within `step_cap(old)` (+25%, or
+  +1). Otherwise `ownership`. An imported raise is noted on the commit in
   `refs/notes/dashboard-budget-raises` (`[{budget, old, new, reason, task?, at}]`, `records::budget_raises`) and
   `status` shows "Budget raises". The player cannot check that the operator was consulted; the `dashboard`
   skill makes that the director's rule.

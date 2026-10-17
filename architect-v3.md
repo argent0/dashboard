@@ -27,6 +27,80 @@ data ModuleAPI =
   - has no accessors.
 - Anything a consumer must decide on goes in a constructor, not in a `T`.
 
+## The architecture is written in Lean 4
+
+The manifest and every API's types are Lean declarations in the project's
+`architecture/` Lake package, in a small DSL (`architecture/Dashboard.lean`,
+vendored by `dashboard arch gen` from the dashboard binary; `lake` must be
+installed where the player and `dashboard arch check` run). Lean checks the
+design: an API naming an undeclared module, a ref to a type that isn't
+there, a misspelled budget field or a type used before its declaration is a
+Lean error, so half of the old manifest validator is type checking. The
+dashboard exports the declarations to JSON (`Dashboard/Export.lean`, run by
+`lake env lean` on a generated runner) and keeps everything that acts on real
+code: opacity, exhaustive matching, lints, path existence, ownership, code
+budgets, law tests. No Mathlib, no Lean at runtime, no proofs about generated
+code. The reference semantics live in `Dashboard.lean`: `Str n` is
+`{ s : String // s.length ≤ n }`, a generic container is `Seq := List`, and
+the Functor and Monoid laws are theorems over it.
+
+`architecture/Architecture.lean` (director-owned; a task agent may edit
+`Apis/*.lean`, never this):
+
+```lean
+import Dashboard
+open Dashboard
+
+architecture where
+  max_modules = 27
+  shared = ["Cargo.toml", "Cargo.lock"]
+  linked = ["node_modules", "target"]
+  source_paths = ["engine", "web/src"]
+
+module database where
+  lang = rust
+  paths = ["engine/crates/database"]
+  max_bytes = 260000
+  max_ast = 90000
+  test_cmd = "cargo test --offline -p database"
+
+root «engine-bridge» where
+  lang = rust
+  paths = ["engine/bridge"]
+  max_bytes = 20000
+
+api «nutrition-db» : database → nutrition where   -- generator → consumer
+  paths = ["apis/nutrition-db"]                    -- bindings go to apis/nutrition-db/gen/
+  max_constructors = 6
+  max_fns = 3
+  max_string_len = 256
+```
+
+`architecture/Apis/nutrition-db.lean` (one per API, named after it):
+
+```lean
+import Architecture
+import Apis.«foldable-database»       -- every API it refs
+open Dashboard
+
+idl «nutrition-db» where
+  type Name : string 64
+  type Id : i64 display store
+  type Parent : ref «other-api».Event
+  element Consumption
+    | Consumption : i64 → f64 → string 16
+  container Consumptions := «foldable-database».Seq Consumption
+  sum Written
+    | Written : Id
+    | Rejected : Reason
+  fn insertProduct : Name → Kind → Grams → Written
+  fn log : Consumptions → Written
+  constructor Tick                     -- the API's own default sum, if it has one
+```
+
+Names with a `-` are written `«like-this»`. The older `architecture.toml` +
+`*.api.kdl` form still loads; `dashboard arch migrate` converts it.
+
 ## Contracts
 
 A (generator) produces values; B (consumer) calls A. A module can be both: it is a generator in each API it provides and a consumer in each API it uses.
@@ -39,6 +113,133 @@ A (generator) produces values; B (consumer) calls A. A module can be both: it is
   - So the constructor budget bounds a consumer's decision space.
 
 Because `T` is opaque (no derive, no public inner field, no accessors), a consumer cannot branch on a `T`. The rule is enforced by the API type's surface, not left to convention.
+
+### No tunnels
+
+```kdl
+api "reports-api"
+type "Payload" repr="string" display=#true     // "JSON report"
+constructor "Report" "Payload"
+```
+
+Rejected: `Payload` is a tunnel. Any number of reports or methods pass
+through `Report` as JSON text without spending a constructor, a `T` slot, an
+element or a field, so the budgets measure nothing. So:
+
+- A string is a name, an id or a message, never a document. Every string and
+  bytes type and element field carries a bound (`string 64`, `bytes 4000000`);
+  the Lean IDL requires one. The bound is one refinement among others
+  ("Proofs supplied by the caller"), still required. Per API, `max_string_len` (default 256) caps
+  every string bound and `max_bytes_len` (default off) every bytes bound:
+  a bigger one is a budget raise, so a tunnel has to be asked for out loud.
+  `dashboard arch check` prints the largest bound against the cap.
+- Every distinct result shape is a constructor; every method is a `fn`.
+
+### Proofs supplied by the caller
+
+A callee never branches on an input `T`, yet the engine must refuse bad
+writes. Who decides: the caller supplies the proof, in the type, and the
+callee trusts it. In Lean the signature carries the obligation
+(`log : (a : Amount) → (p : ProductRef) → Written` with `Amount := { g :
+Float // 0 < g ∧ g ≤ 20000 }` and `ProductRef := { id : Int // ProductExists
+id }`); the proof is erased and the data kept, which is how it compiles: a
+refinement becomes a generated smart constructor run by whoever holds the raw
+value, evidence becomes a token only the owning module can mint. **A refusal
+is a type, a warning is a report**: refusals live in refinements, evidence and
+the owner's constraints and never reach a callee's control flow; warnings are
+folds over elements returned as data for the user to judge. A fact is only as
+stable as what it proves, so:
+
+| Fact | Changes? | Mechanism | Who decides at use |
+|---|---|---|---|
+| Value in range, format, span order | never | refinement: `where`, generated smart constructor | nobody, the type |
+| Exists, append-only | never after true | `token … permanent` | nobody |
+| Exists but revocable, time window | yes | `token … versioned stale=Ctor`: the owner re-checks atomically | the store's constraint |
+| Balance covers amount | yes, by others | a hold: `reserve` mints the token as it decrements, `linear` | the store, at reservation |
+| Unique name | yes, by others | the store's constraint, `Rejected Duplicate` | the store's constraint |
+| Permission | rarely | capability token | nobody |
+| Not already applied (retry) | yes, by self | `token … linear spent=Ctor`, consumed in the same transaction | the store, same transaction |
+| Odd relative to history | n/a | a report from a fold over elements | the user |
+
+The three compiled forms:
+
+- **Refinement** (`type Grams : f64 where 0 < v ∧ v ≤ 20000`, `type Span :
+  i64 × i64 where v.1 < v.2`, `type Unit : string 8 where v ∈ ["g", "ml"]`):
+  a decidable fragment (comparisons of `v`, `v.1`…`v.4`, `v.length` with
+  literals or each other, `∧`, `∨`, `¬`, `∈ [literals]`; anything else is an
+  elaboration error) that is both the reference type's `Prop` and the
+  generated check: Rust `Grams::new(f64) -> Result<Grams, Violation>`, TS and
+  Kotlin constructors throw a `Violation { type_name, rule }`, the wire
+  decoder runs the same check. The string bound is one refinement among
+  others, still required and capped by `max_string_len`. A product prim
+  (two to four scalars) wraps a tuple (Rust, TS; Kotlin takes the components
+  as constructor parameters). `max_rules` counts the comparisons and
+  memberships across an API's `where` clauses.
+- **Evidence** (`token ProductRef : i64 permanent`): a `T` only the API's
+  generator mints (`ProductRef::mint`; a consumer file calling `mint` is a
+  lint finding). A permanent token clones. `versioned stale=Retired` carries
+  `(id, version)` (`store` adds `version()` for the owner's `where version =
+  ?`) and every `fn` taking it must return a sum with `Retired`; `linear
+  spent=Ctor` is taken by value in Rust (no `Clone`: single use by the
+  compiler) and its `fn`'s sum must contain `Ctor`. Tokens cross modules by
+  `ref`, keeping their kind (the rule on the fn's sum follows them) and never
+  gaining `mint`. `max_tokens` counts them. In Lean a token is a subtype over
+  an opaque `Fact`, so a value exists only as a `fn`'s result there too.
+- **The owner's constraints** for state-dependent facts: uniqueness, time
+  windows, holds and one-shot use are decided by the store (`UNIQUE`, foreign
+  keys, triggers, `where version = ?`), answered as constructors (`Rejected
+  Duplicate`, `Frozen`, `Stale`, `AlreadyApplied`, `Insufficient`). Nothing
+  is generated; the tool only checks the sums above.
+
+Across the wire, refinements run in the client before sending and in the
+decoder after; a token travels as its id (and version) and is re-created by
+the decoder. Forgery at the JSON edge is possible by construction and
+accepted: the sandbox keeps libraries away from the wire, and the owner's
+constraints are the last line, answering with a constructor.
+
+### APIs are signatures
+
+An API reads like Haskell signatures: `insertProduct :: Name -> Kind ->
+Grams -> Written`. Inputs are `T`s the callee can only store or forward,
+containers of elements it folds, or a named sum (a closed vocabulary such as
+`Kind | Food | Supplement | Recipe`: matching its constructors is the one
+decision a callee may make). Outputs are named sums the caller matches
+exhaustively. In the IDL: `sum Written | Written : Id | Rejected : Reason`
+and `fn insertProduct : Name → Kind → Grams → Written`; `returns` must name a
+`sum` of the API, every sum must be returned or taken by some fn and every
+type, token and container used by some fn or sum, and `constructor` lines keep declaring the API's unnamed default sum for
+fn-less APIs. `max_fns` and `max_inputs` (input slots across all fns) are
+API budgets beside `max_constructors`/`max_types`, which now count across all
+sums. The generated bindings: a trait / interface per API (`insert_product(&mut
+self, name: Name, …) -> Written`), implemented by the generator and handed to
+the consumer by a composition root (`&mut dyn NutritionDb`; a consumer's tests
+use a fake with synthetic sums); for a cross-language pair, a Rust `dispatch`
+serving `{"fn": …, "args": […]}` and a TypeScript `<Api>Client` over a
+`send` transport, so the root is wiring. Adding a `fn` breaks every generator,
+adding a constructor every consumer: both fail at post. `type Id : i64 store`
+generates the forwarding adapter (`rusqlite::ToSql`) so a callee can store a T
+without reading it. A `fn` taking a container means the generator folds it, so the
+generator module must consume the class API for that `Seq`; the caller
+builds it with `new` through the `ref`.
+
+### The DAG
+
+The module graph (an edge generator → consumer per API, roots included as
+consumers) must be acyclic: a cycle is a manifest validation error, hence an
+`ownership` rejection on `main`, naming the cycle. `dashboard arch check`
+runs module tests in topological order, generators before consumers, and
+prints the order.
+
+### Composition roots
+
+A root (`root «engine-bridge» where …`) calls modules and forwards their
+values (typically generated dispatch and client stubs). It owns files like a
+module and is budgeted like one (`max_bytes`, `max_ast`, and `max_roots` in
+total), but has no `test_cmd` and no view: story tests only. It appears as an
+API's consumer like a module, so "one API per pair" and the DAG stay honest,
+and the lints apply to it. With `source_paths` set, every file under them
+must belong to a module, an API, a root or `shared`: "`<path>`: owned by
+nobody" otherwise.
 
 ## Elements and containers
 
@@ -83,7 +284,7 @@ Laws (property tests over `i64` and `String` elements with generated functions; 
 
 **Budgets:** `max_elements` counts variants across an API's elements and `max_fields` their fields, since readable data widens the decision space like a constructor. A container argument is one `T` slot.
 
-**Files:** `impl` (per `[[api]]`) lists the hand-written instance files. They must lie under the generator module's paths: owned, budgeted and the worker's to edit (no `pins` strike), unlike the API's own paths. The generated Rust binding mounts each with `#[path]` beneath itself, so the instance sees the class trait as `super::Foldable`. A module's jail view also holds every API its APIs ref, transitively, with their `impl` files, so a consumer's tests use the real instance. `dashboard arch check` fails a declared class with no `impl Class for Container` in the API's `impl` files. Only the Rust generator renders elements, containers and instances so far.
+**Files:** `impl` (per `[[api]]`) lists the hand-written instance files. They must lie under the generator module's paths: owned, budgeted and the worker's to edit (no `pins` strike), unlike the API's own paths. The generated Rust binding mounts each with `#[path]` beneath itself, so the instance sees the class trait as `super::Foldable`. A module's jail view also holds every API its APIs ref, transitively, with their `impl` files, so a consumer's tests use the real instance. `dashboard arch check` fails a declared class with no `impl Class for Container` in the API's `impl` files. In TypeScript there is no class module: the consumer's binding holds a generated `Seq<A>` class with exactly the classes it may use (the owner's, plus instances of APIs the same module consumes), its laws in `gen/<api>.laws.test.ts`, and elements as discriminated unions of readable records. On the wire a container is a JSON array of `{"v": variant, "f": [raw fields]}`. Kotlin has no element/container generator yet.
 
 ## Changes and testing
 
@@ -120,7 +321,7 @@ Steps 2 and 3 depend only on the API from step 1, not on each other, so they can
 Budgets exist to force a split, so a raise is the last resort and always an explicit, audited act.
 
 ### Where budgets live
-In the pinned `architecture.toml` (its own file). A worker or task agent that edits it gets a `pins` strike. Only a director commit on `main` changes it; the player's ownership gate allows that one path, like `docs_paths`.
+In the pinned manifest (`architecture/Architecture.lean`, or `architecture.toml`). A worker or task agent that edits it gets a `pins` strike. Only a director commit on `main` changes it; the player's ownership gate allows the architecture's paths, like `docs_paths`.
 
 ### When work hits a budget
 The suite check fails (a worker finish is rejected with an `arch` budget reason). Neither the worker nor the task agent may touch the budget. In order, the options are:
@@ -134,7 +335,7 @@ The suite check fails (a worker finish is rejected with an `arch` budget reason)
 - **Every budget raise is discussed with the operator** before the director commits it. This covers module AST and byte budgets, API constructor and `T` budgets, and the total modules budget. The player does not check this (best effort): it is a rule of the director playbook, and the audit note below makes violations visible.
 - API budgets (constructors, `T`s) are the most sensitive: a constructor bounds the decision space of every consumer, so one raise grows the match arms of N modules. The raise discussion lists the affected consumers (the manifest knows them). The director never raises these on its own judgment.
 - The total modules budget is the project's complexity ceiling. Raise it only after trying to merge or remove modules.
-- The commit changes only budget fields in `architecture.toml`; mixing in any other edit is an `ownership` rejection.
+- The commit changes only budget fields in the manifest (for the Lean package: only files under `architecture/`, and the export minus budgets unchanged); mixing in any other edit is an `ownership` rejection.
 - It carries a required `raise:` reason, recorded by the player in `refs/notes/dashboard-budget-raises` (budget, old, new, reason, triggering task, at). `status` shows how many times each budget was raised.
 - A single raise is bounded by a step cap (at most +25% of the old value; for small counts, +1). A larger jump takes several visible raises.
 - `main` must stay green: a raise never lands together with work that depends on it going red.

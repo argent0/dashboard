@@ -236,7 +236,6 @@ fn an_impure_task_check_cannot_stand_in_for_a_failing_one_at_post() {
 fn preflight_passes_with_its_scratch_under_the_real_tmp() {
     // The jail's /tmp is a tmpfs holding bwrap's mount points for a
     // scratch dir under /tmp: the private-/tmp probe mustn't collide.
-    // (The suite usually runs with TMPDIR elsewhere, so use /tmp itself.)
     jail(&[]).preflight(Path::new("/tmp")).unwrap();
 }
 
@@ -317,7 +316,10 @@ fn a_failure_against_the_jails_walls_is_impure() {
     let (_home_dir, home) = init_hub(&repo);
     let runner = jailed_runner(&home, &[]);
     let commit = repo.git().rev_parse("HEAD").unwrap();
-    let outside = TempDir::new().unwrap();
+    // A host path the jail mounts read-only: not under /tmp, which the jail
+    // replaces with a private tmpfs (a write there is "no such file", not a
+    // wall).
+    let outside = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/target")).unwrap();
 
     let c = Check {
         runs: 3,

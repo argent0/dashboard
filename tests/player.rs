@@ -820,3 +820,58 @@ fn a_budget_raise_needs_a_reason_and_a_small_step_and_is_noted_and_shown() {
     let text = render::render(&st, &[], false, 100);
     assert!(text.contains("Budget raises (1)") && text.contains("module a max_ast raised 1x (90 -> 110)"), "{text}");
 }
+
+#[test]
+fn main_commit_of_a_lean_architecture_is_exported_cached_and_its_raises_judged() {
+    let repo = director_repo();
+    write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)]);
+    commit(repo.path(), "add the lean architecture");
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    let base = repo.git().rev_parse("HEAD").unwrap();
+
+    // The hub was made from a main that already had it: the first tick
+    // exports and caches it on the package's tree.
+    let report = player.tick().expect("tick");
+    assert!(report.errors.is_empty(), "{report}");
+    let tree = hub.rev_parse(&format!("{base}:architecture")).unwrap();
+    assert!(hub.notes_show(records::ARCH_NOTES, &tree).is_some(), "export not cached");
+    let arch = records::arch_at(&hub, &base).expect("arch from the cache");
+    assert_eq!(arch.modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+    assert_eq!(arch.api_paths(), ["api"]);
+
+    // A raise needs its reason, like the TOML's.
+    let raised = LEAN_AB_MANIFEST.replace("max_ast = 100", "max_ast = 110");
+    write_file(repo.path(), "architecture/Architecture.lean", &raised);
+    commit(repo.path(), "make room");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert!(report.rejected[0].message.contains("raise: <reason>"), "{}", report.rejected[0].message);
+    repo.git().run(&["reset", "--hard", &base]).unwrap();
+    write_file(repo.path(), "architecture/Architecture.lean", &raised);
+    commit(repo.path(), "raise(ab): a grew");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.imported.len(), 1, "{report}");
+    let raises = records::budget_raises(&hub);
+    assert_eq!((raises[0].budget.as_str(), raises[0].old, raises[0].new), ("module a max_ast", 100, 110));
+
+    // An API naming an undeclared module doesn't elaborate: ownership, with
+    // Lean's message.
+    let good = repo.git().rev_parse("HEAD").unwrap();
+    write_file(repo.path(), "architecture/Architecture.lean", &raised.replace("api ab : a → b", "api ab : a → nope"));
+    commit(repo.path(), "break the architecture");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Ownership);
+    assert!(report.rejected[0].message.contains("nope"), "{}", report.rejected[0].message);
+    assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(good.as_str()));
+
+    // Two architectures is one too many.
+    repo.git().run(&["reset", "--hard", &good]).unwrap();
+    write_file(repo.path(), "architecture.toml", "max_modules = 1\n");
+    commit(repo.path(), "add a toml too");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert!(report.rejected[0].message.contains("one architecture"), "{}", report.rejected[0].message);
+}

@@ -4,7 +4,7 @@
 // over it. Every module's `test_cmd` compiles its jail view with `rustc
 // --test`, so the generated law tests run against the real instances.
 
-use dashboard::arch::{check, sync_bindings};
+use dashboard::arch::{Loaded, check, sync_bindings};
 use dashboard::config::arch_config_from_str;
 use dashboard::sandbox::Sandbox;
 use std::path::Path;
@@ -196,14 +196,14 @@ fn fixture() -> tempfile::TempDir {
     let all = ["foldable-nutrition", "functor-nutrition", "traversable-nutrition", "monoid-nutrition", "db-nutrition"];
     write(r, "engine/nutrition/lib.rs", &format!("{}\nmod consumer;\n", mounts(&all)));
     write(r, "engine/nutrition/consumer.rs", CONSUMER);
-    let cfg = arch_config_from_str(&manifest()).unwrap();
+    let cfg = Loaded::from_toml(r, arch_config_from_str(&manifest()).unwrap());
     let (_, errs) = sync_bindings(r, &cfg, true);
     assert!(errs.is_empty(), "{errs:?}");
     d
 }
 
 fn problems(root: &Path) -> String {
-    let cfg = arch_config_from_str(&manifest()).unwrap();
+    let cfg = Loaded::from_toml(root, arch_config_from_str(&manifest()).unwrap());
     let scratch = tempfile::tempdir().unwrap();
     let rep = check(root, &cfg, &Sandbox::off(), scratch.path());
     rep.problems.join("\n")
@@ -269,7 +269,7 @@ fn the_consumer_cannot_reach_into_the_container_and_must_be_total() {
 fn element_budgets_and_bad_impls() {
     let d = fixture();
     let m = manifest().replace("max_elements = 2\nmax_fields = 4", "max_elements = 1\nmax_fields = 2");
-    let cfg = arch_config_from_str(&m).unwrap();
+    let cfg = Loaded::from_toml(d.path(), arch_config_from_str(&m).unwrap());
     let scratch = tempfile::tempdir().unwrap();
     let rep = check(d.path(), &cfg, &Sandbox::off(), scratch.path());
     let all = rep.problems.join("\n");

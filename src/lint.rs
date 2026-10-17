@@ -113,6 +113,80 @@ fn wildcards_over(lang: &str, language: Language, src: &[u8], en: &str, variants
     out
 }
 
+const TUNNEL: &str = "serialized structure crosses the API as a string: declare it as constructors, Ts or an element";
+
+/// Serialized structure handed to an API as a string, or a T's text parsed
+/// back into structure (architect-v3.md, "No tunnels"): a `::new(` whose
+/// argument serializes (`serde_json::to_string`, `json!`), a `serde_json::
+/// from_str`/`from_value` of a `.to_string()`; `JSON.stringify` inside a
+/// `new T(` and `JSON.parse(String(t))` in TypeScript; `encodeToString` into
+/// a constructor and `decodeFromString(t.toString())` in Kotlin. Best effort,
+/// like `wildcard_arms`.
+pub fn serialized_boundary(lang: &str, language: Language, src: &[u8]) -> Vec<Finding> {
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(src, None) else { return Vec::new() };
+    let (ctor_kind, into, parse_fn, of_text): (&[&str], Regex, Regex, Regex) = match lang {
+        "rust" => (
+            &["call_expression"],
+            Regex::new(r"serde_json::to_string(_pretty)?\(|\bjson!\s*[(\[{]|to_string_pretty\(").unwrap(),
+            Regex::new(r"(serde_json::|^)from_(str|value)$").unwrap(),
+            Regex::new(r"\.to_string\(\)|\bformat!\s*\(").unwrap(),
+        ),
+        "typescript" => (
+            &["new_expression", "call_expression"],
+            Regex::new(r"\bJSON\.stringify\(").unwrap(),
+            Regex::new(r"^JSON\.parse$").unwrap(),
+            Regex::new(r"\bString\(|\.toString\(\)").unwrap(),
+        ),
+        "kotlin" => (
+            &["call_expression"],
+            Regex::new(r"\bencodeToString\(").unwrap(),
+            Regex::new(r"decodeFromString(<[^(]*>)?$").unwrap(),
+            Regex::new(r"\.toString\(\)").unwrap(),
+        ),
+        _ => return Vec::new(),
+    };
+    let is_ctor = |f: &str| match lang {
+        "rust" => f.ends_with("::new"),
+        "typescript" => f.chars().next().is_some_and(|c| c.is_ascii_uppercase()) || f.contains(".new"),
+        _ => f.chars().next().is_some_and(|c| c.is_ascii_uppercase()),
+    };
+    let mut out = Vec::new();
+    walk(tree.root_node(), &mut |n| {
+        if !ctor_kind.contains(&n.kind()) {
+            return;
+        }
+        let Some(func) = n.child(0).or_else(|| n.child_by_field_name("function")) else { return };
+        let (func, args) = if lang == "typescript" && n.kind() == "new_expression" {
+            (n.child_by_field_name("constructor").unwrap_or(func), n.child_by_field_name("arguments"))
+        } else {
+            (func, n.child_by_field_name("arguments").or_else(|| n.child(n.child_count().saturating_sub(1))))
+        };
+        let Some(args) = args else { return };
+        let (f, a) = (text(func, src).trim(), text(args, src));
+        let line = n.start_position().row + 1;
+        if (is_ctor(f) && into.is_match(a)) || (parse_fn.is_match(f) && of_text.is_match(a)) {
+            out.push(Finding { line, message: TUNNEL.to_string() });
+        }
+    });
+    if lang == "kotlin" {
+        // The grammar reads `decodeFromString<T>(x)` as comparisons, not a
+        // call: match the text instead.
+        let re = Regex::new(r"decodeFromString(<[^(]*>)?\([^)]*\.toString\(\)").unwrap();
+        for (i, l) in String::from_utf8_lossy(src).lines().enumerate() {
+            if re.is_match(l) {
+                out.push(Finding { line: i + 1, message: TUNNEL.to_string() });
+            }
+        }
+    }
+    out.sort_by_key(|f| f.line);
+    out.dedup();
+    out
+}
+
 /// Calls of the generated wire helpers that read a T's inner value.
 pub fn wire_leaks(src: &str) -> Vec<Finding> {
     let re = Regex::new(r"\.(to_value|toValue)\(\)").unwrap();
@@ -126,11 +200,45 @@ pub fn wire_leaks(src: &str) -> Vec<Finding> {
         .collect()
 }
 
+/// Calls of a token's `mint` (`ProductRef::mint(`, `ProductRef.mint(`) in a
+/// file that may not mint it: evidence is the generator's to issue. By
+/// name, like the other lints.
+pub fn mint_calls(src: &str, tokens: &[&str]) -> Vec<Finding> {
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let names = tokens.iter().map(|t| regex::escape(t)).collect::<Vec<_>>().join("|");
+    let re = Regex::new(&format!(r"\b({names})(::|\.)mint\(")).unwrap();
+    src.lines()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            re.captures(l).map(|c| Finding {
+                line: i + 1,
+                message: format!("mints the evidence token {}; only the generator of its api may", &c[1]),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const IDL: &str = "api \"ab\"\ntype \"Id\" repr=\"string\"\nconstructor \"Created\" \"Id\"\nconstructor \"Tick\"\n";
+
+    #[test]
+    fn serialized_structure_at_the_boundary_is_a_tunnel() {
+        let rs = "fn f(r: &Report) -> Payload {\n    let p = Payload::new(serde_json::to_string(r).unwrap());\n    let q = Name::new(\"x\".to_string());\n    \
+                  let r2: Report = serde_json::from_str(&p.to_string()).unwrap();\n    let ok: Report = serde_json::from_str(raw).unwrap();\n    p\n}\n";
+        let lines: Vec<usize> = serialized_boundary("rust", tree_sitter_rust::LANGUAGE.into(), rs.as_bytes()).iter().map(|f| f.line).collect();
+        assert_eq!(lines, [2, 4]);
+        let ts = "const p = new Payload(JSON.stringify(report));\nconst n = new Name(\"x\");\nconst r = JSON.parse(String(p));\nconst s = JSON.parse(raw);\n";
+        let lines: Vec<usize> = serialized_boundary("typescript", tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), ts.as_bytes()).iter().map(|f| f.line).collect();
+        assert_eq!(lines, [1, 3]);
+        let kt = "val p = Payload(Json.encodeToString(report))\nval n = Name(\"x\")\nval r = Json.decodeFromString<Report>(p.toString())\nval s = Json.decodeFromString<Report>(raw)\n";
+        let lines: Vec<usize> = serialized_boundary("kotlin", tree_sitter_kotlin_ng::LANGUAGE.into(), kt.as_bytes()).iter().map(|f| f.line).collect();
+        assert_eq!(lines, [1, 3]);
+    }
 
     fn run(lang: &str, l: Language, src: &str) -> Vec<Finding> {
         wildcard_arms(lang, l, src.as_bytes(), &Idl::parse(IDL).unwrap())
@@ -177,6 +285,14 @@ mod tests {
         assert!(found[0].message.contains("an algebra must be total in Row"), "{:?}", found);
         let total = "fn k(r: &Row) -> f64 { match r { Row::Meal(k) => *k, Row::Note(_) => 0.0 } }";
         assert!(wildcard_arms("rust", rs, total.as_bytes(), &idl).is_empty());
+    }
+
+    #[test]
+    fn mint_outside_the_generator_is_found() {
+        let found = mint_calls("let p = ProductRef::mint(1);\nlet q = Funds.mint(2n);\nlet r = Other::mint(3);", &["ProductRef", "Funds"]);
+        assert_eq!(found.iter().map(|f| f.line).collect::<Vec<_>>(), [1, 2]);
+        assert!(found[0].message.contains("ProductRef"));
+        assert!(mint_calls("ProductRef::mint(1)", &[]).is_empty());
     }
 
     #[test]

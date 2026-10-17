@@ -23,11 +23,20 @@
 //
 // The instance is hand-written (the API's `impl` files); the class traits
 // and the law tests it must pass are generated.
+//
+// Proofs supplied by the caller (architect-v3.md): a `where` refinement on a
+// type (`type Grams : f64 where 0 < v ∧ v ≤ 20000`, Lean only) becomes the
+// smart constructor's check in every language; a `token` is a T only the
+// API's generator mints (`versioned stale=Ctor` carries a version and
+// `linear spent=Ctor` is single-use; each forces its failure constructor
+// into the sum of every fn taking it).
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use std::collections::BTreeSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Repr {
     String,
     Bytes,
@@ -49,29 +58,158 @@ impl Repr {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Kind {
     Repr(Repr),
     /// `(api, type)` of another API.
     Ref(String, String),
+    /// A product of two to four prims (`i64 × i64`): a tuple in the binding.
+    Tuple(Vec<Field>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// A comparison of a `where` refinement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Op {
+    #[serde(rename = "<")]
+    Lt,
+    #[serde(rename = "≤")]
+    Le,
+    #[serde(rename = "=")]
+    Eq,
+    #[serde(rename = "≠")]
+    Ne,
+}
+
+/// An operand of a `where` refinement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Atom {
+    /// The value.
+    V,
+    /// `v.N`: a component of a product, 1-based.
+    Field(u32),
+    /// `v.length`: characters of a string, bytes of a blob.
+    Len,
+    /// A numeric literal, as written.
+    Num(String),
+    Str(String),
+    Bool(bool),
+}
+
+/// A `where` refinement (architect-v3.md, "Proofs supplied by the caller"):
+/// the decidable fragment the Lean DSL elaborates. The same tree is the
+/// reference type's `Prop` and the generated smart constructor's check.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Pred {
+    Cmp(Op, Atom, Atom),
+    /// `a ∈ [literals]`.
+    Mem(Atom, Vec<Atom>),
+    And(Box<Pred>, Box<Pred>),
+    Or(Box<Pred>, Box<Pred>),
+    Not(Box<Pred>),
+}
+
+/// How the fact a token proves can change between minting and use.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenKind {
+    /// Never, once true: an append-only "exists".
+    Permanent,
+    /// Revocable: the token carries `(id, version)` and the owner re-checks
+    /// atomically; every fn taking it returns this constructor.
+    Versioned(String),
+    /// Single use (a hold, a one-shot): moved in Rust; every fn taking it
+    /// returns this constructor.
+    Linear(String),
+}
+
+impl TokenKind {
+    /// The constructor a fn taking the token must be able to return.
+    pub fn failure(&self) -> Option<&str> {
+        match self {
+            TokenKind::Permanent => None,
+            TokenKind::Versioned(c) | TokenKind::Linear(c) => Some(c),
+        }
+    }
+
+    pub fn word(&self) -> &'static str {
+        match self {
+            TokenKind::Permanent => "permanent",
+            TokenKind::Versioned(_) => "versioned",
+            TokenKind::Linear(_) => "linear",
+        }
+    }
+}
+
+/// Evidence: a T only the API's generator mints (`mint`, never `new`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Token {
+    pub name: String,
+    pub repr: Repr,
+    pub max_len: u64,
+    pub kind: TokenKind,
+    pub store: bool,
+}
+
+impl Default for Token {
+    fn default() -> Self {
+        Token { name: String::new(), repr: Repr::I64, max_len: 0, kind: TokenKind::Permanent, store: false }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TypeDecl {
     pub name: String,
     pub kind: Kind,
     pub display: bool,
+    /// The most characters (string) or bytes a value may hold; 0: no bound
+    /// was declared (the Lean IDL requires one).
+    pub max_len: u64,
+    /// The callee stores this T without reading it: a forwarding adapter
+    /// (`ToSql` in Rust) is generated.
+    pub store: bool,
+    /// The `where` refinement (Lean only), beside the `max_len` bound.
+    pub pred: Option<Pred>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl Default for TypeDecl {
+    fn default() -> Self {
+        TypeDecl { name: String::new(), kind: Kind::Repr(Repr::String), display: false, max_len: 0, store: false, pred: None }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Ctor {
     pub name: String,
     pub args: Vec<String>,
 }
 
+/// A named sum (`sum "Written" { constructor ... }`): what a `fn` returns.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sum {
+    pub name: String,
+    pub ctors: Vec<Ctor>,
+}
+
+/// A method of the API: `name :: inputs -> returns`, where every input is a
+/// type or container of this API and `returns` names one of its sums.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Fn {
+    pub name: String,
+    pub inputs: Vec<String>,
+    pub returns: String,
+}
+
 /// A container class: the operations a consumer gets, and the laws an
 /// instance is tested against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Class {
     Foldable,
     Functor,
@@ -100,20 +238,38 @@ impl Class {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// A raw field of an element variant: a repr and, for strings and bytes,
+/// its `max_len` (0: none declared).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Field {
+    pub repr: Repr,
+    pub max_len: u64,
+}
+
+impl Default for Field {
+    fn default() -> Self {
+        Field { repr: Repr::String, max_len: 0 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Variant {
     pub name: String,
-    pub fields: Vec<Repr>,
+    pub fields: Vec<Field>,
 }
 
 /// A readable flat sum of products over raw reprs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Element {
     pub name: String,
     pub variants: Vec<Variant>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ContainerKind {
     /// `Seq a`, owned by this API, with its classes (Foldable among them).
     Generic(Vec<Class>),
@@ -121,28 +277,33 @@ pub enum ContainerKind {
     Of(String, String, String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Container {
     pub name: String,
     pub kind: ContainerKind,
 }
 
 /// A class added to a container another API owns.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Instance {
     pub class: Class,
     pub api: String,
     pub container: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Idl {
     pub api: String,
     pub types: Vec<TypeDecl>,
+    pub tokens: Vec<Token>,
+    /// The default sum's constructors (the API's own `pascal(api)` sum).
     pub ctors: Vec<Ctor>,
     pub elements: Vec<Element>,
     pub containers: Vec<Container>,
     pub instances: Vec<Instance>,
+    pub sums: Vec<Sum>,
+    pub fns: Vec<Fn>,
 }
 
 fn ident_ok(s: &str) -> bool {
@@ -211,7 +372,7 @@ impl Idl {
                     if display && matches!(kind, Kind::Ref(..)) {
                         return Err(format!("type {name}: display is only for repr types"));
                     }
-                    types.push(TypeDecl { name: name.clone(), kind, display });
+                    types.push(TypeDecl { name: name.clone(), kind, display, max_len: 0, store: false, pred: None });
                 }
                 "constructor" => {
                     let Some((name, rest)) = args.split_first() else {
@@ -231,7 +392,11 @@ impl Idl {
                         };
                         let fields = fields
                             .iter()
-                            .map(|f| Repr::parse(f).ok_or_else(|| format!("element {name}: variant {vname}: unknown repr {f:?}")))
+                            .map(|f| {
+                                Repr::parse(f)
+                                    .map(|repr| Field { repr, max_len: 0 })
+                                    .ok_or_else(|| format!("element {name}: variant {vname}: unknown repr {f:?}"))
+                            })
                             .collect::<Result<_, _>>()?;
                         variants.push(Variant { name: vname.clone(), fields });
                     }
@@ -277,20 +442,49 @@ impl Idl {
         let idl = Idl {
             api: api.ok_or("missing `api \"name\"`")?,
             types,
+            tokens: Vec::new(),
             ctors,
             elements,
             containers,
             instances,
+            sums: Vec::new(),
+            fns: Vec::new(),
         };
         idl.validate()?;
         Ok(idl)
     }
 
-    fn validate(&self) -> Result<(), String> {
+    /// An IDL the Lean exporter produced (`lean::export`): the same checks
+    /// the KDL parser runs, since Lean type-checks only part of them.
+    pub fn from_export(idl: Idl) -> Result<Idl, String> {
+        idl.validate()?;
+        Ok(idl)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
         let mut names = BTreeSet::new();
         for t in &self.types {
             if !ident_ok(&t.name) || !names.insert(t.name.as_str()) {
                 return Err(format!("type {:?}: not a CamelCase identifier, or duplicate", t.name));
+            }
+            if let Kind::Tuple(fs) = &t.kind {
+                if !(2..=4).contains(&fs.len()) {
+                    return Err(format!("type {}: a product has two to four components", t.name));
+                }
+                if t.display || t.store {
+                    return Err(format!("type {}: display and store are for scalar types, not a product", t.name));
+                }
+            }
+            if let Some(p) = &t.pred {
+                if matches!(t.kind, Kind::Ref(..)) {
+                    return Err(format!("type {}: a ref carries its own refinement; `where` is for a repr or a product", t.name));
+                }
+                p.check(&self.components(t)).map_err(|e| format!("type {}: {e}", t.name))?;
+            }
+        }
+        for k in &self.tokens {
+            if !ident_ok(&k.name) || !names.insert(k.name.as_str()) {
+                return Err(format!("token {:?}: not a CamelCase identifier, or duplicate", k.name));
             }
         }
         for (what, n) in self
@@ -359,8 +553,86 @@ impl Idl {
                 used.insert(a.as_str());
             }
         }
+        // Named sums and fns (architect-v3.md, "APIs are signatures").
+        let mut snames = BTreeSet::new();
+        for s in &self.sums {
+            if !ident_ok(&s.name) || names.contains(s.name.as_str()) || !snames.insert(s.name.as_str()) {
+                return Err(format!("sum {:?}: not a CamelCase identifier, or duplicate", s.name));
+            }
+            if s.ctors.is_empty() {
+                return Err(format!("sum {}: no constructors", s.name));
+            }
+            for c in &s.ctors {
+                if !ident_ok(&c.name) || !cnames.insert(c.name.as_str()) {
+                    return Err(format!("sum {}: constructor {:?}: not a CamelCase identifier, or duplicate across the api's sums", s.name, c.name));
+                }
+                for a in &c.args {
+                    if !names.contains(a.as_str()) {
+                        return Err(format!("sum {}: constructor {}: unknown type {a:?}", s.name, c.name));
+                    }
+                    if self.elements.iter().any(|e| e.name == *a) {
+                        return Err(format!("sum {}: constructor {}: element {a} is reachable only through a container", s.name, c.name));
+                    }
+                    if self.containers.iter().any(|x| x.name == *a && matches!(x.kind, ContainerKind::Generic(_))) {
+                        return Err(format!("sum {}: constructor {}: {a} is generic; instantiate it with `container ... of=`", s.name, c.name));
+                    }
+                    used.insert(a.as_str());
+                }
+            }
+        }
+        let mut fnames = BTreeSet::new();
+        for f in &self.fns {
+            if f.name.is_empty()
+                || !f.name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                || !f.name.chars().all(|c| c.is_ascii_alphanumeric())
+                || !fnames.insert(f.name.as_str())
+            {
+                return Err(format!("fn {:?}: not a camelCase identifier, or duplicate", f.name));
+            }
+            for a in &f.inputs {
+                if snames.contains(a.as_str()) {
+                    // A closed vocabulary: the one input a callee may match on.
+                    used.insert(a.as_str());
+                    continue;
+                }
+                if !names.contains(a.as_str()) {
+                    return Err(format!("fn {}: unknown input {a:?}", f.name));
+                }
+                if self.elements.iter().any(|e| e.name == *a) {
+                    return Err(format!("fn {}: element {a} is reachable only through a container", f.name));
+                }
+                if self.containers.iter().any(|x| x.name == *a && matches!(x.kind, ContainerKind::Generic(_))) {
+                    return Err(format!("fn {}: {a} is generic; instantiate it with `container ... of=`", f.name));
+                }
+                used.insert(a.as_str());
+            }
+            if !snames.contains(f.returns.as_str()) {
+                return Err(format!("fn {}: returns {:?}, which is not a sum of this api", f.name, f.returns));
+            }
+            used.insert(f.returns.as_str());
+        }
+        if let Some(s) = self.sums.iter().find(|s| !used.contains(s.name.as_str())) {
+            return Err(format!("sum {}: declared but no fn returns or takes it", s.name));
+        }
         if let Some(t) = self.types.iter().find(|t| !used.contains(t.name.as_str())) {
             return Err(format!("type {}: declared but never used", t.name));
+        }
+        if let Some(k) = self.tokens.iter().find(|k| !used.contains(k.name.as_str())) {
+            return Err(format!("token {}: declared but never used", k.name));
+        }
+        // A fact that can change by the call: the signature admits it.
+        for k in &self.tokens {
+            if let Some(c) = k.kind.failure()
+                && let Some(f) = self.fns_missing(&k.name, c).first()
+            {
+                return Err(format!(
+                    "fn {}: takes {} ({}), so {} must have a `{c}` constructor: the fact may have changed by the call",
+                    f.name,
+                    k.name,
+                    k.kind.word(),
+                    f.returns
+                ));
+            }
         }
         if let Some(c) = self
             .containers
@@ -369,20 +641,158 @@ impl Idl {
         {
             return Err(format!("container {}: declared but never used", c.name));
         }
-        if self.ctors.is_empty() && self.classes().is_empty() {
+        if self.ctors.is_empty() && self.fns.is_empty() && self.classes().is_empty() {
             return Err("no constructors".to_string());
         }
         Ok(())
     }
 
-    /// Number of constructors (the `max_constructors` measure).
+    /// Every constructor across the default sum and the named sums.
+    fn all_ctors(&self) -> impl Iterator<Item = &Ctor> {
+        self.ctors.iter().chain(self.sums.iter().flat_map(|s| s.ctors.iter()))
+    }
+
+    /// Number of constructors across all sums (the `max_constructors` measure).
     pub fn constructors(&self) -> u64 {
-        self.ctors.len() as u64
+        self.all_ctors().count() as u64
     }
 
     /// Argument slots across all constructors (the `max_types` measure).
     pub fn slots(&self) -> u64 {
-        self.ctors.iter().map(|c| c.args.len() as u64).sum()
+        self.all_ctors().map(|c| c.args.len() as u64).sum()
+    }
+
+    /// Number of fns (the `max_fns` measure).
+    pub fn fn_count(&self) -> u64 {
+        self.fns.len() as u64
+    }
+
+    /// Input slots across all fns (the `max_inputs` measure).
+    pub fn inputs(&self) -> u64 {
+        self.fns.iter().map(|f| f.inputs.len() as u64).sum()
+    }
+
+    /// Comparisons and memberships across the API's `where` refinements
+    /// (the `max_rules` measure).
+    pub fn rules(&self) -> u64 {
+        self.types.iter().filter_map(|t| t.pred.as_ref()).map(Pred::leaves).sum()
+    }
+
+    /// Tokens declared (the `max_tokens` measure).
+    pub fn token_count(&self) -> u64 {
+        self.tokens.len() as u64
+    }
+
+    pub fn token(&self, name: &str) -> Option<&Token> {
+        self.tokens.iter().find(|k| k.name == name)
+    }
+
+    pub fn token_names(&self) -> Vec<&str> {
+        self.tokens.iter().map(|k| k.name.as_str()).collect()
+    }
+
+    /// Whether `name` is a type or token of this API (what a `ref` may name).
+    pub fn declares(&self, name: &str) -> bool {
+        self.type_decl(name).is_some() || self.token(name).is_some()
+    }
+
+    /// The fns taking `input` whose returned sum has no `ctor` constructor:
+    /// a versioned or linear token's failure must be in the signature.
+    pub fn fns_missing(&self, input: &str, ctor: &str) -> Vec<&Fn> {
+        self.fns
+            .iter()
+            .filter(|f| f.inputs.iter().any(|i| i == input))
+            .filter(|f| !self.sums.iter().find(|s| s.name == f.returns).is_some_and(|s| s.ctors.iter().any(|c| c.name == ctor)))
+            .collect()
+    }
+
+    /// The raw components of a type: one for a scalar, each of a product.
+    fn components(&self, t: &TypeDecl) -> Vec<Field> {
+        match &t.kind {
+            Kind::Repr(r) => vec![Field { repr: *r, max_len: t.max_len }],
+            Kind::Tuple(fs) => fs.clone(),
+            Kind::Ref(..) => Vec::new(),
+        }
+    }
+
+    /// Every check a type's smart constructor runs, in order: the bounds,
+    /// then the `where` predicate. Empty: `new` is infallible.
+    fn rules_of(&self, t: &TypeDecl) -> Vec<Rule> {
+        let comps = self.components(t);
+        let mut out = Vec::new();
+        for (i, f) in comps.iter().enumerate() {
+            if f.max_len == 0 || !matches!(f.repr, Repr::String | Repr::Bytes) {
+                continue;
+            }
+            let at = if comps.len() > 1 { Some(i) } else { None };
+            out.push(Rule {
+                text: format!("{} ≤ {}", Atom::len_text(at), f.max_len),
+                rust: format!("{} <= {}", Atom::rust_len(f.repr, at), f.max_len),
+                ts: format!("{} <= {}", Atom::ts_len(f.repr, at), f.max_len),
+                kotlin: format!("{} <= {}", Atom::kotlin_len(f.repr, at), f.max_len),
+            });
+        }
+        if let Some(p) = &t.pred {
+            out.push(Rule { text: p.render(), rust: p.rust(&comps), ts: p.ts(&comps), kotlin: p.kotlin(&comps) });
+        }
+        out
+    }
+
+    /// The largest `max_len` among string types and fields, and among bytes.
+    pub fn longest(&self) -> (u64, u64) {
+        let mut out = (0, 0);
+        let mut see = |repr: Repr, n: u64| match repr {
+            Repr::String => out.0 = out.0.max(n),
+            Repr::Bytes => out.1 = out.1.max(n),
+            _ => {}
+        };
+        for t in &self.types {
+            match &t.kind {
+                Kind::Repr(r) => see(*r, t.max_len),
+                Kind::Tuple(fs) => fs.iter().for_each(|f| see(f.repr, f.max_len)),
+                Kind::Ref(..) => {}
+            }
+        }
+        for k in &self.tokens {
+            see(k.repr, k.max_len);
+        }
+        for f in self.elements.iter().flat_map(|e| &e.variants).flat_map(|v| &v.fields) {
+            see(f.repr, f.max_len);
+        }
+        out
+    }
+
+    /// Strings and bytes with no `max_len` (architect-v3.md, "No tunnels"):
+    /// one line each. The Lean IDL requires a bound on every one.
+    pub fn unbounded(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for t in &self.types {
+            if matches!(t.kind, Kind::Repr(Repr::String | Repr::Bytes)) && t.max_len == 0 {
+                out.push(format!("type {}: a string or bytes type needs a max_len (a tunnel otherwise)", t.name));
+            }
+            if let Kind::Tuple(fs) = &t.kind {
+                for (i, f) in fs.iter().enumerate() {
+                    if matches!(f.repr, Repr::String | Repr::Bytes) && f.max_len == 0 {
+                        out.push(format!("type {}: component {} needs a max_len (`string 64`)", t.name, i + 1));
+                    }
+                }
+            }
+        }
+        for k in &self.tokens {
+            if matches!(k.repr, Repr::String | Repr::Bytes) && k.max_len == 0 {
+                out.push(format!("token {}: a string or bytes token needs a max_len", k.name));
+            }
+        }
+        for e in &self.elements {
+            for v in &e.variants {
+                for (i, f) in v.fields.iter().enumerate() {
+                    if matches!(f.repr, Repr::String | Repr::Bytes) && f.max_len == 0 {
+                        out.push(format!("element {}: variant {}: field {i} needs a max_len (`string 64`)", e.name, v.name));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Variants across all elements (the `max_elements` measure).
@@ -436,11 +846,14 @@ impl Idl {
     }
 
     /// Every sum a consumer must match totally: `(name, variants, element)`,
-    /// the API's own sum first, then each element.
+    /// the API's own sum first, then its named sums, then each element.
     pub fn sums(&self) -> Vec<(String, Vec<&str>, bool)> {
         let mut out = Vec::new();
         if !self.ctors.is_empty() {
             out.push((pascal(&self.api), self.ctors.iter().map(|c| c.name.as_str()).collect(), false));
+        }
+        for s in &self.sums {
+            out.push((s.name.clone(), s.ctors.iter().map(|c| c.name.as_str()).collect(), false));
         }
         for e in &self.elements {
             out.push((e.name.clone(), e.variants.iter().map(|v| v.name.as_str()).collect(), true));
@@ -463,6 +876,26 @@ impl Idl {
             .collect()
     }
 
+    /// `(name, constructors)` of every sum: the named ones, then the
+    /// default sum (`pascal(api)`) if the API has one.
+    fn sum_list(&self) -> Vec<(String, &[Ctor])> {
+        let mut out: Vec<(String, &[Ctor])> = self.sums.iter().map(|s| (s.name.clone(), s.ctors.as_slice())).collect();
+        if !self.ctors.is_empty() {
+            out.push((pascal(&self.api), self.ctors.as_slice()));
+        }
+        out
+    }
+
+    /// Whether `name` is one of this API's named sums.
+    fn is_sum(&self, name: &str) -> bool {
+        self.sums.iter().any(|s| s.name == name)
+    }
+
+    /// Whether `name` is one of this API's instantiated containers.
+    fn is_container(&self, name: &str) -> bool {
+        self.containers.iter().any(|c| c.name == name && matches!(c.kind, ContainerKind::Of(..)))
+    }
+
     /// Generated Rust. `wire`: also emit the JSON encode/decode (needs
     /// `serde_json`), for a pair that crosses languages. `impls`: the API's
     /// hand-written instance files, relative to the generated file's
@@ -479,66 +912,83 @@ impl Idl {
         );
         if wire {
             o.push_str("use serde_json::{json, Value};\n");
+            // Encoding a container walks it with `foldr`.
+            let mut owners: Vec<&str> = self
+                .containers
+                .iter()
+                .filter_map(|c| match &c.kind {
+                    ContainerKind::Of(_, a, _) => Some(a.as_str()),
+                    _ => None,
+                })
+                .collect();
+            owners.sort();
+            owners.dedup();
+            for a in owners {
+                o.push_str(&format!("use super::{}::Foldable;\n", a.replace('-', "_")));
+            }
         }
         o.push('\n');
         self.rust_classes(impls, &mut o);
+        if self.types.iter().any(|t| !self.rules_of(t).is_empty()) {
+            o.push_str(VIOLATION_RS);
+        }
         for t in &self.types {
-            let (inner, from) = match &t.kind {
-                Kind::Repr(r) => (
-                    match r {
-                        Repr::String => "String",
-                        Repr::Bytes => "Vec<u8>",
-                        Repr::I64 => "i64",
-                        Repr::F64 => "f64",
-                        Repr::Bool => "bool",
-                    }
-                    .to_string(),
-                    true,
-                ),
-                Kind::Ref(a, ty) => (format!("super::{}::{ty}", a.replace('-', "_")), false),
+            let inner = match &t.kind {
+                Kind::Repr(r) => rust_repr(*r).to_string(),
+                Kind::Ref(a, ty) => format!("super::{}::{ty}", a.replace('-', "_")),
+                Kind::Tuple(fs) => format!("({})", fs.iter().map(|f| rust_repr(f.repr)).collect::<Vec<_>>().join(", ")),
             };
             o.push_str(&format!("pub struct {}({inner});\n", t.name));
-            o.push_str(&format!("impl {} {{\n    pub fn new(v: {inner}) -> Self {{ Self(v) }}\n", t.name));
-            if wire {
-                let (enc, dec) = match &t.kind {
-                    Kind::Repr(Repr::Bytes) => (
-                        "Value::String(self.0.iter().map(|b| format!(\"{b:02x}\")).collect())".to_string(),
-                        "let s = v.as_str().ok_or(\"expected hex string\")?;\n        \
-                         if s.len() % 2 != 0 { return Err(\"odd hex length\".into()); }\n        \
-                         let mut b = Vec::new();\n        \
-                         for i in (0..s.len()).step_by(2) { b.push(u8::from_str_radix(s.get(i..i + 2).ok_or(\"bad hex\")?, 16).map_err(|e| e.to_string())?); }\n        \
-                         Ok(Self(b))".to_string(),
-                    ),
-                    Kind::Repr(Repr::String) => (
-                        "json!(self.0)".to_string(),
-                        "Ok(Self(v.as_str().ok_or(\"expected string\")?.to_string()))".to_string(),
-                    ),
-                    Kind::Repr(Repr::I64) => (
-                        "json!(self.0)".to_string(),
-                        "Ok(Self(v.as_i64().ok_or(\"expected i64\")?))".to_string(),
-                    ),
-                    Kind::Repr(Repr::F64) => (
-                        "json!(self.0)".to_string(),
-                        "Ok(Self(v.as_f64().ok_or(\"expected f64\")?))".to_string(),
-                    ),
-                    Kind::Repr(Repr::Bool) => (
-                        "json!(self.0)".to_string(),
-                        "Ok(Self(v.as_bool().ok_or(\"expected bool\")?))".to_string(),
-                    ),
-                    Kind::Ref(..) => ("self.0.to_value()".to_string(), "Ok(Self(".to_string()),
-                };
-                o.push_str(&format!("    pub fn to_value(&self) -> Value {{ {enc} }}\n"));
-                if let Kind::Ref(a, ty) = &t.kind {
+            o.push_str(&format!("impl {} {{\n", t.name));
+            let rules = self.rules_of(t);
+            if rules.is_empty() {
+                o.push_str(&format!("    pub fn new(v: {inner}) -> Self {{ Self(v) }}\n"));
+            } else {
+                o.push_str(&format!(
+                    "    /// `Err` when `v` breaks a rule of the IDL: never truncated or clamped.\n    pub fn new(v: {inner}) -> Result<Self, Violation> {{\n"
+                ));
+                for r in &rules {
                     o.push_str(&format!(
-                        "    pub fn from_value(v: &Value) -> Result<Self, String> {{ Ok(Self(super::{}::{ty}::from_value(v)?)) }}\n",
-                        a.replace('-', "_")
+                        "        if !({}) {{ return Err(Violation {{ type_name: \"{}\", rule: {:?} }}); }}\n",
+                        r.rust, t.name, r.text
                     ));
-                } else {
-                    o.push_str(&format!("    pub fn from_value(v: &Value) -> Result<Self, String> {{\n        {dec}\n    }}\n"));
+                }
+                o.push_str("        Ok(Self(v))\n    }\n");
+            }
+            if wire {
+                match &t.kind {
+                    Kind::Ref(a, ty) => o.push_str(&format!(
+                        "    pub fn to_value(&self) -> Value {{ self.0.to_value() }}\n    \
+                         pub fn from_value(v: &Value) -> Result<Self, String> {{ Ok(Self(super::{}::{ty}::from_value(v)?)) }}\n",
+                        a.replace('-', "_")
+                    )),
+                    Kind::Repr(r) => {
+                        o.push_str(&format!("    pub fn to_value(&self) -> Value {{ {} }}\n", rust_raw_encode(*r, "self.0")));
+                        let dec = rust_raw_decode(*r, "v");
+                        o.push_str(&format!(
+                            "    pub fn from_value(v: &Value) -> Result<Self, String> {{\n        let x = {{ {dec} }};\n        {}\n    }}\n",
+                            if rules.is_empty() { "Ok(Self(x))" } else { "Self::new(x).map_err(|e| e.to_string())" }
+                        ));
+                    }
+                    Kind::Tuple(fs) => {
+                        let enc: Vec<String> = fs.iter().enumerate().map(|(i, f)| rust_raw_encode(f.repr, &format!("self.0.{i}"))).collect();
+                        o.push_str(&format!("    pub fn to_value(&self) -> Value {{ Value::Array(vec![{}]) }}\n", enc.join(", ")));
+                        let dec: Vec<String> = fs.iter().enumerate().map(|(i, f)| format!("{{ {} }}", rust_raw_decode(f.repr, &format!("a[{i}]")))).collect();
+                        o.push_str(&format!(
+                            "    pub fn from_value(v: &Value) -> Result<Self, String> {{\n        \
+                             let a = v.as_array().ok_or(\"expected array\")?;\n        \
+                             if a.len() != {} {{ return Err(\"wrong component count for {}\".into()); }}\n        \
+                             let x = ({});\n        {}\n    }}\n",
+                            fs.len(),
+                            t.name,
+                            dec.join(", "),
+                            if rules.is_empty() { "Ok(Self(x))" } else { "Self::new(x).map_err(|e| e.to_string())" }
+                        ));
+                    }
                 }
             }
             o.push_str("}\n");
-            if t.display && from {
+            if t.display && matches!(t.kind, Kind::Repr(_)) {
                 let body = match t.kind {
                     Kind::Repr(Repr::Bytes) => "for b in &self.0 { write!(f, \"{b:02x}\")?; } Ok(())",
                     _ => "write!(f, \"{}\", self.0)",
@@ -546,6 +996,74 @@ impl Idl {
                 o.push_str(&format!(
                     "impl std::fmt::Display for {} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {body} }}\n}}\n",
                     t.name
+                ));
+            }
+            if t.store {
+                // A forwarding adapter: the callee stores the T without reading it.
+                let out = match &t.kind {
+                    Kind::Repr(Repr::String) => "Ok(rusqlite::types::ToSqlOutput::from(self.0.as_str()))".to_string(),
+                    Kind::Repr(Repr::Bytes) => "Ok(rusqlite::types::ToSqlOutput::from(self.0.as_slice()))".to_string(),
+                    Kind::Repr(_) | Kind::Tuple(_) => "Ok(rusqlite::types::ToSqlOutput::from(self.0))".to_string(),
+                    Kind::Ref(..) => "self.0.to_sql()".to_string(),
+                };
+                o.push_str(&format!(
+                    "impl rusqlite::ToSql for {} {{\n    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {{ {out} }}\n}}\n",
+                    t.name
+                ));
+            }
+            o.push('\n');
+        }
+        for k in &self.tokens {
+            // Evidence: `mint` instead of `new`, the generator's alone (a
+            // consumer calling it is a lint finding). Linear: no `Clone`, so
+            // a second use is a compile error.
+            let inner = rust_repr(k.repr);
+            let versioned = matches!(k.kind, TokenKind::Versioned(_));
+            o.push_str(&format!("/// Evidence ({}): only the generator of `{}` mints one.\n", k.kind.word(), self.api));
+            if !matches!(k.kind, TokenKind::Linear(_)) {
+                o.push_str("#[derive(Clone)]\n");
+            }
+            if versioned {
+                o.push_str(&format!("pub struct {}({inner}, i64);\nimpl {} {{\n    pub fn mint(v: {inner}, version: i64) -> Self {{ Self(v, version) }}\n", k.name, k.name));
+            } else {
+                o.push_str(&format!("pub struct {}({inner});\nimpl {} {{\n    pub fn mint(v: {inner}) -> Self {{ Self(v) }}\n", k.name, k.name));
+            }
+            if wire {
+                let enc = rust_raw_encode(k.repr, "self.0");
+                let bound = match k.repr {
+                    Repr::String if k.max_len > 0 => format!(" if x.chars().count() > {} {{ return Err(\"{} longer than {}\".into()); }}", k.max_len, k.name, k.max_len),
+                    Repr::Bytes if k.max_len > 0 => format!(" if x.len() > {} {{ return Err(\"{} longer than {}\".into()); }}", k.max_len, k.name, k.max_len),
+                    _ => String::new(),
+                };
+                if versioned {
+                    o.push_str(&format!(
+                        "    pub fn to_value(&self) -> Value {{ Value::Array(vec![{enc}, json!(self.1)]) }}\n    \
+                         pub fn from_value(v: &Value) -> Result<Self, String> {{\n        \
+                         let a = v.as_array().filter(|a| a.len() == 2).ok_or(\"expected [id, version]\")?;\n        \
+                         let x = {{ {} }};{bound}\n        let version = a[1].as_i64().ok_or(\"expected i64 version\")?;\n        Ok(Self(x, version))\n    }}\n",
+                        rust_raw_decode(k.repr, "a[0]")
+                    ));
+                } else {
+                    o.push_str(&format!(
+                        "    pub fn to_value(&self) -> Value {{ {enc} }}\n    \
+                         pub fn from_value(v: &Value) -> Result<Self, String> {{\n        let x = {{ {} }};{bound}\n        Ok(Self(x))\n    }}\n",
+                        rust_raw_decode(k.repr, "v")
+                    ));
+                }
+            }
+            if k.store && versioned {
+                o.push_str("    /// The version, for the owner's atomic re-check (`where version = ?`).\n    pub fn version(&self) -> rusqlite::types::ToSqlOutput<'_> { rusqlite::types::ToSqlOutput::from(self.1) }\n");
+            }
+            o.push_str("}\n");
+            if k.store {
+                let out = match k.repr {
+                    Repr::String => "Ok(rusqlite::types::ToSqlOutput::from(self.0.as_str()))",
+                    Repr::Bytes => "Ok(rusqlite::types::ToSqlOutput::from(self.0.as_slice()))",
+                    _ => "Ok(rusqlite::types::ToSqlOutput::from(self.0))",
+                };
+                o.push_str(&format!(
+                    "impl rusqlite::ToSql for {} {{\n    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {{ {out} }}\n}}\n",
+                    k.name
                 ));
             }
             o.push('\n');
@@ -556,23 +1074,132 @@ impl Idl {
                 if v.fields.is_empty() {
                     o.push_str(&format!("    {},\n", v.name));
                 } else {
-                    let fs: Vec<&str> = v.fields.iter().map(|f| rust_repr(*f)).collect();
+                    let fs: Vec<&str> = v.fields.iter().map(|f| rust_repr(f.repr)).collect();
                     o.push_str(&format!("    {}({}),\n", v.name, fs.join(", ")));
                 }
             }
-            o.push_str("}\n\n");
+            o.push_str("}\n");
+            if wire {
+                // `{"v": "<Variant>", "f": [raw fields...]}`.
+                o.push_str(&format!("\nimpl {} {{\n    pub fn to_value(&self) -> Value {{\n        match self {{\n", e.name));
+                for v in &e.variants {
+                    let vars: Vec<String> = (0..v.fields.len()).map(|i| format!("f{i}")).collect();
+                    let pat = if vars.is_empty() { String::new() } else { format!("({})", vars.join(", ")) };
+                    let vals: Vec<String> = v.fields.iter().enumerate().map(|(i, f)| rust_raw_encode(f.repr, &format!("f{i}"))).collect();
+                    o.push_str(&format!(
+                        "            {}::{}{pat} => json!({{\"v\": \"{}\", \"f\": [{}]}}),\n",
+                        e.name, v.name, v.name, vals.join(", ")
+                    ));
+                }
+                o.push_str("        }\n    }\n\n    pub fn from_value(v: &Value) -> Result<Self, String> {\n        \
+                     let f = v[\"f\"].as_array().ok_or(\"missing f\")?;\n        match v[\"v\"].as_str().ok_or(\"missing v\")? {\n");
+                for v in &e.variants {
+                    let n = v.fields.len();
+                    let got: Vec<String> = v
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| {
+                            let dec = rust_raw_decode(f.repr, &format!("f[{i}]"));
+                            let bound = match f.repr {
+                                Repr::String if f.max_len > 0 => format!(
+                                    " let x: String = x; if x.chars().count() > {} {{ return Err(\"{}.{} field {i} longer than {}\".into()); }} x",
+                                    f.max_len, e.name, v.name, f.max_len
+                                ),
+                                Repr::Bytes if f.max_len > 0 => format!(
+                                    " let x: Vec<u8> = x; if x.len() > {} {{ return Err(\"{}.{} field {i} longer than {}\".into()); }} x",
+                                    f.max_len, e.name, v.name, f.max_len
+                                ),
+                                _ => " x".to_string(),
+                            };
+                            format!("{{ let x = {{ {dec} }};{bound} }}")
+                        })
+                        .collect();
+                    let build = if n == 0 { format!("{}::{}", e.name, v.name) } else { format!("{}::{}({})", e.name, v.name, got.join(", ")) };
+                    o.push_str(&format!(
+                        "            \"{}\" => {{\n                if f.len() != {n} {{ return Err(\"wrong field count for {}\".into()); }}\n                Ok({build})\n            }}\n",
+                        v.name, v.name
+                    ));
+                }
+                o.push_str("            other => Err(format!(\"unknown variant {other:?}\")),\n        }\n    }\n}\n");
+            }
+            o.push('\n');
         }
         for c in &self.containers {
             if let ContainerKind::Of(of, a, t) = &c.kind {
-                o.push_str(&format!("pub type {} = super::{}::{t}<{of}>;\n\n", c.name, a.replace('-', "_")));
+                o.push_str(&format!("pub type {} = super::{}::{t}<{of}>;\n", c.name, a.replace('-', "_")));
+                if wire {
+                    // A container is a JSON array of elements, walked with `foldr`.
+                    let sn = snake(&c.name);
+                    o.push_str(&format!(
+                        "pub fn {sn}_to_value(x: &{}) -> Value {{\n    \
+                         let mut v = x.foldr(|e, mut acc: Vec<Value>| {{ acc.push(e.to_value()); acc }}, Vec::new());\n    \
+                         v.reverse();\n    Value::Array(v)\n}}\n\
+                         pub fn {sn}_from_value(v: &Value) -> Result<{}, String> {{\n    \
+                         let items = v.as_array().ok_or(\"expected array\")?;\n    \
+                         let mut out = Vec::new();\n    for i in items {{ out.push({of}::from_value(i)?); }}\n    \
+                         Ok({}::new(out))\n}}\n",
+                        c.name, c.name, c.name
+                    ));
+                }
+                o.push('\n');
             }
         }
-        if self.ctors.is_empty() {
-            o.push_str(&self.rust_laws());
-            return o;
+        for (name, ctors) in self.sum_list() {
+            self.rust_sum(&name, ctors, wire, &mut o);
         }
+        if !self.fns.is_empty() {
+            // The call surface: the generator implements it, a consumer
+            // receives `&mut dyn Trait` from a composition root.
+            o.push_str(&format!("/// The {} call surface.\npub trait {en} {{\n", self.api));
+            for f in &self.fns {
+                let params = rust_params(&f.inputs);
+                o.push_str(&format!("    fn {}(&mut self{}) -> {};\n", snake(&f.name), params, f.returns));
+            }
+            o.push_str("}\n\n");
+            if wire {
+                o.push_str(&format!(
+                    "/// Serves one call `{{\"fn\": <name>, \"args\": [...]}}`: the reply is the sum's JSON,\n\
+                     /// or `{{\"error\": <text>}}`.\n\
+                     pub fn dispatch(impl_: &mut dyn {en}, req: &str) -> String {{\n    \
+                     fn fail(e: impl std::fmt::Display) -> String {{ json!({{\"error\": e.to_string()}}).to_string() }}\n    \
+                     let v: Value = match serde_json::from_str(req) {{ Ok(v) => v, Err(e) => return fail(e) }};\n    \
+                     let Some(args) = v[\"args\"].as_array() else {{ return fail(\"missing args\") }};\n    \
+                     match v[\"fn\"].as_str() {{\n"
+                ));
+                for f in &self.fns {
+                    let n = f.inputs.len();
+                    o.push_str(&format!(
+                        "        Some(\"{}\") => {{\n            if args.len() != {n} {{ return fail(\"wrong argument count for {}\"); }}\n",
+                        f.name, f.name
+                    ));
+                    for (i, t) in f.inputs.iter().enumerate() {
+                        let dec = self.rust_wire_decode(t, &format!("&args[{i}]"));
+                        o.push_str(&format!("            let a{i} = match {dec} {{ Ok(x) => x, Err(e) => return fail(e) }};\n"));
+                    }
+                    let vars: Vec<String> = (0..n).map(|i| format!("a{i}")).collect();
+                    o.push_str(&format!("            impl_.{}({}).to_json()\n        }}\n", snake(&f.name), vars.join(", ")));
+                }
+                o.push_str("        other => fail(format!(\"unknown fn {other:?}\")),\n    }\n}\n\n");
+            }
+        }
+        o.push_str(&self.rust_laws());
+        o
+    }
+
+    /// `x.to_value()`, or the container helper for a container argument.
+    fn rust_wire_encode(&self, ty: &str, var: &str) -> String {
+        if self.is_container(ty) { format!("{}_to_value({var})", snake(ty)) } else { format!("{var}.to_value()") }
+    }
+
+    fn rust_wire_decode(&self, ty: &str, var: &str) -> String {
+        if self.is_container(ty) { format!("{}_from_value({var})", snake(ty)) } else { format!("{ty}::from_value({var})") }
+    }
+
+    /// One sum as a Rust enum, with `to_json`/`from_json` when `wire`.
+    fn rust_sum(&self, en: &str, ctors: &[Ctor], wire: bool, o: &mut String) {
         o.push_str(&format!("pub enum {en} {{\n"));
-        for c in &self.ctors {
+        for c in ctors {
             if c.args.is_empty() {
                 o.push_str(&format!("    {},\n", c.name));
             } else {
@@ -581,29 +1208,31 @@ impl Idl {
         }
         o.push_str("}\n");
         if wire {
-            o.push_str(&format!("\nimpl {en} {{\n    pub fn to_json(&self) -> String {{\n        match self {{\n"));
-            for c in &self.ctors {
+            o.push_str(&format!("\nimpl {en} {{\n    pub fn to_value(&self) -> Value {{\n        match self {{\n"));
+            for c in ctors {
                 let vars: Vec<String> = (0..c.args.len()).map(|i| format!("a{i}")).collect();
                 let pat = if vars.is_empty() { String::new() } else { format!("({})", vars.join(", ")) };
-                let vals: Vec<String> = vars.iter().map(|v| format!("{v}.to_value()")).collect();
+                let vals: Vec<String> = c.args.iter().zip(&vars).map(|(t, v)| self.rust_wire_encode(t, v)).collect();
                 o.push_str(&format!(
-                    "            {en}::{}{pat} => json!({{\"c\": \"{}\", \"a\": [{}]}}).to_string(),\n",
+                    "            {en}::{}{pat} => json!({{\"c\": \"{}\", \"a\": [{}]}}),\n",
                     c.name, c.name, vals.join(", ")
                 ));
             }
             o.push_str(&format!(
-                "        }}\n    }}\n\n    pub fn from_json(s: &str) -> Result<Self, String> {{\n        \
-                 let v: Value = serde_json::from_str(s).map_err(|e| e.to_string())?;\n        \
+                "        }}\n    }}\n\n    pub fn to_json(&self) -> String {{ self.to_value().to_string() }}\n\n    \
+                 pub fn from_json(s: &str) -> Result<Self, String> {{\n        \
+                 let v: Value = serde_json::from_str(s).map_err(|e| e.to_string())?;\n        Self::from_value(&v)\n    }}\n\n    \
+                 pub fn from_value(v: &Value) -> Result<Self, String> {{\n        \
                  let args = v[\"a\"].as_array().ok_or(\"missing a\")?;\n        \
                  match v[\"c\"].as_str().ok_or(\"missing c\")? {{\n"
             ));
-            for c in &self.ctors {
+            for c in ctors {
                 let n = c.args.len();
                 let got: Vec<String> = c
                     .args
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| format!("{t}::from_value(&args[{i}])?"))
+                    .map(|(i, t)| format!("{}?", self.rust_wire_decode(t, &format!("&args[{i}]"))))
                     .collect();
                 let build = if n == 0 { format!("{en}::{}", c.name) } else { format!("{en}::{}({})", c.name, got.join(", ")) };
                 o.push_str(&format!(
@@ -613,8 +1242,7 @@ impl Idl {
             }
             o.push_str("            other => Err(format!(\"unknown constructor {other:?}\")),\n        }\n    }\n}\n");
         }
-        o.push_str(&self.rust_laws());
-        o
+        o.push('\n');
     }
 
     /// The class traits this API declares, the imports its instances need,
@@ -691,7 +1319,7 @@ impl Idl {
 
     /// Generated TypeScript (ES2022: `#private` fields). `wire` as in `rust`;
     /// i64 is a `bigint`, bytes a `Uint8Array` (hex on the wire).
-    pub fn typescript(&self, wire: bool) -> String {
+    pub fn typescript(&self, wire: bool, classes: &BTreeMap<String, Vec<Class>>) -> String {
         let en = pascal(&self.api);
         let mut o = format!(
             "// @generated by `dashboard arch gen` from the {} IDL. Do not edit.\n\
@@ -705,17 +1333,23 @@ impl Idl {
             o.push_str(&format!("import * as {} from \"./{a}\";\n", a.replace('-', "_")));
         }
         o.push('\n');
+        self.typescript_containers(wire, classes, &mut o);
+        if self.types.iter().any(|t| !self.rules_of(t).is_empty()) {
+            o.push_str(VIOLATION_TS);
+        }
         for t in &self.types {
             let inner = match &t.kind {
-                Kind::Repr(Repr::String) => "string".to_string(),
-                Kind::Repr(Repr::Bytes) => "Uint8Array".to_string(),
-                Kind::Repr(Repr::I64) => "bigint".to_string(),
-                Kind::Repr(Repr::F64) => "number".to_string(),
-                Kind::Repr(Repr::Bool) => "boolean".to_string(),
+                Kind::Repr(r) => ts_repr(*r).to_string(),
                 Kind::Ref(a, ty) => format!("{}.{ty}", a.replace('-', "_")),
+                Kind::Tuple(fs) => format!("[{}]", fs.iter().map(|f| ts_repr(f.repr)).collect::<Vec<_>>().join(", ")),
             };
+            let guard: String = self
+                .rules_of(t)
+                .iter()
+                .map(|r| format!(" if (!({})) throw new Violation(\"{}\", {});", r.ts, t.name, js_str(&r.text)))
+                .collect();
             o.push_str(&format!(
-                "export class {} {{\n  readonly #v: {inner};\n  constructor(v: {inner}) {{ this.#v = v; }}\n",
+                "export class {} {{\n  readonly #v: {inner};\n  constructor(v: {inner}) {{{guard} this.#v = v; }}\n",
                 t.name
             ));
             if t.display {
@@ -727,29 +1361,23 @@ impl Idl {
             }
             if wire {
                 let (enc, dec) = match &t.kind {
-                    Kind::Repr(Repr::String) => (
-                        "this.#v".to_string(),
-                        "if (typeof v !== \"string\") throw new Error(\"expected string\");\n    return new this(v);".to_string(),
-                    ),
-                    Kind::Repr(Repr::Bytes) => (
-                        "Array.from(this.#v, (b) => b.toString(16).padStart(2, \"0\")).join(\"\")".to_string(),
-                        "if (typeof v !== \"string\" || !/^([0-9a-f]{2})*$/.test(v)) throw new Error(\"expected hex string\");\n    return new this(Uint8Array.from(v.match(/../g) ?? [], (h) => parseInt(h, 16)));".to_string(),
-                    ),
-                    Kind::Repr(Repr::I64) => (
-                        "Number(this.#v)".to_string(),
-                        "if (typeof v !== \"number\" || !Number.isSafeInteger(v)) throw new Error(\"expected a safe integer\");\n    return new this(BigInt(v));".to_string(),
-                    ),
-                    Kind::Repr(Repr::F64) => (
-                        "this.#v".to_string(),
-                        "if (typeof v !== \"number\") throw new Error(\"expected number\");\n    return new this(v);".to_string(),
-                    ),
-                    Kind::Repr(Repr::Bool) => (
-                        "this.#v".to_string(),
-                        "if (typeof v !== \"boolean\") throw new Error(\"expected boolean\");\n    return new this(v);".to_string(),
+                    Kind::Repr(r) => (
+                        ts_raw_encode(*r, "this.#v"),
+                        format!("return new this({});", ts_raw_decode(*r, 0, "v", &t.name)),
                     ),
                     Kind::Ref(a, ty) => (
                         "this.#v.toValue()".to_string(),
                         format!("return new this({}.{ty}.fromValue(v));", a.replace('-', "_")),
+                    ),
+                    Kind::Tuple(fs) => (
+                        format!("[{}]", fs.iter().enumerate().map(|(i, f)| ts_raw_encode(f.repr, &format!("this.#v[{i}]"))).collect::<Vec<_>>().join(", ")),
+                        format!(
+                            "if (!Array.isArray(v) || v.length !== {}) throw new Error(\"{}: expected {} components\");\n    return new this([{}]);",
+                            fs.len(),
+                            t.name,
+                            fs.len(),
+                            fs.iter().enumerate().map(|(i, f)| ts_raw_decode(f.repr, 0, &format!("v[{i}]"), &format!("{} component {}", t.name, i + 1))).collect::<Vec<_>>().join(", ")
+                        ),
                     ),
                 };
                 o.push_str(&format!(
@@ -759,8 +1387,281 @@ impl Idl {
             }
             o.push_str("}\n\n");
         }
-        let variants: Vec<String> = self
-            .ctors
+        for k in &self.tokens {
+            let inner = ts_repr(k.repr);
+            let versioned = matches!(k.kind, TokenKind::Versioned(_));
+            let (params, args, fields, init) = if versioned {
+                (format!("v: {inner}, version: bigint"), "v, version", format!("  readonly #v: {inner};\n  readonly #version: bigint;\n"), "this.#v = v; this.#version = version;")
+            } else {
+                (format!("v: {inner}"), "v", format!("  readonly #v: {inner};\n"), "this.#v = v;")
+            };
+            o.push_str(&format!(
+                "/** Evidence ({}): only the generator of `{}` mints one; a consumer calling `mint` is a lint finding. */\n\
+                 export class {} {{\n{fields}  private constructor({params}) {{ {init} }}\n  static mint({params}): {} {{ return new {}({args}); }}\n",
+                k.kind.word(),
+                self.api,
+                k.name,
+                k.name,
+                k.name
+            ));
+            if wire {
+                let enc = ts_raw_encode(k.repr, "this.#v");
+                if versioned {
+                    o.push_str(&format!(
+                        "  toValue(): unknown {{ return [{enc}, Number(this.#version)]; }}\n  static fromValue(v: unknown): {} {{\n    \
+                         if (!Array.isArray(v) || v.length !== 2) throw new Error(\"{}: expected [id, version]\");\n    \
+                         return new this({}, {});\n  }}\n",
+                        k.name,
+                        k.name,
+                        ts_raw_decode(k.repr, k.max_len, "v[0]", &k.name),
+                        ts_raw_decode(Repr::I64, 0, "v[1]", &format!("{} version", k.name))
+                    ));
+                } else {
+                    o.push_str(&format!(
+                        "  toValue(): unknown {{ return {enc}; }}\n  static fromValue(v: unknown): {} {{\n    return new this({});\n  }}\n",
+                        k.name,
+                        ts_raw_decode(k.repr, k.max_len, "v", &k.name)
+                    ));
+                }
+            }
+            o.push_str("}\n\n");
+        }
+        for (name, ctors) in self.sum_list() {
+            let is_default = name == en;
+            self.typescript_sum(&name, ctors, wire, is_default, &mut o);
+        }
+        if !self.fns.is_empty() {
+            let ret = |s: &str| if wire { format!("Promise<{s}>") } else { s.to_string() };
+            o.push_str(&format!("/** The {} call surface. */\nexport interface {en} {{\n", self.api));
+            for f in &self.fns {
+                o.push_str(&format!("  {}({}): {};\n", f.name, ts_params(&f.inputs), ret(&f.returns)));
+            }
+            o.push_str("}\n\n");
+            if wire {
+                // The client stub: every method is one call over `send`.
+                o.push_str(&format!(
+                    "export class {en}Client implements {en} {{\n  constructor(private readonly send: (json: string) => Promise<string>) {{}}\n"
+                ));
+                for f in &self.fns {
+                    let names: Vec<String> = ts_param_names(&f.inputs);
+                    let vals: Vec<String> = names.iter().zip(&f.inputs).map(|(n, t)| self.ts_wire_encode(t, n)).collect();
+                    let from = if f.returns == en { "fromJson".to_string() } else { format!("{}FromJson", camel(&f.returns)) };
+                    o.push_str(&format!(
+                        "  async {}({}): Promise<{}> {{\n    return {from}(await this.send(JSON.stringify({{ fn: \"{}\", args: [{}] }})));\n  }}\n",
+                        f.name,
+                        ts_params(&f.inputs),
+                        f.returns,
+                        f.name,
+                        vals.join(", ")
+                    ));
+                }
+                o.push_str("}\n");
+            }
+        }
+        o
+    }
+
+    fn ts_wire_encode(&self, ty: &str, var: &str) -> String {
+        if self.is_container(ty) || self.is_sum(ty) { format!("{}ToValue({var})", camel(ty)) } else { format!("{var}.toValue()") }
+    }
+
+    fn ts_wire_decode(&self, ty: &str, var: &str) -> String {
+        if self.is_container(ty) || self.is_sum(ty) { format!("{}FromValue({var})", camel(ty)) } else { format!("{ty}.fromValue({var})") }
+    }
+
+    /// The generic container classes this API's `container ... :=` lines
+    /// ref, as `(generated class name, owner api, owner container)`.
+    fn ts_seqs(&self) -> Vec<(String, String, String)> {
+        let mut out: Vec<(String, String, String)> = Vec::new();
+        for c in &self.containers {
+            if let ContainerKind::Of(_, a, t) = &c.kind
+                && !out.iter().any(|(_, oa, ot)| oa == a && ot == t)
+            {
+                out.push((t.clone(), a.clone(), t.clone()));
+            }
+        }
+        // Two owners with the same container name: prefix the owner.
+        let mut names: Vec<&str> = out.iter().map(|(n, ..)| n.as_str()).collect();
+        names.sort();
+        names.dedup();
+        if names.len() < out.len() {
+            for (n, a, t) in &mut out {
+                *n = format!("{}{t}", pascal(a));
+            }
+        }
+        out
+    }
+
+    /// Elements as discriminated unions of readable records, and each ref'd
+    /// generic container as a class with exactly its classes' operations
+    /// (`classes`: per owner container, those this consumer may use), the
+    /// instantiations as aliases, and (`wire`) their JSON helpers.
+    fn typescript_containers(&self, wire: bool, classes: &BTreeMap<String, Vec<Class>>, o: &mut String) {
+        for e in &self.elements {
+            let variants: Vec<String> = e
+                .variants
+                .iter()
+                .map(|v| {
+                    let mut f = format!("{{ v: \"{}\"", v.name);
+                    for (i, fl) in v.fields.iter().enumerate() {
+                        f.push_str(&format!("; f{i}: {}", ts_repr(fl.repr)));
+                    }
+                    f + " }"
+                })
+                .collect();
+            o.push_str(&format!("/** A readable element: match every variant. */\nexport type {} =\n  | {};\n\n", e.name, variants.join("\n  | ")));
+            if wire {
+                let cm = camel(&e.name);
+                o.push_str(&format!("export function {cm}ToValue(e: {}): unknown {{\n  switch (e.v) {{\n", e.name));
+                for v in &e.variants {
+                    let vals: Vec<String> = v.fields.iter().enumerate().map(|(i, f)| ts_raw_encode(f.repr, &format!("e.f{i}"))).collect();
+                    o.push_str(&format!("    case \"{}\": return {{ v: \"{}\", f: [{}] }};\n", v.name, v.name, vals.join(", ")));
+                }
+                o.push_str(&format!(
+                    "    default: {{ const never: never = e; throw new Error(String(never)); }}\n  }}\n}}\n\n\
+                     export function {cm}FromValue(x: unknown): {} {{\n  \
+                     const j = x as {{ v?: unknown; f?: unknown }};\n  if (!Array.isArray(j.f)) throw new Error(\"missing f\");\n  const f: unknown[] = j.f;\n  switch (j.v) {{\n",
+                    e.name
+                ));
+                for v in &e.variants {
+                    let n = v.fields.len();
+                    let mut fields = String::new();
+                    for (i, fl) in v.fields.iter().enumerate() {
+                        fields.push_str(&format!(", f{i}: {}", ts_raw_decode(fl.repr, fl.max_len, &format!("f[{i}]"), &format!("{}.{} field {i}", e.name, v.name))));
+                    }
+                    o.push_str(&format!(
+                        "    case \"{}\":\n      if (f.length !== {n}) throw new Error(\"wrong field count for {}\");\n      return {{ v: \"{}\"{fields} }};\n",
+                        v.name, v.name, v.name
+                    ));
+                }
+                o.push_str("    default: throw new Error(`unknown variant ${String(j.v)}`);\n  }\n}\n\n");
+            }
+        }
+        let seqs = self.ts_seqs();
+        if seqs.iter().any(|(_, a, t)| classes.get(&format!("{a}.{t}")).is_some_and(|cs| cs.contains(&Class::Traversable))) {
+            o.push_str("export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E };\n\n");
+        }
+        for (name, a, t) in &seqs {
+            let cs = classes.get(&format!("{a}.{t}")).cloned().unwrap_or_default();
+            let ops: Vec<&str> = cs.iter().map(|c| c.name()).collect();
+            o.push_str(&format!(
+                "/** {a}.{t}: {} and nothing else (no length, no index, no iteration). */\n\
+                 export class {name}<A> {{\n  readonly #items: readonly A[];\n  private constructor(items: readonly A[]) {{ this.#items = items; }}\n  \
+                 static new<A>(items: readonly A[]): {name}<A> {{ return new {name}([...items]); }}\n  \
+                 foldr<B>(f: (a: A, acc: B) => B, z: B): B {{\n    let acc = z;\n    for (let i = this.#items.length - 1; i >= 0; i--) acc = f(this.#items[i], acc);\n    return acc;\n  }}\n",
+                ops.join(", ")
+            ));
+            if cs.contains(&Class::Functor) {
+                o.push_str(&format!("  fmap<B>(f: (a: A) => B): {name}<B> {{ return new {name}(this.#items.map((a) => f(a))); }}\n"));
+            }
+            if cs.contains(&Class::Traversable) {
+                o.push_str(&format!(
+                    "  traverse<B, E>(f: (a: A) => Result<B, E>): Result<{name}<B>, E> {{\n    const out: B[] = [];\n    \
+                     for (const a of this.#items) {{\n      const r = f(a);\n      if (!r.ok) return r;\n      out.push(r.value);\n    }}\n    \
+                     return {{ ok: true, value: new {name}(out) }};\n  }}\n"
+                ));
+            }
+            if cs.contains(&Class::Monoid) {
+                o.push_str(&format!(
+                    "  static empty<A>(): {name}<A> {{ return new {name}([]); }}\n  \
+                     append(other: {name}<A>): {name}<A> {{ return new {name}([...this.#items, ...other.#items]); }}\n  \
+                     foldMap<M>(f: (a: A) => M, empty: M, append: (x: M, y: M) => M): M {{ return this.foldr((a, acc) => append(f(a), acc), empty); }}\n"
+                ));
+            }
+            o.push_str("}\n\n");
+        }
+        for c in &self.containers {
+            if let ContainerKind::Of(of, a, t) = &c.kind {
+                let seq = &seqs.iter().find(|(_, oa, ot)| oa == a && ot == t).unwrap().0;
+                o.push_str(&format!(
+                    "export type {} = {seq}<{of}>;\nexport const {} = {{ new: (items: readonly {of}[]): {seq}<{of}> => {seq}.new(items) }};\n",
+                    c.name, c.name
+                ));
+                if wire {
+                    let cm = camel(&c.name);
+                    o.push_str(&format!(
+                        "export function {cm}ToValue(x: {}): unknown {{ return x.foldr((e, acc: unknown[]) => [{}ToValue(e), ...acc], []); }}\n\
+                         export function {cm}FromValue(v: unknown): {} {{\n  if (!Array.isArray(v)) throw new Error(\"expected array\");\n  \
+                         return {seq}.new(v.map((e) => {}FromValue(e)));\n}}\n",
+                        c.name,
+                        camel(of),
+                        c.name,
+                        camel(of)
+                    ));
+                }
+                o.push('\n');
+            }
+        }
+    }
+
+    /// The law tests of every generic container the TypeScript binding
+    /// generates (`node:test`), or `None` when it generates none.
+    pub fn typescript_laws(&self, classes: &BTreeMap<String, Vec<Class>>) -> Option<String> {
+        let seqs = self.ts_seqs();
+        if seqs.is_empty() {
+            return None;
+        }
+        let names: Vec<&str> = seqs.iter().map(|(n, ..)| n.as_str()).collect();
+        let mut o = format!(
+            "// @generated by `dashboard arch gen` from the {} IDL. Do not edit.\n\
+             // The class laws of the generated containers.\n\
+             import {{ test }} from \"node:test\";\nimport assert from \"node:assert/strict\";\n\
+             import {{ {} }} from \"./{}\";\n\n\
+             const ints: number[][] = [[], [7], [1, -2, 3], Array.from({{ length: 40 }}, (_, i) => ((i * 7919) % 101) - 50)];\n\
+             const strs: string[][] = ints.map((v) => v.map((x) => `s${{x}}`));\n\
+             const tree = (x: unknown, acc: string): string => `(${{String(x)}} ${{acc}})`;\n\n",
+            self.api,
+            names.join(", "),
+            self.api.replace('-', "_")
+        );
+        for (name, a, t) in &seqs {
+            let cs = classes.get(&format!("{a}.{t}")).cloned().unwrap_or_default();
+            o.push_str(&format!(
+                "const items{name} = <A>(s: {name}<A>): A[] => s.foldr((x, acc: A[]) => [x, ...acc], []);\n\n\
+                 test(\"foldable {name} laws\", () => {{\n  const law = <A>(xs: A[]) => {{\n    \
+                 const s = {name}.new(xs);\n    assert.deepEqual(items{name}(s), xs);\n    \
+                 const want = xs.slice().reverse().reduce<string>((acc, x) => tree(x, acc), \"\");\n    \
+                 assert.equal(s.foldr(tree, \"\"), want);\n  }};\n  for (const xs of ints) law(xs);\n  for (const xs of strs) law(xs);\n}});\n\n"
+            ));
+            if cs.contains(&Class::Functor) {
+                o.push_str(&format!(
+                    "test(\"functor {name} laws\", () => {{\n  const f = (x: number) => x * 3 + 1;\n  const g = (x: number) => x ^ 5;\n  \
+                     for (const xs of ints) {{\n    const s = {name}.new(xs);\n    \
+                     assert.deepEqual(items{name}(s.fmap((x) => x)), xs);\n    \
+                     assert.deepEqual(items{name}(s.fmap((x) => g(f(x)))), items{name}(s.fmap(f).fmap(g)));\n    \
+                     assert.equal(s.fmap(g).foldr(tree, \"\"), s.foldr((x, acc) => tree(g(x), acc), \"\"));\n  }}\n}});\n\n"
+                ));
+            }
+            if cs.contains(&Class::Traversable) {
+                o.push_str(&format!(
+                    "test(\"traversable {name} laws\", () => {{\n  const f = (x: number) => x * 3 + 1;\n  const bad = (x: number) => x % 3 === 0;\n  \
+                     for (const xs of ints) {{\n    const s = {name}.new(xs);\n    \
+                     const id = s.traverse((x) => ({{ ok: true, value: x }}) as Result<number, never>);\n    \
+                     assert.ok(id.ok && JSON.stringify(items{name}(id.value)) === JSON.stringify(xs));\n    \
+                     const step = (x: number): Result<number, number> => (bad(x) ? {{ ok: false, error: x }} : {{ ok: true, value: f(x) }});\n    \
+                     const got = s.traverse(step);\n    const first = xs.find(bad);\n    \
+                     if (first === undefined) assert.ok(got.ok && JSON.stringify(items{name}(got.value)) === JSON.stringify(xs.map(f)));\n    \
+                     else assert.ok(!got.ok && got.error === first);\n  }}\n}});\n\n"
+                ));
+            }
+            if cs.contains(&Class::Monoid) {
+                o.push_str(&format!(
+                    "test(\"monoid {name} laws\", () => {{\n  for (const xs of ints) {{\n    const n = (v: number[]) => {name}.new(v);\n    \
+                     assert.deepEqual(items{name}({name}.empty<number>().append(n(xs))), xs);\n    \
+                     assert.deepEqual(items{name}(n(xs).append({name}.empty())), xs);\n    \
+                     for (const ys of ints) {{\n      assert.deepEqual(items{name}(n(xs).append(n(ys))), [...xs, ...ys]);\n      \
+                     for (const zs of ints) assert.deepEqual(items{name}(n(xs).append(n(ys)).append(n(zs))), items{name}(n(xs).append(n(ys).append(n(zs)))));\n    }}\n    \
+                     assert.deepEqual(items{name}(n(xs).foldMap((x) => n([x]), {name}.empty<number>(), (a, b) => a.append(b))), xs);\n  }}\n}});\n\n"
+                ));
+            }
+        }
+        Some(o)
+    }
+
+    /// One sum as a tagged union with a constructor object, and (`wire`)
+    /// `toJson`/`fromJson` (the default sum) or `<sum>ToJson`/`<sum>FromJson`.
+    fn typescript_sum(&self, en: &str, ctors: &[Ctor], wire: bool, is_default: bool, o: &mut String) {
+        let variants: Vec<String> = ctors
             .iter()
             .map(|c| {
                 let mut f = format!("{{ kind: \"{}\"", c.name);
@@ -772,7 +1673,7 @@ impl Idl {
             .collect();
         o.push_str(&format!("export type {en} =\n  | {};\n\n", variants.join("\n  | ")));
         o.push_str(&format!("export const {en} = {{\n"));
-        for c in &self.ctors {
+        for c in ctors {
             let params: Vec<String> = c.args.iter().enumerate().map(|(i, a)| format!("a{i}: {a}")).collect();
             let mut fields = format!("kind: \"{}\"", c.name);
             for i in 0..c.args.len() {
@@ -782,22 +1683,33 @@ impl Idl {
         }
         o.push_str("};\n");
         if wire {
-            o.push_str(&format!("\nexport function toJson(v: {en}): string {{\n  switch (v.kind) {{\n"));
-            for c in &self.ctors {
-                let vals: Vec<String> = (0..c.args.len()).map(|i| format!("v.a{i}.toValue()")).collect();
+            let (to, from, to_v, from_v) = if is_default {
+                ("toJson".to_string(), "fromJson".to_string(), "toValue".to_string(), "fromValue".to_string())
+            } else {
+                (format!("{}ToJson", camel(en)), format!("{}FromJson", camel(en)), format!("{}ToValue", camel(en)), format!("{}FromValue", camel(en)))
+            };
+            o.push_str(&format!("\nexport function {to_v}(v: {en}): unknown {{\n  switch (v.kind) {{\n"));
+            for c in ctors {
+                let vals: Vec<String> = c.args.iter().enumerate().map(|(i, t)| self.ts_wire_encode(t, &format!("v.a{i}"))).collect();
                 o.push_str(&format!(
-                    "    case \"{}\": return JSON.stringify({{ c: \"{}\", a: [{}] }});\n",
+                    "    case \"{}\": return {{ c: \"{}\", a: [{}] }};\n",
                     c.name, c.name, vals.join(", ")
                 ));
             }
+            // One constructor is no union: TypeScript can't narrow it to never.
+            if ctors.len() > 1 {
+                o.push_str("    default: { const never: never = v; throw new Error(String(never)); }\n");
+            }
             o.push_str(&format!(
-                "    default: {{ const never: never = v; throw new Error(String(never)); }}\n  }}\n}}\n\n\
-                 export function fromJson(s: string): {en} {{\n  const j = JSON.parse(s) as {{ c?: unknown; a?: unknown }};\n  \
+                "  }}\n}}\n\nexport function {to}(v: {en}): string {{ return JSON.stringify({to_v}(v)); }}\n\n\
+                 export function {from}(s: string): {en} {{ return {from_v}(JSON.parse(s)); }}\n\n\
+                 export function {from_v}(x: unknown): {en} {{\n  const j = x as {{ c?: unknown; a?: unknown; error?: unknown }};\n  \
+                 if (typeof j.error === \"string\") throw new Error(j.error);\n  \
                  if (!Array.isArray(j.a)) throw new Error(\"missing a\");\n  const a: unknown[] = j.a;\n  switch (j.c) {{\n"
             ));
-            for c in &self.ctors {
+            for c in ctors {
                 let n = c.args.len();
-                let args: Vec<String> = c.args.iter().enumerate().map(|(i, t)| format!("{t}.fromValue(a[{i}])")).collect();
+                let args: Vec<String> = c.args.iter().enumerate().map(|(i, t)| self.ts_wire_decode(t, &format!("a[{i}]"))).collect();
                 o.push_str(&format!(
                     "    case \"{}\":\n      if (a.length !== {n}) throw new Error(\"wrong argument count for {}\");\n      return {en}.{}({});\n",
                     c.name, c.name, c.name, args.join(", ")
@@ -805,9 +1717,10 @@ impl Idl {
             }
             o.push_str("    default: throw new Error(`unknown constructor ${String(j.c)}`);\n  }\n}\n");
         }
-        o
+        o.push('\n');
     }
-    /// Generated Kotlin: package `api.<name>`; a `sealed interface` for the
+
+    /// Generated Kotlin: package `api.<name>`; a `sealed interface` per
     /// sum, plain (not data, not value) classes for the opaque `T`s. `wire`
     /// as in `rust`, with a small file-private JSON codec, no dependency.
     pub fn kotlin(&self, wire: bool) -> String {
@@ -819,23 +1732,43 @@ impl Idl {
              package {pkg}\n\n",
             self.api
         );
+        if self.types.iter().any(|t| !self.rules_of(t).is_empty()) {
+            o.push_str(VIOLATION_KT);
+        }
         for t in &self.types {
+            let rules = self.rules_of(t);
+            let guard: String = rules
+                .iter()
+                .map(|r| format!("    init {{ if (!({})) throw Violation(\"{}\", {}) }}\n", r.kotlin, t.name, js_str(&r.text)))
+                .collect();
+            if let Kind::Tuple(fs) = &t.kind {
+                // A product is the components themselves: no tuple type needed.
+                let params: Vec<String> = fs.iter().enumerate().map(|(i, f)| format!("private val v{}: {}", i + 1, kotlin_repr(f.repr))).collect();
+                o.push_str(&format!("class {}({}) {{\n{guard}", t.name, params.join(", ")));
+                if wire {
+                    let enc: Vec<String> = fs.iter().enumerate().map(|(i, f)| kotlin_raw_encode(f.repr, &format!("v{}", i + 1))).collect();
+                    let dec: Vec<String> = fs.iter().enumerate().map(|(i, f)| kotlin_raw_decode(f.repr, &format!("a[{i}]"))).collect();
+                    o.push_str(&format!(
+                        "    internal fun toValue(): Any? = listOf<Any?>({})\n    companion object {{\n        internal fun fromValue(x: Any?): {} {{\n            \
+                         val a = x as? List<*> ?: throw IllegalArgumentException(\"expected list\")\n            \
+                         require(a.size == {}) {{ \"wrong component count for {}\" }}\n            return {}({})\n        }}\n    }}\n",
+                        enc.join(", "),
+                        t.name,
+                        fs.len(),
+                        t.name,
+                        t.name,
+                        dec.join(", ")
+                    ));
+                }
+                o.push_str("}\n\n");
+                continue;
+            }
             let (inner, enc, dec) = match &t.kind {
-                Kind::Repr(Repr::String) => ("String".to_string(), "v".to_string(),
-                    "x as? String ?: throw IllegalArgumentException(\"expected string\")".to_string()),
-                Kind::Repr(Repr::Bytes) => ("ByteArray".to_string(),
-                    "v.joinToString(\"\") { \"%02x\".format(it) }".to_string(),
-                    "(x as? String)?.takeIf { it.length % 2 == 0 && it.all { c -> c in \"0123456789abcdef\" } }?.chunked(2)?.map { it.toInt(16).toByte() }?.toByteArray() ?: throw IllegalArgumentException(\"expected hex string\")".to_string()),
-                Kind::Repr(Repr::I64) => ("Long".to_string(), "v".to_string(),
-                    "x as? Long ?: throw IllegalArgumentException(\"expected integer\")".to_string()),
-                Kind::Repr(Repr::F64) => ("Double".to_string(), "v".to_string(),
-                    "(x as? Number)?.toDouble() ?: throw IllegalArgumentException(\"expected number\")".to_string()),
-                Kind::Repr(Repr::Bool) => ("Boolean".to_string(), "v".to_string(),
-                    "x as? Boolean ?: throw IllegalArgumentException(\"expected boolean\")".to_string()),
-                Kind::Ref(a, ty) => (format!("{}.{ty}", kotlin_pkg(a)), "v.toValue()".to_string(),
-                    format!("{}.{ty}.fromValue(x)", kotlin_pkg(a))),
+                Kind::Repr(r) => (kotlin_repr(*r).to_string(), kotlin_raw_encode(*r, "v"), kotlin_raw_decode(*r, "x")),
+                Kind::Ref(a, ty) => (format!("{}.{ty}", kotlin_pkg(a)), "v.toValue()".to_string(), format!("{}.{ty}.fromValue(x)", kotlin_pkg(a))),
+                Kind::Tuple(_) => unreachable!(),
             };
-            o.push_str(&format!("class {}(private val v: {inner}) {{\n", t.name));
+            o.push_str(&format!("class {}(private val v: {inner}) {{\n{guard}", t.name));
             if t.display {
                 let body = match t.kind {
                     Kind::Repr(Repr::Bytes) => "v.joinToString(\"\") { \"%02x\".format(it) }",
@@ -852,43 +1785,524 @@ impl Idl {
             }
             o.push_str("}\n\n");
         }
-        o.push_str(&format!("sealed interface {en} {{\n"));
-        for c in &self.ctors {
-            if c.args.is_empty() {
-                o.push_str(&format!("    object {} : {en}\n", c.name));
+        for k in &self.tokens {
+            let inner = kotlin_repr(k.repr);
+            let versioned = matches!(k.kind, TokenKind::Versioned(_));
+            let (params, args) = if versioned {
+                (format!("private val v: {inner}, private val version: Long"), "v, version")
             } else {
-                let ps: Vec<String> = c.args.iter().enumerate().map(|(i, a)| format!("val a{i}: {a}")).collect();
-                o.push_str(&format!("    class {}({}) : {en}\n", c.name, ps.join(", ")));
-            }
-        }
-        o.push_str("}\n");
-        if wire {
-            o.push_str(&format!("\nfun toJson(v: {en}): String = Wire.write(when (v) {{\n"));
-            for c in &self.ctors {
-                let vals: Vec<String> = (0..c.args.len()).map(|i| format!("v.a{i}.toValue()")).collect();
-                let pat = if c.args.is_empty() { format!("{en}.{}", c.name) } else { format!("is {en}.{}", c.name) };
-                o.push_str(&format!(
-                    "    {pat} -> mapOf(\"c\" to \"{}\", \"a\" to listOf<Any?>({}))\n",
-                    c.name, vals.join(", ")
-                ));
-            }
+                (format!("private val v: {inner}"), "v")
+            };
+            let mint_params = params.replace("private val ", "");
             o.push_str(&format!(
-                "}})\n\nfun fromJson(s: String): {en} {{\n    val j = Wire.read(s) as? Map<*, *> ?: throw IllegalArgumentException(\"expected object\")\n    \
-                 val a = j[\"a\"] as? List<*> ?: throw IllegalArgumentException(\"missing a\")\n    return when (val c = j[\"c\"]) {{\n"
+                "/** Evidence ({}): only the generator of `{}` mints one; a consumer calling `mint` is a lint finding. */\n\
+                 class {} private constructor({params}) {{\n",
+                k.kind.word(),
+                self.api,
+                k.name
             ));
-            for c in &self.ctors {
-                let n = c.args.len();
-                let args: Vec<String> = c.args.iter().enumerate().map(|(i, t)| format!("{t}.fromValue(a[{i}])")).collect();
-                let build = if n == 0 { format!("{en}.{}", c.name) } else { format!("{en}.{}({})", c.name, args.join(", ")) };
-                o.push_str(&format!(
-                    "        \"{}\" -> {{\n            require(a.size == {n}) {{ \"wrong argument count for {}\" }}\n            {build}\n        }}\n",
-                    c.name, c.name
-                ));
+            let bound = match k.repr {
+                Repr::String if k.max_len > 0 => format!("    init {{ require(v.codePointCount(0, v.length) <= {}) {{ \"{} longer than {}\" }} }}\n", k.max_len, k.name, k.max_len),
+                Repr::Bytes if k.max_len > 0 => format!("    init {{ require(v.size <= {}) {{ \"{} longer than {}\" }} }}\n", k.max_len, k.name, k.max_len),
+                _ => String::new(),
+            };
+            o.push_str(&bound);
+            if wire {
+                let enc = kotlin_raw_encode(k.repr, "v");
+                if versioned {
+                    o.push_str(&format!("    internal fun toValue(): Any? = listOf<Any?>({enc}, version)\n"));
+                } else {
+                    o.push_str(&format!("    internal fun toValue(): Any? = {enc}\n"));
+                }
             }
-            o.push_str("        else -> throw IllegalArgumentException(\"unknown constructor $c\")\n    }\n}\n");
+            o.push_str(&format!("    companion object {{\n        fun mint({mint_params}): {} = {}({args})\n", k.name, k.name));
+            if wire {
+                if versioned {
+                    o.push_str(&format!(
+                        "        internal fun fromValue(x: Any?): {} {{\n            \
+                         val a = x as? List<*> ?: throw IllegalArgumentException(\"expected [id, version]\")\n            \
+                         require(a.size == 2) {{ \"expected [id, version]\" }}\n            return {}({}, {})\n        }}\n",
+                        k.name,
+                        k.name,
+                        kotlin_raw_decode(k.repr, "a[0]"),
+                        kotlin_raw_decode(Repr::I64, "a[1]")
+                    ));
+                } else {
+                    o.push_str(&format!("        internal fun fromValue(x: Any?): {} = {}({})\n", k.name, k.name, kotlin_raw_decode(k.repr, "x")));
+                }
+            }
+            o.push_str("    }\n}\n\n");
+        }
+        for (name, ctors) in self.sum_list() {
+            let is_default = name == en;
+            o.push_str(&format!("sealed interface {name} {{\n"));
+            for c in ctors {
+                if c.args.is_empty() {
+                    o.push_str(&format!("    object {} : {name}\n", c.name));
+                } else {
+                    let ps: Vec<String> = c.args.iter().enumerate().map(|(i, a)| format!("val a{i}: {a}")).collect();
+                    o.push_str(&format!("    class {}({}) : {name}\n", c.name, ps.join(", ")));
+                }
+            }
+            o.push_str("}\n");
+            if wire {
+                let from = if is_default { "fromJson".to_string() } else { format!("fromJson{name}") };
+                o.push_str(&format!("\nfun toJson(v: {name}): String = Wire.write(when (v) {{\n"));
+                for c in ctors {
+                    let vals: Vec<String> = (0..c.args.len()).map(|i| format!("v.a{i}.toValue()")).collect();
+                    let pat = if c.args.is_empty() { format!("{name}.{}", c.name) } else { format!("is {name}.{}", c.name) };
+                    o.push_str(&format!(
+                        "    {pat} -> mapOf(\"c\" to \"{}\", \"a\" to listOf<Any?>({}))\n",
+                        c.name, vals.join(", ")
+                    ));
+                }
+                o.push_str(&format!(
+                    "}})\n\nfun {from}(s: String): {name} {{\n    val j = Wire.read(s) as? Map<*, *> ?: throw IllegalArgumentException(\"expected object\")\n    \
+                     (j[\"error\"] as? String)?.let {{ throw IllegalArgumentException(it) }}\n    \
+                     val a = j[\"a\"] as? List<*> ?: throw IllegalArgumentException(\"missing a\")\n    return when (val c = j[\"c\"]) {{\n"
+                ));
+                for c in ctors {
+                    let n = c.args.len();
+                    let args: Vec<String> = c.args.iter().enumerate().map(|(i, t)| format!("{t}.fromValue(a[{i}])")).collect();
+                    let build = if n == 0 { format!("{name}.{}", c.name) } else { format!("{name}.{}({})", c.name, args.join(", ")) };
+                    o.push_str(&format!(
+                        "        \"{}\" -> {{\n            require(a.size == {n}) {{ \"wrong argument count for {}\" }}\n            {build}\n        }}\n",
+                        c.name, c.name
+                    ));
+                }
+                o.push_str("        else -> throw IllegalArgumentException(\"unknown constructor $c\")\n    }\n}\n");
+            }
+            o.push('\n');
+        }
+        if !self.fns.is_empty() {
+            o.push_str(&format!("/** The {} call surface. */\ninterface {en} {{\n", self.api));
+            for f in &self.fns {
+                o.push_str(&format!("    fun {}({}): {}\n", f.name, kotlin_params(&f.inputs), f.returns));
+            }
+            o.push_str("}\n\n");
+        }
+        if wire {
             o.push_str(include_str!("kotlin_wire.kt"));
         }
         o
+    }
+}
+
+/// `json!(<expr>)` / hex for a raw value of repr `r`.
+fn rust_raw_encode(r: Repr, expr: &str) -> String {
+    match r {
+        Repr::Bytes => format!("Value::String({expr}.iter().map(|b| format!(\"{{b:02x}}\")).collect())"),
+        _ => format!("json!({expr})"),
+    }
+}
+
+/// An expression decoding the `&Value` `v` into a raw value of repr `r`
+/// (`Result`-propagating with `?`).
+fn rust_raw_decode(r: Repr, v: &str) -> String {
+    match r {
+        Repr::Bytes => format!(
+            "let s = {v}.as_str().ok_or(\"expected hex string\")?;\n        \
+             if s.len() % 2 != 0 {{ return Err(\"odd hex length\".into()); }}\n        \
+             let mut b = Vec::new();\n        \
+             for i in (0..s.len()).step_by(2) {{ b.push(u8::from_str_radix(s.get(i..i + 2).ok_or(\"bad hex\")?, 16).map_err(|e| e.to_string())?); }}\n        \
+             b"
+        ),
+        Repr::String => format!("{v}.as_str().ok_or(\"expected string\")?.to_string()"),
+        Repr::I64 => format!("{v}.as_i64().ok_or(\"expected i64\")?"),
+        Repr::F64 => format!("{v}.as_f64().ok_or(\"expected f64\")?"),
+        Repr::Bool => format!("{v}.as_bool().ok_or(\"expected bool\")?"),
+    }
+}
+
+fn kotlin_repr(r: Repr) -> &'static str {
+    match r {
+        Repr::String => "String",
+        Repr::Bytes => "ByteArray",
+        Repr::I64 => "Long",
+        Repr::F64 => "Double",
+        Repr::Bool => "Boolean",
+    }
+}
+
+fn kotlin_raw_encode(r: Repr, expr: &str) -> String {
+    match r {
+        Repr::Bytes => format!("{expr}.joinToString(\"\") {{ \"%02x\".format(it) }}"),
+        _ => expr.to_string(),
+    }
+}
+
+/// An expression decoding the `Any?` `x` into a raw value of repr `r`.
+fn kotlin_raw_decode(r: Repr, x: &str) -> String {
+    match r {
+        Repr::String => format!("{x} as? String ?: throw IllegalArgumentException(\"expected string\")"),
+        Repr::Bytes => format!(
+            "({x} as? String)?.takeIf {{ it.length % 2 == 0 && it.all {{ c -> c in \"0123456789abcdef\" }} }}?.chunked(2)?.map {{ it.toInt(16).toByte() }}?.toByteArray() ?: throw IllegalArgumentException(\"expected hex string\")"
+        ),
+        Repr::I64 => format!("{x} as? Long ?: throw IllegalArgumentException(\"expected integer\")"),
+        Repr::F64 => format!("({x} as? Number)?.toDouble() ?: throw IllegalArgumentException(\"expected number\")"),
+        Repr::Bool => format!("{x} as? Boolean ?: throw IllegalArgumentException(\"expected boolean\")"),
+    }
+}
+
+/// A string literal valid in TypeScript and Kotlin (JSON escaping).
+fn js_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// One check of a smart constructor, rendered for each language, and the
+/// rule text a `Violation` carries.
+struct Rule {
+    text: String,
+    rust: String,
+    ts: String,
+    kotlin: String,
+}
+
+const VIOLATION_RS: &str = "\
+/// A value that breaks a rule of the IDL: the type and the rule, as written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Violation {
+    pub type_name: &'static str,
+    pub rule: &'static str,
+}
+impl std::fmt::Display for Violation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, \"{}: {}\", self.type_name, self.rule) }
+}
+impl std::error::Error for Violation {}
+
+";
+
+const VIOLATION_TS: &str = "\
+/** A value that breaks a rule of the IDL: the type and the rule, as written. */
+export class Violation extends Error {
+  constructor(readonly typeName: string, readonly rule: string) { super(`${typeName}: ${rule}`); this.name = \"Violation\"; }
+}
+
+";
+
+const VIOLATION_KT: &str = "\
+/** A value that breaks a rule of the IDL: the type and the rule, as written. */
+class Violation(val typeName: String, val rule: String) : IllegalArgumentException(\"$typeName: $rule\")
+
+";
+
+/// What an operand reads, so the literal on the other side renders in the
+/// language's type (`20000.0`, `20000n`, `20000L`).
+#[derive(Clone, Copy, PartialEq)]
+enum Slot {
+    Repr(Repr),
+    Len,
+}
+
+impl Atom {
+    fn slot(&self, comps: &[Field]) -> Option<Slot> {
+        match self {
+            Atom::V => comps.first().map(|f| Slot::Repr(f.repr)),
+            Atom::Field(i) => comps.get((*i as usize).saturating_sub(1)).map(|f| Slot::Repr(f.repr)),
+            Atom::Len => Some(Slot::Len),
+            _ => None,
+        }
+    }
+
+    fn is_literal(&self) -> bool {
+        matches!(self, Atom::Num(_) | Atom::Str(_) | Atom::Bool(_))
+    }
+
+    fn check(&self, comps: &[Field]) -> Result<(), String> {
+        match self {
+            Atom::V if comps.len() != 1 => Err("a product is compared by component: v.1, v.2, …".into()),
+            Atom::Field(i) if comps.len() < 2 => Err(format!("v.{i} is for a product type")),
+            Atom::Field(i) if *i == 0 || *i as usize > comps.len() => Err(format!("v.{i}: the product has {} components", comps.len())),
+            Atom::Len if comps.len() != 1 || !matches!(comps[0].repr, Repr::String | Repr::Bytes) => {
+                Err("`.length` is for a string or bytes type".into())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The Lean text.
+    fn render(&self) -> String {
+        match self {
+            Atom::V => "v".into(),
+            Atom::Field(i) => format!("v.{i}"),
+            Atom::Len => "v.length".into(),
+            Atom::Num(t) => t.clone(),
+            Atom::Str(s) => format!("{s:?}"),
+            Atom::Bool(b) => b.to_string(),
+        }
+    }
+
+    /// `v.length` of a scalar, or `v.N.length` of a product's component.
+    fn len_text(at: Option<usize>) -> String {
+        match at {
+            Some(i) => format!("v.{}.length", i + 1),
+            None => "v.length".into(),
+        }
+    }
+
+    fn rust_len(r: Repr, at: Option<usize>) -> String {
+        let base = match at {
+            Some(i) => format!("v.{i}"),
+            None => "v".into(),
+        };
+        match r {
+            Repr::String => format!("{base}.chars().count()"),
+            _ => format!("{base}.len()"),
+        }
+    }
+
+    fn ts_len(r: Repr, at: Option<usize>) -> String {
+        let base = match at {
+            Some(i) => format!("v[{i}]"),
+            None => "v".into(),
+        };
+        match r {
+            Repr::String => format!("[...{base}].length"),
+            _ => format!("{base}.length"),
+        }
+    }
+
+    fn kotlin_len(r: Repr, at: Option<usize>) -> String {
+        let base = match at {
+            Some(i) => format!("v{}", i + 1),
+            None => "v".into(),
+        };
+        match r {
+            Repr::String => format!("{base}.codePointCount(0, {base}.length)"),
+            _ => format!("{base}.size"),
+        }
+    }
+
+    fn rust(&self, comps: &[Field], slot: Option<Slot>) -> String {
+        let read = |base: String, r: Repr| match r {
+            Repr::String => format!("{base}.as_str()"),
+            Repr::Bytes => format!("{base}.as_slice()"),
+            _ => base,
+        };
+        match self {
+            Atom::V => read("v".into(), comps[0].repr),
+            Atom::Field(i) => read(format!("v.{}", i - 1), comps[*i as usize - 1].repr),
+            Atom::Len => Atom::rust_len(comps[0].repr, None),
+            Atom::Num(t) => match slot {
+                Some(Slot::Repr(Repr::F64)) if !t.contains(['.', 'e', 'E']) => format!("{t}.0"),
+                _ => t.clone(),
+            },
+            Atom::Str(s) => format!("{s:?}"),
+            Atom::Bool(b) => b.to_string(),
+        }
+    }
+
+    fn ts(&self, comps: &[Field], slot: Option<Slot>) -> String {
+        match self {
+            Atom::V => "v".into(),
+            Atom::Field(i) => format!("v[{}]", i - 1),
+            Atom::Len => Atom::ts_len(comps[0].repr, None),
+            Atom::Num(t) => match slot {
+                Some(Slot::Repr(Repr::I64)) => format!("{t}n"),
+                _ => t.clone(),
+            },
+            Atom::Str(s) => js_str(s),
+            Atom::Bool(b) => b.to_string(),
+        }
+    }
+
+    fn kotlin(&self, comps: &[Field], slot: Option<Slot>) -> String {
+        match self {
+            Atom::V => "v".into(),
+            Atom::Field(i) => format!("v{i}"),
+            Atom::Len => Atom::kotlin_len(comps[0].repr, None),
+            Atom::Num(t) => match slot {
+                Some(Slot::Repr(Repr::I64)) => format!("{t}L"),
+                Some(Slot::Repr(Repr::F64)) if !t.contains(['.', 'e', 'E']) => format!("{t}.0"),
+                _ => t.clone(),
+            },
+            Atom::Str(s) => js_str(s),
+            Atom::Bool(b) => b.to_string(),
+        }
+    }
+}
+
+impl Op {
+    fn text(self) -> &'static str {
+        match self {
+            Op::Lt => "<",
+            Op::Le => "≤",
+            Op::Eq => "=",
+            Op::Ne => "≠",
+        }
+    }
+
+    /// `(Rust, TypeScript, Kotlin)` operators.
+    fn code(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Op::Lt => ("<", "<", "<"),
+            Op::Le => ("<=", "<=", "<="),
+            Op::Eq => ("==", "===", "=="),
+            Op::Ne => ("!=", "!==", "!="),
+        }
+    }
+}
+
+impl Pred {
+    /// Comparisons and memberships in the predicate (the `max_rules` measure).
+    pub fn leaves(&self) -> u64 {
+        match self {
+            Pred::Cmp(..) | Pred::Mem(..) => 1,
+            Pred::And(p, q) | Pred::Or(p, q) => p.leaves() + q.leaves(),
+            Pred::Not(p) => p.leaves(),
+        }
+    }
+
+    /// Structural checks against the type's components (Lean has already
+    /// type-checked the predicate; an export is trusted but not blindly).
+    pub(crate) fn check(&self, comps: &[Field]) -> Result<(), String> {
+        match self {
+            Pred::Cmp(_, l, r) => {
+                l.check(comps)?;
+                r.check(comps)
+            }
+            Pred::Mem(a, ls) => {
+                a.check(comps)?;
+                if a.is_literal() || ls.is_empty() || !ls.iter().all(Atom::is_literal) {
+                    return Err("`∈` compares v with a non-empty list of literals".into());
+                }
+                Ok(())
+            }
+            Pred::And(p, q) | Pred::Or(p, q) => {
+                p.check(comps)?;
+                q.check(comps)
+            }
+            Pred::Not(p) => p.check(comps),
+        }
+    }
+
+    /// The predicate as written in the IDL (and as `Idl::lean` prints it).
+    pub fn render(&self) -> String {
+        self.render_at(0)
+    }
+
+    fn prec(&self) -> u32 {
+        match self {
+            Pred::Cmp(..) | Pred::Mem(..) => 50,
+            Pred::And(..) => 35,
+            Pred::Or(..) => 30,
+            Pred::Not(_) => 1024,
+        }
+    }
+
+    fn render_at(&self, min: u32) -> String {
+        let s = match self {
+            Pred::Cmp(op, l, r) => format!("{} {} {}", l.render(), op.text(), r.render()),
+            Pred::Mem(a, ls) => format!("{} ∈ [{}]", a.render(), ls.iter().map(Atom::render).collect::<Vec<_>>().join(", ")),
+            Pred::And(p, q) => format!("{} ∧ {}", p.render_at(36), q.render_at(35)),
+            Pred::Or(p, q) => format!("{} ∨ {}", p.render_at(31), q.render_at(30)),
+            Pred::Not(p) => format!("¬({})", p.render()),
+        };
+        if self.prec() < min { format!("({s})") } else { s }
+    }
+
+    fn code(&self, comps: &[Field], atom: &dyn std::ops::Fn(&Atom, Option<Slot>) -> String, ops: fn(Op) -> &'static str, mem: &dyn std::ops::Fn(String, Vec<String>) -> String, and: &str, or: &str) -> String {
+        match self {
+            Pred::Cmp(op, l, r) => {
+                let slot = l.slot(comps).or_else(|| r.slot(comps));
+                format!("({} {} {})", atom(l, slot), ops(*op), atom(r, slot))
+            }
+            Pred::Mem(a, ls) => {
+                let slot = a.slot(comps);
+                mem(atom(a, slot), ls.iter().map(|l| atom(l, slot)).collect())
+            }
+            Pred::And(p, q) => format!("({} {and} {})", p.code(comps, atom, ops, mem, and, or), q.code(comps, atom, ops, mem, and, or)),
+            Pred::Or(p, q) => format!("({} {or} {})", p.code(comps, atom, ops, mem, and, or), q.code(comps, atom, ops, mem, and, or)),
+            Pred::Not(p) => format!("(!{})", p.code(comps, atom, ops, mem, and, or)),
+        }
+    }
+
+    /// The check as a Rust expression over `v`.
+    pub fn rust(&self, comps: &[Field]) -> String {
+        self.code(comps, &|a, s| a.rust(comps, s), |o| o.code().0, &|a, ls| format!("[{}].contains(&{a})", ls.join(", ")), "&&", "||")
+    }
+
+    /// The check as a TypeScript expression over `v`.
+    pub fn ts(&self, comps: &[Field]) -> String {
+        self.code(comps, &|a, s| a.ts(comps, s), |o| o.code().1, &|a, ls| format!("[{}].includes({a})", ls.join(", ")), "&&", "||")
+    }
+
+    /// The check as a Kotlin expression over `v` (`v1`, `v2`… of a product).
+    pub fn kotlin(&self, comps: &[Field]) -> String {
+        self.code(comps, &|a, s| a.kotlin(comps, s), |o| o.code().2, &|a, ls| format!("({a} in listOf({}))", ls.join(", ")), "&&", "||")
+    }
+}
+
+fn ts_repr(r: Repr) -> &'static str {
+    match r {
+        Repr::String => "string",
+        Repr::Bytes => "Uint8Array",
+        Repr::I64 => "bigint",
+        Repr::F64 => "number",
+        Repr::Bool => "boolean",
+    }
+}
+
+fn ts_raw_encode(r: Repr, expr: &str) -> String {
+    match r {
+        Repr::Bytes => format!("Array.from({expr}, (b) => b.toString(16).padStart(2, \"0\")).join(\"\")"),
+        Repr::I64 => format!("Number({expr})"),
+        _ => expr.to_string(),
+    }
+}
+
+/// An expression decoding the unknown `v` into a raw value of repr `r`,
+/// checking `max_len` (0: none); `what` names the field in errors.
+fn ts_raw_decode(r: Repr, max_len: u64, v: &str, what: &str) -> String {
+    let bound = |len: &str| if max_len > 0 { format!(" if ({len} > {max_len}) throw new Error(\"{what} longer than {max_len}\");") } else { String::new() };
+    match r {
+        Repr::String => format!("((x) => {{ if (typeof x !== \"string\") throw new Error(\"{what}: expected string\");{} return x; }})({v})", bound("[...x].length")),
+        Repr::Bytes => format!(
+            "((x) => {{ if (typeof x !== \"string\" || !/^([0-9a-f]{{2}})*$/.test(x)) throw new Error(\"{what}: expected hex string\"); \
+             const b = Uint8Array.from(x.match(/../g) ?? [], (h) => parseInt(h, 16));{} return b; }})({v})",
+            bound("b.length")
+        ),
+        Repr::I64 => format!("((x) => {{ if (typeof x !== \"number\" || !Number.isSafeInteger(x)) throw new Error(\"{what}: expected a safe integer\"); return BigInt(x); }})({v})"),
+        Repr::F64 => format!("((x) => {{ if (typeof x !== \"number\") throw new Error(\"{what}: expected number\"); return x; }})({v})"),
+        Repr::Bool => format!("((x) => {{ if (typeof x !== \"boolean\") throw new Error(\"{what}: expected boolean\"); return x; }})({v})"),
+    }
+}
+
+/// Parameter names for a fn's inputs: the type's snake case, numbered when
+/// a type repeats.
+fn param_names(inputs: &[String], case: fn(&str) -> String) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, t) in inputs.iter().enumerate() {
+        let base = case(t);
+        let dup = inputs.iter().filter(|x| *x == t).count() > 1;
+        out.push(if dup { format!("{base}{i}") } else { base });
+    }
+    out
+}
+
+fn rust_params(inputs: &[String]) -> String {
+    param_names(inputs, snake).iter().zip(inputs).map(|(n, t)| format!(", {n}: {t}")).collect()
+}
+
+fn ts_param_names(inputs: &[String]) -> Vec<String> {
+    param_names(inputs, camel)
+}
+
+fn ts_params(inputs: &[String]) -> String {
+    ts_param_names(inputs).iter().zip(inputs).map(|(n, t)| format!("{n}: {t}")).collect::<Vec<_>>().join(", ")
+}
+
+fn kotlin_params(inputs: &[String]) -> String {
+    ts_params(inputs)
+}
+
+/// `Written` -> `written`, `insert_product` -> `insertProduct`.
+fn camel(s: &str) -> String {
+    let p = pascal(s);
+    let mut c = p.chars();
+    match c.next() {
+        Some(f) => f.to_ascii_lowercase().to_string() + c.as_str(),
+        None => String::new(),
     }
 }
 
@@ -1048,6 +2462,129 @@ const MONOID_LAWS: &str = "
     }
 ";
 
+fn lean_ident(name: &str) -> String {
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        name.to_string()
+    } else {
+        format!("«{name}»")
+    }
+}
+
+fn lean_prim(repr: Repr, max_len: u64) -> String {
+    match (repr, max_len) {
+        (Repr::String, 0) => "string".to_string(),
+        (Repr::String, n) => format!("string {n}"),
+        (Repr::Bytes, 0) => "bytes".to_string(),
+        (Repr::Bytes, n) => format!("bytes {n}"),
+        (Repr::I64, _) => "i64".to_string(),
+        (Repr::F64, _) => "f64".to_string(),
+        (Repr::Bool, _) => "bool".to_string(),
+    }
+}
+
+fn lean_ctor(c: &Ctor) -> String {
+    if c.args.is_empty() {
+        format!("  | {}\n", c.name)
+    } else {
+        format!("  | {} : {}\n", c.name, c.args.join(" → "))
+    }
+}
+
+impl Idl {
+    /// The IDL as `architecture/Apis/<api>.lean` (`dashboard arch migrate`),
+    /// in the Lean DSL: the same declarations in the same order. Refs to
+    /// other APIs become imports of their files.
+    pub fn lean(&self) -> String {
+        let mut imports: Vec<&str> = self.refs().into_iter().map(|(a, _)| a).collect();
+        imports.extend(self.container_refs().into_iter().map(|(a, _)| a));
+        imports.sort();
+        imports.dedup();
+        let mut o = String::from("import Architecture\n");
+        for a in imports {
+            o.push_str(&format!("import Apis.«{a}»\n"));
+        }
+        o.push_str(&format!("open Dashboard\n\nidl {} where\n", lean_ident(&self.api)));
+        for t in &self.types {
+            match &t.kind {
+                Kind::Repr(r) => o.push_str(&format!("  type {} : {}", t.name, lean_prim(*r, t.max_len))),
+                Kind::Tuple(fs) => o.push_str(&format!(
+                    "  type {} : {}",
+                    t.name,
+                    fs.iter().map(|f| lean_prim(f.repr, f.max_len)).collect::<Vec<_>>().join(" × ")
+                )),
+                Kind::Ref(a, ty) => {
+                    o.push_str(&format!("  type {} : ref {}.{ty}\n", t.name, lean_ident(a)));
+                    continue;
+                }
+            }
+            if t.display {
+                o.push_str(" display");
+            }
+            if t.store {
+                o.push_str(" store");
+            }
+            if let Some(p) = &t.pred {
+                o.push_str(&format!(" where {}", p.render()));
+            }
+            o.push('\n');
+        }
+        for k in &self.tokens {
+            let kind = match &k.kind {
+                TokenKind::Permanent => "permanent".to_string(),
+                TokenKind::Versioned(c) => format!("versioned stale={c}"),
+                TokenKind::Linear(c) => format!("linear spent={c}"),
+            };
+            o.push_str(&format!("  token {} : {} {kind}", k.name, lean_prim(k.repr, k.max_len)));
+            if k.store {
+                o.push_str(" store");
+            }
+            o.push('\n');
+        }
+        for e in &self.elements {
+            o.push_str(&format!("  element {}\n", e.name));
+            for v in &e.variants {
+                if v.fields.is_empty() {
+                    o.push_str(&format!("    | {}\n", v.name));
+                } else {
+                    let fs: Vec<String> = v.fields.iter().map(|f| lean_prim(f.repr, f.max_len)).collect();
+                    o.push_str(&format!("    | {} : {}\n", v.name, fs.join(" → ")));
+                }
+            }
+        }
+        for c in &self.containers {
+            match &c.kind {
+                ContainerKind::Generic(cs) => {
+                    let names: Vec<&str> = cs.iter().map(|c| c.name()).collect();
+                    o.push_str(&format!("  container {} : {}\n", c.name, names.join(", ")));
+                }
+                ContainerKind::Of(of, a, t) => o.push_str(&format!("  container {} := {}.{t} {of}\n", c.name, lean_ident(a))),
+            }
+        }
+        for i in &self.instances {
+            o.push_str(&format!("  instance {} for {}.{}\n", i.class.name(), lean_ident(&i.api), i.container));
+        }
+        for s in &self.sums {
+            o.push_str(&format!("  sum {}\n", s.name));
+            for c in &s.ctors {
+                o.push_str(&format!("  {}", lean_ctor(c)));
+            }
+        }
+        for f in &self.fns {
+            let mut sig: Vec<&str> = f.inputs.iter().map(String::as_str).collect();
+            sig.push(&f.returns);
+            o.push_str(&format!("  fn {} : {}\n", f.name, sig.join(" → ")));
+        }
+        for c in &self.ctors {
+            if c.args.is_empty() {
+                o.push_str(&format!("  constructor {}\n", c.name));
+            } else {
+                o.push_str(&format!("  constructor {} : {}\n", c.name, c.args.join(" → ")));
+            }
+        }
+        o
+    }
+}
+
 /// `api.user_events` for API `user-events`.
 pub fn kotlin_pkg(api: &str) -> String {
     format!("api.{}", api.replace('-', "_"))
@@ -1155,11 +2692,11 @@ mod tests {
     #[test]
     fn typescript_is_opaque_and_wire_is_optional() {
         let idl = Idl::parse(AB).unwrap();
-        let plain = idl.typescript(false);
+        let plain = idl.typescript(false, &BTreeMap::new());
         assert!(plain.contains("export class UserId {\n  readonly #v: string;"));
         assert!(plain.contains("kind: \"Created\"; a0: UserId; a1: Payload"));
         assert!(plain.contains("toString()") && !plain.contains("toValue"));
-        assert!(idl.typescript(true).contains("export function fromJson"));
+        assert!(idl.typescript(true, &BTreeMap::new()).contains("export function fromJson"));
     }
 
     #[test]
@@ -1172,6 +2709,103 @@ mod tests {
         assert!(plain.contains("object Tick : Ab"));
         assert!(!plain.contains("data class") && !plain.contains("value class") && !plain.contains("Wire"));
         assert!(idl.kotlin(true).contains("private object Wire"));
+    }
+
+    #[test]
+    fn fns_and_sums_generate_traits_dispatch_and_clients() {
+        let idl: Idl = serde_json::from_str(
+            r#"{"api":"nutrition-db","types":[{"name":"Name","kind":{"repr":"string"},"max_len":64},
+                {"name":"Id","kind":{"repr":"i64"},"display":true,"store":true}],
+                "sums":[{"name":"Written","ctors":[{"name":"Written","args":["Id"]},{"name":"Tick"}]}],
+                "fns":[{"name":"insertProduct","inputs":["Name","Name"],"returns":"Written"}]}"#,
+        )
+        .unwrap();
+        let idl = Idl::from_export(idl).unwrap();
+        assert_eq!((idl.fn_count(), idl.inputs(), idl.constructors(), idl.slots(), idl.longest()), (1, 2, 2, 1, (64, 0)));
+        let rs = idl.rust(true, &[]);
+        assert!(rs.contains("pub trait NutritionDb {\n    fn insert_product(&mut self, name0: Name, name1: Name) -> Written;\n}"), "{rs}");
+        assert!(rs.contains("pub fn dispatch(impl_: &mut dyn NutritionDb, req: &str) -> String"), "{rs}");
+        assert!(rs.contains("impl rusqlite::ToSql for Id"), "{rs}");
+        assert!(rs.contains("pub fn new(v: String) -> Result<Self, Violation>") && rs.contains("rule: \"v.length ≤ 64\""), "{rs}");
+        assert!(rs.contains("pub enum Written {\n    Written(Id),\n    Tick,\n}"), "{rs}");
+        assert!(!idl.rust(false, &[]).contains("dispatch"));
+        let ts = idl.typescript(true, &BTreeMap::new());
+        assert!(ts.contains("export interface NutritionDb {\n  insertProduct(name0: Name, name1: Name): Promise<Written>;\n}"), "{ts}");
+        assert!(ts.contains("export class NutritionDbClient implements NutritionDb"), "{ts}");
+        assert!(ts.contains("export function writtenFromJson") && ts.contains("return writtenFromJson(await this.send("), "{ts}");
+        assert!(idl.typescript(false, &BTreeMap::new()).contains("insertProduct(name0: Name, name1: Name): Written;"));
+        let kt = idl.kotlin(true);
+        assert!(kt.contains("interface NutritionDb {\n    fun insertProduct(name0: Name, name1: Name): Written\n}"), "{kt}");
+        assert!(kt.contains("fun fromJsonWritten(s: String): Written"), "{kt}");
+        // Validation: a fn must return a sum, every sum must be returned.
+        let bad = |fix: &str| {
+            let mut v: serde_json::Value = serde_json::from_str(&format!(r#"{{"api":"x","types":[{{"name":"Id","kind":{{"repr":"i64"}}}}],
+                "sums":[{{"name":"S","ctors":[{{"name":"C","args":["Id"]}}]}}],"fns":[{{"name":"f","inputs":[],"returns":"S"}}]}}"#)).unwrap();
+            let (k, j) = fix.split_once('=').unwrap();
+            v[k] = serde_json::from_str(j).unwrap();
+            Idl::from_export(serde_json::from_value(v).unwrap()).unwrap_err()
+        };
+        assert!(bad(r#"fns=[{"name":"f","inputs":[],"returns":"Id"}]"#).contains("not a sum"));
+        assert!(bad(r#"fns=[]"#).contains("no fn returns or takes it"));
+        assert!(bad(r#"fns=[{"name":"F","inputs":[],"returns":"S"}]"#).contains("camelCase"));
+        assert!(bad(r#"sums=[{"name":"S","ctors":[{"name":"C","args":["Id"]},{"name":"C"}]}]"#).contains("duplicate"));
+    }
+
+    const PROOFS: &str = r#"{"api":"nutrition-db","types":[
+        {"name":"Grams","kind":{"repr":"f64"},"pred":{"and":[{"cmp":["<",{"num":"0"},"v"]},{"cmp":["≤","v",{"num":"20000"}]}]}},
+        {"name":"Day","kind":{"repr":"string"},"max_len":10,"pred":{"cmp":["=","len",{"num":"10"}]}},
+        {"name":"Span","kind":{"tuple":[{"repr":"i64"},{"repr":"i64"}]},"pred":{"cmp":["<",{"field":1},{"field":2}]}},
+        {"name":"Unit","kind":{"repr":"string"},"max_len":8,"pred":{"or":[{"mem":["v",[{"str":"g"},{"str":"ml"}]]},{"not":{"cmp":["≠","len",{"num":"0"}]}}]}},
+        {"name":"Id","kind":{"repr":"i64"},"display":true,"store":true}],
+        "tokens":[{"name":"ProductRef","repr":"i64","kind":"permanent","store":true},
+        {"name":"EventTypeRef","repr":"i64","kind":{"versioned":"Retired"},"store":true},
+        {"name":"Funds","repr":"i64","kind":{"linear":"Spent"}}],
+        "sums":[{"name":"Written","ctors":[{"name":"Written","args":["Id"]},{"name":"Retired"},{"name":"Spent"}]},
+        {"name":"Resolved","ctors":[{"name":"Resolved","args":["ProductRef"]},{"name":"Unknown"}]}],
+        "fns":[{"name":"resolveProduct","inputs":["Day"],"returns":"Resolved"},
+        {"name":"log","inputs":["ProductRef","Grams","Span","Unit"],"returns":"Written"},
+        {"name":"tick","inputs":["EventTypeRef"],"returns":"Written"},
+        {"name":"apply","inputs":["Funds"],"returns":"Written"}]}"#;
+
+    #[test]
+    fn refinements_and_tokens_generate_checks_and_mint() {
+        let idl = Idl::from_export(serde_json::from_str(PROOFS).unwrap()).unwrap();
+        assert_eq!((idl.rules(), idl.token_count(), idl.slots(), idl.inputs()), (6, 3, 2, 7));
+        assert_eq!(idl.type_decl("Unit").unwrap().pred.as_ref().unwrap().render(), "v ∈ [\"g\", \"ml\"] ∨ ¬(v.length ≠ 0)");
+        let rs = idl.rust(true, &[]);
+        assert!(rs.contains("pub fn new(v: f64) -> Result<Self, Violation>"), "{rs}");
+        assert!(rs.contains("if !(((0.0 < v) && (v <= 20000.0))) { return Err(Violation { type_name: \"Grams\", rule: \"0 < v ∧ v ≤ 20000\" }); }"), "{rs}");
+        assert!(rs.contains("if !(v.chars().count() <= 10)") && rs.contains("(v.chars().count() == 10)"), "{rs}");
+        assert!(rs.contains("pub struct Span((i64, i64));") && rs.contains("(v.0 < v.1)") && rs.contains("Value::Array(vec![json!(self.0.0), json!(self.0.1)])"), "{rs}");
+        assert!(rs.contains("([\"g\", \"ml\"].contains(&v.as_str()) || (!(v.chars().count() != 0)))"), "{rs}");
+        assert!(rs.contains("#[derive(Clone)]\npub struct ProductRef(i64);\nimpl ProductRef {\n    pub fn mint(v: i64) -> Self { Self(v) }"), "{rs}");
+        assert!(rs.contains("pub struct EventTypeRef(i64, i64);") && rs.contains("pub fn mint(v: i64, version: i64)") && rs.contains("pub fn version(&self)"), "{rs}");
+        assert!(rs.contains("/// Evidence (linear)") && rs.contains("pub struct Funds(i64);") && !rs.contains("#[derive(Clone)]\npub struct Funds"), "{rs}");
+        assert!(!rs.contains("impl ProductRef {\n    pub fn new") && rs.contains("impl rusqlite::ToSql for ProductRef"), "{rs}");
+        assert!(rs.contains("fn apply(&mut self, funds: Funds) -> Written;"), "{rs}");
+        let ts = idl.typescript(true, &BTreeMap::new());
+        assert!(ts.contains("export class Violation extends Error"), "{ts}");
+        assert!(ts.contains("if (!(((0 < v) && (v <= 20000)))) throw new Violation(\"Grams\", \"0 < v ∧ v ≤ 20000\");"), "{ts}");
+        assert!(ts.contains("readonly #v: [bigint, bigint];") && ts.contains("(v[0] < v[1])"), "{ts}");
+        assert!(ts.contains("[\"g\", \"ml\"].includes(v)") && ts.contains("([...v].length <= 8)"), "{ts}");
+        assert!(ts.contains("private constructor(v: bigint, version: bigint)") && ts.contains("static mint(v: bigint): ProductRef"), "{ts}");
+        let kt = idl.kotlin(true);
+        assert!(kt.contains("class Violation(val typeName: String, val rule: String)"), "{kt}");
+        assert!(kt.contains("class Span(private val v1: Long, private val v2: Long) {\n    init { if (!((v1 < v2))) throw Violation(\"Span\""), "{kt}");
+        assert!(kt.contains("(v in listOf(\"g\", \"ml\"))") && kt.contains("((0.0 < v) && (v <= 20000.0))"), "{kt}");
+        assert!(kt.contains("class ProductRef private constructor(private val v: Long)") && kt.contains("fun mint(v: Long, version: Long): EventTypeRef"), "{kt}");
+        let lean = idl.lean();
+        assert!(lean.contains("  type Grams : f64 where 0 < v ∧ v ≤ 20000\n"), "{lean}");
+        assert!(lean.contains("  type Span : i64 × i64 where v.1 < v.2\n") && lean.contains("  type Id : i64 display store\n"), "{lean}");
+        assert!(lean.contains("  token ProductRef : i64 permanent store\n  token EventTypeRef : i64 versioned stale=Retired store\n  token Funds : i64 linear spent=Spent\n"), "{lean}");
+        // Validation.
+        let bad = |from: &str, to: &str| Idl::from_export(serde_json::from_str(&PROOFS.replace(from, to)).unwrap()).unwrap_err();
+        assert!(bad(r#"{"name":"Retired"},"#, "").contains("fn tick: takes EventTypeRef (versioned), so Written must have a `Retired` constructor"));
+        assert!(bad(r#"{"name":"Spent"}"#, r#"{"name":"Used"}"#).contains("fn apply: takes Funds (linear)"));
+        assert!(bad(r#"{"field":2}"#, r#"{"field":3}"#).contains("v.3: the product has 2 components"));
+        assert!(bad(r#"{"cmp":["=","len",{"num":"10"}]}"#, r#"{"cmp":["=","v",{"num":"10"}]}}, {"name":"Bad","kind":{"repr":"i64"},"pred":{"cmp":["=","len",{"num":"1"}]}"#).contains("`.length` is for a string"));
+        assert!(bad(r#""tuple":[{"repr":"i64"},{"repr":"i64"}]},"#, r#""tuple":[{"repr":"i64"},{"repr":"i64"}]},"display":true,"#).contains("display and store are for scalar"));
+        assert!(bad(r#"{"name":"apply","inputs":["Funds"],"returns":"Written"}"#, r#"{"name":"apply","inputs":[],"returns":"Written"}"#).contains("token Funds: declared but never used"));
     }
 
     #[test]

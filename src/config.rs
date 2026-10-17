@@ -918,15 +918,34 @@ pub(crate) fn check_lock_files(lock_files: &[String], test_paths: &[String]) -> 
 pub struct ArchConfig {
     /// Total modules budget: the most modules the project may have.
     pub max_modules: u64,
+    /// Total composition roots budget.
+    pub max_roots: u64,
     /// Paths visible in every module's jail view (build files, lock files).
     pub shared: Vec<String>,
     /// Build caches (`node_modules`, `target`) every view links to: symlinks
     /// into the checkout, never copied and never counted toward a budget.
     pub linked: Vec<String>,
+    /// Every file under these must be owned by a module, an API, a root or
+    /// `shared` (ownership completeness).
+    pub source_paths: Vec<String>,
     #[serde(rename = "module")]
     pub modules: Vec<ModuleConfig>,
+    /// Composition roots: call modules and forward their values; budgeted
+    /// like a module, story-tested only (no `test_cmd`, no view).
+    #[serde(rename = "root")]
+    pub roots: Vec<RootConfig>,
     #[serde(rename = "api")]
     pub apis: Vec<ApiConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RootConfig {
+    pub name: String,
+    pub lang: String,
+    pub paths: Vec<String>,
+    pub max_ast: u64,
+    pub max_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -965,6 +984,17 @@ pub struct ApiConfig {
     pub max_elements: u64,
     /// Fields across those variants.
     pub max_fields: u64,
+    /// `fn`s of the API, and input slots across them.
+    pub max_fns: u64,
+    pub max_inputs: u64,
+    /// Caps on every string / bytes `max_len` in the API: 0 means the
+    /// default (256 for strings, none for bytes).
+    pub max_string_len: u64,
+    pub max_bytes_len: u64,
+    /// Comparisons across the API's `where` refinements, and tokens
+    /// declared (architect-v3.md, "Proofs supplied by the caller").
+    pub max_rules: u64,
+    pub max_tokens: u64,
     /// The hand-written instance of the API's container classes: under the
     /// generator module's paths (owned, budgeted, the worker's to edit, so
     /// never pinned), mounted beneath the generated binding and copied into
@@ -973,13 +1003,111 @@ pub struct ApiConfig {
     pub impls: Vec<String>,
 }
 
-/// The manifest's file name on `main`.
+/// The TOML manifest's file name on `main`.
 pub const ARCH_FILE: &str = "architecture.toml";
+/// The Lean architecture package on `main` (a directory; `lean::DIR`).
+pub const ARCH_DIR: &str = "architecture";
+/// The file whose presence says a project's architecture is Lean.
+pub const ARCH_LEAN_MANIFEST: &str = "architecture/Architecture.lean";
+
+/// Whether `path` is the TOML manifest or inside the Lean package: either way
+/// the director's, pinned against workers.
+pub fn is_arch_path(path: &str) -> bool {
+    path == ARCH_FILE || path == ARCH_DIR || path.starts_with("architecture/")
+}
+
+/// Whether `path` is an API's Lean IDL (`architecture/Apis/<name>.lean`): the
+/// one part of the package a task agent may write.
+pub fn is_arch_api_file(path: &str) -> bool {
+    path.strip_prefix("architecture/Apis/").is_some_and(|rest| !rest.contains('/') && rest.ends_with(".lean"))
+}
 
 impl ArchConfig {
     /// Every path an API is made of, as written in the manifest.
     pub fn api_paths(&self) -> Vec<String> {
         self.apis.iter().flat_map(|a| a.paths.iter().cloned()).collect()
+    }
+
+    /// The module or root named `name`: `(lang, paths)`.
+    pub fn node(&self, name: &str) -> Option<(&str, &[String])> {
+        self.modules
+            .iter()
+            .find(|m| m.name == name)
+            .map(|m| (m.lang.as_str(), m.paths.as_slice()))
+            .or_else(|| self.roots.iter().find(|r| r.name == name).map(|r| (r.lang.as_str(), r.paths.as_slice())))
+    }
+
+    /// The generator -> consumer edges, with a cycle if there is one: the
+    /// module graph must be a DAG (architect-v3.md, "The DAG").
+    pub fn cycle(&self) -> Option<Vec<String>> {
+        let mut nodes: Vec<&str> = self.modules.iter().map(|m| m.name.as_str()).collect();
+        nodes.extend(self.roots.iter().map(|r| r.name.as_str()));
+        let edges: Vec<(&str, &str)> = self.apis.iter().map(|a| (a.generator.as_str(), a.consumer.as_str())).collect();
+        // Iterative DFS with colors; the first back edge found names the cycle.
+        let mut color: std::collections::BTreeMap<&str, u8> = nodes.iter().map(|n| (*n, 0)).collect();
+        for start in &nodes {
+            if color[start] != 0 {
+                continue;
+            }
+            let mut path: Vec<&str> = vec![start];
+            let mut iters: Vec<usize> = vec![0];
+            color.insert(start, 1);
+            while let Some(&cur) = path.last() {
+                let i = iters.last_mut().unwrap();
+                let next = edges.iter().filter(|(g, _)| *g == cur).map(|(_, c)| *c).nth(*i);
+                *i += 1;
+                match next {
+                    Some(n) => match color.get(n).copied().unwrap_or(2) {
+                        1 => {
+                            let at = path.iter().position(|p| *p == n).unwrap();
+                            let mut cyc: Vec<String> = path[at..].iter().map(|s| s.to_string()).collect();
+                            cyc.push(n.to_string());
+                            return Some(cyc);
+                        }
+                        0 => {
+                            color.insert(n, 1);
+                            path.push(n);
+                            iters.push(0);
+                        }
+                        _ => {}
+                    },
+                    None => {
+                        color.insert(cur, 2);
+                        path.pop();
+                        iters.pop();
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Module names in topological order, generators before consumers
+    /// (roots last). Only meaningful when `cycle()` is `None`.
+    pub fn topological(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let names: Vec<&str> = self.modules.iter().map(|m| m.name.as_str()).collect();
+        let mut done: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        while done.len() < names.len() {
+            let mut progressed = false;
+            for n in &names {
+                if done.contains(n) {
+                    continue;
+                }
+                let ready = self.apis.iter().filter(|a| a.consumer == *n).all(|a| done.contains(a.generator.as_str()));
+                if ready {
+                    done.insert(n);
+                    out.push(n.to_string());
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                // A cycle: append the rest in manifest order.
+                out.extend(names.iter().filter(|n| !done.contains(*n)).map(|n| n.to_string()));
+                break;
+            }
+        }
+        out
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -1004,16 +1132,39 @@ impl ArchConfig {
                 ));
             }
         }
+        let mut root_names = std::collections::BTreeSet::new();
+        for r in &self.roots {
+            if r.name.is_empty()
+                || !r.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+                || names.contains(r.name.as_str())
+                || !root_names.insert(r.name.as_str())
+            {
+                return Err(format!(
+                    "[[root]] name {:?}: empty, a module's or another root's, or not lowercase letters, digits, - and _",
+                    r.name
+                ));
+            }
+            if r.paths.is_empty() {
+                return Err(format!("[[root]] {}: no paths", r.name));
+            }
+            if !matches!(r.lang.as_str(), "rust" | "typescript" | "kotlin") {
+                return Err(format!("[[root]] {}: lang {:?} must be rust, typescript or kotlin", r.name, r.lang));
+            }
+        }
         let mut api_names = std::collections::BTreeSet::new();
         let mut pairs = std::collections::BTreeSet::new();
         for a in &self.apis {
             if a.name.is_empty() || !api_names.insert(a.name.as_str()) {
                 return Err(format!("[[api]] name {:?}: empty or duplicate", a.name));
             }
-            for end in [&a.generator, &a.consumer] {
-                if !names.contains(end.as_str()) {
-                    return Err(format!("[[api]] {}: unknown module {end:?}", a.name));
-                }
+            if !names.contains(a.generator.as_str()) {
+                return Err(format!("[[api]] {}: unknown module {:?}", a.name, a.generator));
+            }
+            if !names.contains(a.consumer.as_str()) && !root_names.contains(a.consumer.as_str()) {
+                return Err(format!("[[api]] {}: unknown module or root {:?}", a.name, a.consumer));
+            }
+            if a.max_string_len > 0 && a.max_bytes_len > 0 && a.max_string_len > a.max_bytes_len {
+                // No rule ties them; each caps its own repr. Nothing to check.
             }
             if a.generator == a.consumer {
                 return Err(format!("[[api]] {}: generator and consumer are the same", a.name));
@@ -1040,8 +1191,17 @@ impl ArchConfig {
                 }
             }
         }
+        if let Some(cyc) = self.cycle() {
+            return Err(format!("the module graph has a cycle: {} (generator -> consumer must be a DAG)", cyc.join(" -> ")));
+        }
         // A link must never expose another module's sources into a view.
-        let owned: Vec<&String> = self.modules.iter().flat_map(|m| &m.paths).chain(self.apis.iter().flat_map(|a| &a.paths)).collect();
+        let owned: Vec<&String> = self
+            .modules
+            .iter()
+            .flat_map(|m| &m.paths)
+            .chain(self.roots.iter().flat_map(|r| &r.paths))
+            .chain(self.apis.iter().flat_map(|a| &a.paths))
+            .collect();
         for l in &self.linked {
             let l = l.trim_end_matches('/');
             if l.is_empty() || l.starts_with('/') || l.split('/').any(|c| c == ".." || c == ".") {
@@ -1062,6 +1222,129 @@ pub fn arch_config_from_str(s: &str) -> Result<ArchConfig, String> {
     let cfg: ArchConfig = toml::from_str(s).map_err(|e| e.to_string())?;
     cfg.validate()?;
     Ok(cfg)
+}
+
+/// The `arch` object of a Lean export (`lean::export`), validated like the TOML.
+pub fn arch_config_from_json(v: serde_json::Value) -> Result<ArchConfig, String> {
+    let cfg: ArchConfig = serde_json::from_value(v).map_err(|e| e.to_string())?;
+    cfg.validate()?;
+    Ok(cfg)
+}
+
+fn lean_ident(name: &str) -> String {
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+        name.to_string()
+    } else {
+        format!("«{name}»")
+    }
+}
+
+fn lean_strs(xs: &[String]) -> String {
+    let items: Vec<String> = xs.iter().map(|s| format!("{s:?}")).collect();
+    format!("[{}]", items.join(", "))
+}
+
+impl ArchConfig {
+    /// The manifest as `architecture/Architecture.lean` (`dashboard arch
+    /// migrate`): the same fields, one block per module, root and API.
+    pub fn lean(&self) -> String {
+        let mut o = String::from(
+            "-- The architecture manifest (architect-v3.md): modules, roots, APIs and
+             -- budgets, in the dashboard's Lean DSL (architecture/Dashboard.lean).
+             -- Director-owned and pinned; each API's IDL is Apis/<name>.lean.
+             import Dashboard
+open Dashboard
+
+architecture where
+",
+        );
+        o.push_str(&format!("  max_modules = {}
+", self.max_modules));
+        if self.max_roots > 0 {
+            o.push_str(&format!("  max_roots = {}
+", self.max_roots));
+        }
+        o.push_str(&format!("  shared = {}
+", lean_strs(&self.shared)));
+        o.push_str(&format!("  linked = {}
+", lean_strs(&self.linked)));
+        if !self.source_paths.is_empty() {
+            o.push_str(&format!("  source_paths = {}
+", lean_strs(&self.source_paths)));
+        }
+        for m in &self.modules {
+            o.push_str(&format!("
+module {} where
+  lang = {}
+  paths = {}
+", lean_ident(&m.name), m.lang, lean_strs(&m.paths)));
+            if m.max_bytes > 0 {
+                o.push_str(&format!("  max_bytes = {}
+", m.max_bytes));
+            }
+            if m.max_ast > 0 {
+                o.push_str(&format!("  max_ast = {}
+", m.max_ast));
+            }
+            if let Some(c) = &m.test_cmd {
+                o.push_str(&format!("  test_cmd = {c:?}
+"));
+            }
+            if let Some(c) = &m.lint_cmd {
+                o.push_str(&format!("  lint_cmd = {c:?}
+"));
+            }
+        }
+        for r in &self.roots {
+            o.push_str(&format!("
+root {} where
+  lang = {}
+  paths = {}
+", lean_ident(&r.name), r.lang, lean_strs(&r.paths)));
+            if r.max_bytes > 0 {
+                o.push_str(&format!("  max_bytes = {}
+", r.max_bytes));
+            }
+            if r.max_ast > 0 {
+                o.push_str(&format!("  max_ast = {}
+", r.max_ast));
+            }
+        }
+        for a in &self.apis {
+            o.push_str(&format!(
+                "
+api {} : {} → {} where
+  paths = {}
+",
+                lean_ident(&a.name),
+                lean_ident(&a.generator),
+                lean_ident(&a.consumer),
+                lean_strs(&a.paths)
+            ));
+            if !a.impls.is_empty() {
+                o.push_str(&format!("  impl = {}
+", lean_strs(&a.impls)));
+            }
+            for (k, v) in [
+                ("max_constructors", a.max_constructors),
+                ("max_types", a.max_types),
+                ("max_elements", a.max_elements),
+                ("max_fields", a.max_fields),
+                ("max_fns", a.max_fns),
+                ("max_inputs", a.max_inputs),
+                ("max_string_len", a.max_string_len),
+                ("max_bytes_len", a.max_bytes_len),
+                ("max_rules", a.max_rules),
+                ("max_tokens", a.max_tokens),
+            ] {
+                if v > 0 {
+                    o.push_str(&format!("  {k} = {v}
+"));
+                }
+            }
+        }
+        o
+    }
 }
 
 pub fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> {

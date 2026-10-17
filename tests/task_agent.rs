@@ -1292,13 +1292,22 @@ fn a_worker_push_while_contested_is_ignored_not_struck() {
 
 #[test]
 fn a_task_agent_may_commit_api_files_but_never_the_manifest() {
-    for (target, ownership) in [("api/ab.rs", false), ("architecture.toml", true)] {
+    for (target, ownership) in [
+        ("api/ab.rs", false),
+        ("architecture.toml", true),
+        ("architecture/Apis/ab.lean", false),
+        ("architecture/Architecture.lean", true),
+    ] {
         let repo = repo_with_task_agents();
-        write_file(
-            repo.path(),
-            "architecture.toml",
-            "[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n[[module]]\nname = \"b\"\nlang = \"rust\"\npaths = [\"b\"]\n[[api]]\nname = \"ab\"\ngenerator = \"a\"\nconsumer = \"b\"\npaths = [\"api\"]\n",
-        );
+        if target.starts_with("architecture/") {
+            write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)]);
+        } else {
+            write_file(
+                repo.path(),
+                "architecture.toml",
+                "[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n[[module]]\nname = \"b\"\nlang = \"rust\"\npaths = [\"b\"]\n[[api]]\nname = \"ab\"\ngenerator = \"a\"\nconsumer = \"b\"\npaths = [\"api\"]\n",
+            );
+        }
         commit(repo.path(), "add architecture");
         let (_home_dir, home) = init_hub(&repo);
         let mut player = open_player(&home);

@@ -235,3 +235,24 @@ pub fn worker_empty_commit(hub_path: &Path, slug: &str, msg: &str) -> String {
         .expect("push worker marker commit to hub");
     sha
 }
+
+/// A minimal Lean architecture: two Rust modules `a` and `b` and one API
+/// `ab` between them (`api/`), with `a`'s AST budget set.
+pub const LEAN_AB_MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n\n\
+module a where\n  lang = rust\n  paths = [\"a\"]\n  max_ast = 100\n\n\
+module b where\n  lang = rust\n  paths = [\"b\"]\n\n\
+api ab : a → b where\n  paths = [\"api\"]\n";
+
+/// `ab`'s IDL: one bounded string T and two constructors.
+pub const LEAN_AB_IDL: &str = "import Architecture\nopen Dashboard\n\nidl ab where\n  type Id : string 16\n  constructor X : Id\n  constructor Y\n";
+
+/// Writes the Lean package `architecture/` under `repo`: the vendored
+/// dashboard library, `Architecture.lean` and one `Apis/<name>.lean` per
+/// API (nothing is committed). Tests using it need `lake` on the host.
+pub fn write_lean_arch(repo: &Path, manifest: &str, apis: &[(&str, &str)]) {
+    dashboard::lean::write_vendored(repo).expect("vendor the dashboard library");
+    write_file(repo, "architecture/Architecture.lean", manifest);
+    for (name, idl) in apis {
+        write_file(repo, &format!("architecture/Apis/{name}.lean"), idl);
+    }
+}

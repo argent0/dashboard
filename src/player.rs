@@ -20,6 +20,7 @@ use crate::checks;
 use crate::config::{self, Reason, RoadmapConfig, TaskConfig, TaskKind, path_under_test_paths};
 use crate::events::{self, EventKind};
 use crate::flaky;
+use crate::lean;
 use crate::speedup;
 use crate::fsm::{self, Move, Verdict};
 use crate::git::Git;
@@ -702,6 +703,9 @@ fn short(sha: &str) -> &str {
 pub struct Player<S: Sessions> {
     home: Home,
     hub: Git,
+    /// The `architecture/` tree on main whose export was last attempted:
+    /// tried once per tree (`ensure_arch`), not every tick.
+    arch_tried: Option<String>,
     director: PathBuf,
     project: String,
     runner: checks::Runner,
@@ -797,6 +801,7 @@ impl<S: Sessions> Player<S> {
             agent_rebase_told: BTreeMap::new(),
             agent_hold_told: BTreeMap::new(),
             sandbox_preflighted: None,
+            arch_tried: None,
             main_impure: BTreeMap::new(),
             main_slow: None,
             main_over: None,
@@ -1064,6 +1069,7 @@ impl<S: Sessions> Player<S> {
         // moved), so a fix that lands now releases held work this tick.
         self.verify_main()?;
         self.import_main(&mut report)?;
+        self.ensure_arch(&mut report);
         self.verify_main()?;
         self.report_main(&mut report);
         self.release_held(&mut report)?;
@@ -1648,20 +1654,75 @@ impl<S: Sessions> Player<S> {
     }
 
     /// The budget raises `candidate` makes over `base`, judged by
-    /// `raise::judge` (an `ownership` message if it breaks the rules).
+    /// `raise::judge` (an `ownership` message if it breaks the rules). Loads
+    /// (and for a Lean package, exports and caches) the architecture at both.
     fn main_raises(&self, base: &str, candidate: &str) -> Result<Vec<raise::Raise>, String> {
-        let Some(new) = self.hub.show_file(candidate, config::ARCH_FILE) else {
+        let Some(new) = self.arch_source(candidate)? else {
             return Ok(Vec::new());
         };
+        let old = self.arch_source(base).ok().flatten();
         let files: Vec<String> = self.hub.diff_names(base, candidate).into_iter().map(|(_, p)| p).collect();
         raise::judge(
-            self.hub.show_file(base, config::ARCH_FILE).as_deref(),
+            old.as_ref(),
             &new,
             &self.hub.commit_subject(candidate).unwrap_or_default(),
             &self.hub.commit_body(candidate).unwrap_or_default(),
             &files,
             self.now(),
         )
+    }
+
+    /// Exports main's Lean architecture into the hub's cache once per tree,
+    /// so pins and the task agent's path allowance read it even when this
+    /// player never imported main (a hub `init` made from one).
+    fn ensure_arch(&mut self, report: &mut TickReport) {
+        let Some(main) = self.hub.rev_parse("refs/heads/main") else { return };
+        let Some(tree) = self.hub.rev_parse(&format!("{main}:{}", config::ARCH_DIR)) else { return };
+        if self.arch_tried.as_deref() == Some(tree.as_str()) {
+            return;
+        }
+        self.arch_tried = Some(tree);
+        if let Err(e) = self.arch_source(&main) {
+            report.errors.push(format!("architecture on main: {e}"));
+        }
+    }
+
+    /// The architecture at `commit` (`records::arch_source_at`), exporting a
+    /// Lean package in `<home>/arch/` (jailed like a check) and caching the
+    /// result on its tree the first time.
+    pub fn arch_source(&self, commit: &str) -> Result<Option<raise::Source>, String> {
+        let export = |tree: &str| self.export_arch_tree(tree);
+        records::arch_source_at(&self.hub, commit, Some(&export))
+    }
+
+    /// Materializes the `architecture/` tree `tree` under `<home>/arch/`
+    /// (keeping its `.lake/` build cache between exports) and runs the
+    /// exporter there.
+    fn export_arch_tree(&self, tree: &str) -> Result<lean::Exported, String> {
+        let dir = self.home.root.join("arch");
+        let pkg = dir.join(config::ARCH_DIR);
+        if pkg.exists() {
+            for e in std::fs::read_dir(&pkg).map_err(|e| e.to_string())?.flatten() {
+                if e.file_name() != ".lake" {
+                    let p = e.path();
+                    if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) }.map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        std::fs::create_dir_all(&pkg).map_err(|e| e.to_string())?;
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "git --git-dir {} archive --format=tar {tree} | tar -x -C {}",
+                shell_quote(&self.hub.dir.display().to_string()),
+                shell_quote(&pkg.display().to_string())
+            ))
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(format!("archive {tree}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        lean::export(&pkg, self.runner.sandbox())
     }
 
     /// `base` is "the current hub main" at this point in the cumulative walk
@@ -1676,7 +1737,7 @@ impl<S: Sessions> Player<S> {
                 return Err((
                     Reason::Ownership,
                     format!(
-                        "ownership: main commit touches {path:?}, which is neither roadmap.toml, prompts.kdl, architecture.toml nor a docs_paths entry"
+                        "ownership: main commit touches {path:?}, which is neither roadmap.toml, prompts.kdl, the architecture (architecture.toml or architecture/) nor a docs_paths entry"
                     ),
                 ));
             }
@@ -1701,10 +1762,7 @@ impl<S: Sessions> Player<S> {
                 ));
             }
         }
-        if let Some(text) = self.hub.show_file(candidate, config::ARCH_FILE) {
-            config::arch_config_from_str(&text)
-                .map_err(|e| (Reason::Ownership, format!("ownership: {}: {e}", config::ARCH_FILE)))?;
-        }
+        self.arch_source(candidate).map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
         self.main_raises(base, candidate).map_err(|e| (Reason::Ownership, e))?;
         match self.hub.show_file(candidate, prompts::FILE) {
             Some(text) => {
@@ -5186,6 +5244,7 @@ impl<S: Sessions> Player<S> {
         for (_, path) in diffs {
             if !(path == "tests.toml"
                 || path_under_test_paths(path, &api_paths)
+                || config::is_arch_api_file(path)
                 || config::is_suite_fragment(path)
                 || path.starts_with(&task_prefix)
                 || lock_files.contains(path)
@@ -5824,7 +5883,7 @@ fn valid_slug(s: &str) -> bool {
 /// `path` is allowed on a director `main` commit: exactly `roadmap.toml`, or
 /// under a `docs_paths` entry (an exact file match, or a directory prefix).
 fn path_allowed(path: &str, docs_paths: &[String]) -> bool {
-    if path == "roadmap.toml" || path == prompts::FILE || path == config::ARCH_FILE {
+    if path == "roadmap.toml" || path == prompts::FILE || config::is_arch_path(path) {
         return true;
     }
     docs_paths.iter().any(|d| {
