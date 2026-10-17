@@ -166,6 +166,33 @@ pub fn bindings(root: &Path, cfg: &ArchConfig) -> (Vec<ApiBindings>, Vec<String>
         if a.max_types > 0 && idl.slots() > a.max_types {
             errs.push(format!("{who}: T slots {} exceeds budget {}", idl.slots(), a.max_types));
         }
+        if a.max_elements > 0 && idl.element_variants() > a.max_elements {
+            errs.push(format!("{who}: element variants {} exceeds budget {}", idl.element_variants(), a.max_elements));
+        }
+        if a.max_fields > 0 && idl.element_fields() > a.max_fields {
+            errs.push(format!("{who}: element fields {} exceeds budget {}", idl.element_fields(), a.max_fields));
+        }
+        for (target, c) in idl.container_refs() {
+            let Some(ta) = cfg.apis.iter().find(|x| x.name == target) else {
+                errs.push(format!("{who}: ref to unknown api {target:?}"));
+                continue;
+            };
+            if ![&a.generator, &a.consumer].iter().any(|m| **m == ta.generator || **m == ta.consumer) {
+                errs.push(format!("{who}: ref {target}.{c}: {target} shares no module with {}", a.name));
+            }
+            if target == a.name {
+                errs.push(format!("{who}: refs its own container {c}"));
+            }
+            match idls.get(target) {
+                Some((t, _)) if !t.owns_generic(c) => {
+                    errs.push(format!("{who}: ref {target}.{c}: {target} owns no such generic container"))
+                }
+                _ => {}
+            }
+        }
+        if let Err(e) = instances_present(root, a, idl) {
+            errs.push(format!("{who}: {e}"));
+        }
         for (target, ty) in idl.refs() {
             let Some(ta) = cfg.apis.iter().find(|x| x.name == target) else {
                 errs.push(format!("{who}: ref to unknown api {target:?}"));
@@ -193,9 +220,16 @@ pub fn bindings(root: &Path, cfg: &ArchConfig) -> (Vec<ApiBindings>, Vec<String>
         let mut langs = vec![lang_of(&a.generator).unwrap_or(""), lang_of(&a.consumer).unwrap_or("")];
         langs.dedup();
         let mut files = Vec::new();
+        let gen_dir = path.parent().unwrap_or(Path::new("")).join("gen");
+        let up = "../".repeat(gen_dir.components().count());
+        let impls: Vec<String> = a.impls.iter().map(|i| format!("{up}{i}")).collect();
         for lang in langs {
+            if lang != "rust" && idl.has_containers() {
+                errs.push(format!("{who}: no {lang} generator for elements, containers or instances yet"));
+                continue;
+            }
             let (ext, text) = match lang {
-                "rust" => ("rs", idl.rust(is_wire(a))),
+                "rust" => ("rs", idl.rust(is_wire(a), &impls)),
                 "typescript" => ("ts", idl.typescript(is_wire(a))),
                 "kotlin" => ("kt", idl.kotlin(is_wire(a))),
                 _ => {
@@ -225,7 +259,7 @@ pub fn bindings(root: &Path, cfg: &ArchConfig) -> (Vec<ApiBindings>, Vec<String>
         let mut stack = vec![a.name.as_str()];
         while let Some(cur) = stack.pop() {
             let Some((idl, _)) = idls.get(cur) else { continue };
-            for (t, _) in idl.refs() {
+            for (t, _) in idl.refs().into_iter().chain(idl.container_refs()) {
                 if t == a.name {
                     errs.push(format!("api {}: ref cycle through {cur}", a.name));
                 } else if !seen.contains(&t) {
@@ -238,6 +272,59 @@ pub fn bindings(root: &Path, cfg: &ArchConfig) -> (Vec<ApiBindings>, Vec<String>
     errs.sort();
     errs.dedup();
     (out, errs)
+}
+
+/// Every class the API declares has an instance in its `impl` files: for
+/// Rust, an `impl ... Class<..> for Container<..>` item. A heuristic like
+/// the lints; the generated law tests are what judge the instance.
+fn instances_present(root: &Path, a: &crate::config::ApiConfig, idl: &Idl) -> Result<(), String> {
+    let classes = idl.classes();
+    if classes.is_empty() {
+        return Ok(());
+    }
+    if a.impls.is_empty() {
+        return Err("declares container classes but has no `impl` files".to_string());
+    }
+    let mut text = String::new();
+    for i in &a.impls {
+        text.push_str(&std::fs::read_to_string(root.join(i)).map_err(|e| format!("impl {i}: {e}"))?);
+    }
+    for (class, c) in classes {
+        let re = regex::Regex::new(&format!(
+            r"\bimpl\s*(<[^{{]*>)?\s*(\w+::)*{}\s*(<[^{{]*>)?\s+for\s+(\w+::)*{c}\b",
+            class.name()
+        ))
+        .unwrap();
+        if !re.is_match(&text) {
+            return Err(format!("class {} declared for {c}, but no `impl {} for {c}` in its impl files", class.name(), class.name()));
+        }
+    }
+    Ok(())
+}
+
+/// Every API `module` sees in its view: those it generates or consumes,
+/// plus every API they ref, transitively (their generated files name them).
+fn view_apis<'a>(cfg: &'a ArchConfig, bs: &[ApiBindings], module: &str) -> Vec<&'a crate::config::ApiConfig> {
+    let mut names: Vec<&str> = cfg
+        .apis
+        .iter()
+        .filter(|a| a.generator == module || a.consumer == module)
+        .map(|a| a.name.as_str())
+        .collect();
+    let mut i = 0;
+    while i < names.len() {
+        if let Some(b) = bs.iter().find(|b| b.name == names[i]) {
+            for (t, _) in b.idl.refs().into_iter().chain(b.idl.container_refs()) {
+                if let Some(ta) = cfg.apis.iter().find(|x| x.name == t)
+                    && !names.contains(&ta.name.as_str())
+                {
+                    names.push(&ta.name);
+                }
+            }
+        }
+        i += 1;
+    }
+    cfg.apis.iter().filter(|a| names.contains(&a.name.as_str())).collect()
 }
 
 /// Writes the expected bindings (`write`), or lists those that differ, and
@@ -316,13 +403,20 @@ pub fn check(root: &Path, cfg: &ArchConfig, sandbox: &Sandbox, scratch: &Path) -
             let a = cfg.apis.iter().find(|a| a.name == b.name).unwrap();
             let c = if a.max_constructors > 0 { format!("/{}", a.max_constructors) } else { String::new() };
             let t = if a.max_types > 0 { format!("/{}", a.max_types) } else { String::new() };
-            rep.headroom.push(format!("api {}: constructors {}{c}, T slots {}{t}", b.name, b.idl.constructors(), b.idl.slots()));
+            let mut line = format!("api {}: constructors {}{c}, T slots {}{t}", b.name, b.idl.constructors(), b.idl.slots());
+            if !b.idl.elements.is_empty() || a.max_elements > 0 || a.max_fields > 0 {
+                let e = if a.max_elements > 0 { format!("/{}", a.max_elements) } else { String::new() };
+                let f = if a.max_fields > 0 { format!("/{}", a.max_fields) } else { String::new() };
+                line.push_str(&format!(", element variants {}{e}, fields {}{f}", b.idl.element_variants(), b.idl.element_fields()));
+            }
+            rep.headroom.push(line);
         }
     }
     lint(root, cfg, &files_of, sandbox, &mut rep);
+    let (bs, _) = bindings(root, cfg);
     for m in &cfg.modules {
         if let Some(cmd) = &m.test_cmd {
-            if let Err(e) = run_view(root, cfg, m, cmd, sandbox, scratch) {
+            if let Err(e) = run_view(root, cfg, &bs, m, cmd, sandbox, scratch) {
                 rep.problems.push(format!("module {}: tests in its jail view: {e}", m.name));
             }
         }
@@ -386,12 +480,14 @@ fn lint(
     }
 }
 
-/// Copies only `m`'s files, its APIs' files and `shared` into a fresh
-/// directory under `scratch`, links each existing `linked` cache back into
-/// `root`, and runs `cmd` there (jailed if the sandbox is on).
+/// Copies only `m`'s files, its APIs' files (with the APIs they ref and
+/// their `impl` instances) and `shared` into a fresh directory under
+/// `scratch`, links each existing `linked` cache back into `root`, and runs
+/// `cmd` there (jailed if the sandbox is on).
 fn run_view(
     root: &Path,
     cfg: &ArchConfig,
+    bs: &[ApiBindings],
     m: &ModuleConfig,
     cmd: &str,
     sandbox: &Sandbox,
@@ -401,8 +497,9 @@ fn run_view(
     let _ = std::fs::remove_dir_all(&view);
     let mut paths = m.paths.clone();
     paths.extend(cfg.shared.iter().cloned());
-    for a in cfg.apis.iter().filter(|a| a.generator == m.name || a.consumer == m.name) {
+    for a in view_apis(cfg, bs, &m.name) {
         paths.extend(a.paths.iter().cloned());
+        paths.extend(a.impls.iter().cloned());
     }
     for f in expand(root, &paths)? {
         let to = view.join(&f);

@@ -26,9 +26,10 @@ src/git.rs      thin sync wrapper over the `git` CLI (rev-parse, diff, notes, me
 src/paths.rs    XDG home layout and `--home` / `dashboard.home` resolution
 src/init.rs     `dashboard init`: creates the hub and wires up the director <-> hub links
 src/queue.rs    queued runs: `dashboard test` snapshot + request files, results
-src/idl.rs      the API IDL (`<name>.api.kdl`, KDL): parse/validate, constructor and T-slot counts, Rust binding generator
+src/idl.rs      the API IDL (`<name>.api.kdl`, KDL): parse/validate, constructor and T-slot counts, elements/containers/
+                class instances, Rust/TypeScript/Kotlin binding generators (class traits and law tests: Rust)
 src/raise.rs    budget raises (architect-v3.md): fields-only, `raise:` reason, step cap (pure)
-src/lint.rs     consumer-contract lints (tree-sitter): wildcard arms over an API's sum type, wire-helper leaks
+src/lint.rs     consumer-contract lints (tree-sitter): wildcard arms over an API's sum type or its elements, wire-helper leaks
 src/arch.rs     `dashboard arch check` (architect-v3.md): modules budget, per-module bytes/AST (tree-sitter),
                 file ownership, tests in each module's jail view
 src/checks.rs   check runner (a scratch worktree + `sh -c`) and the notes-based result cache
@@ -370,7 +371,17 @@ ignored — no `deny_unknown_fields` anywhere.
   (written to `gen/<api>.rs` beside it, so under the API's pinned paths). `--check` writes nothing and exits 1 on a
   stale binding; `arch check` runs the same drift check, plus the IDL's constructor count (`max_constructors`) and
   T slots, i.e. argument slots across constructors (`max_types`), and ref validity (known, linked, acyclic API;
-  declared type). IDL: `type "T" repr="string|bytes|i64|f64|bool" [display=#true]` or `ref="api.Type"`, and
+  declared type). Elements and containers (architect-v3.md, "Elements and containers"):
+  `element "Row" { variant "V" "<repr>"...; }` (readable, Rust `#[derive(Debug, Clone, PartialEq)] pub enum`; budgets
+  `max_elements` = variants, `max_fields` = fields), `container "Seq" classes="Foldable[,Functor,Traversable,Monoid]"`
+  (a generic this API owns), `container "Rows" of="Row" ref="api.Seq"` (`pub type Rows = super::api::Seq<Row>`), and
+  `instance "Functor|Traversable|Monoid" for="api.Seq"` (a class module's instance for another API's container). Each
+  class gets its trait and law tests (`#[cfg(test)] mod laws`) generated; the instance is hand-written in the
+  `[[api]] impl = [...]` files (under the generator module's paths, never pinned), which the binding mounts with
+  `#[path]` beneath itself. Module views also take every API their APIs ref (transitively) plus those APIs' `impl`
+  files. `arch check` fails a declared class with no `impl Class... for Container` in the `impl` files. Rust only:
+  TypeScript/Kotlin report "no <lang> generator for elements, containers or instances yet". Tests:
+  `tests/containers.rs` (real `rustc --test` per module view). IDL: `type "T" repr="string|bytes|i64|f64|bool" [display=#true]` or `ref="api.Type"`, and
   `constructor "C" "T"...`. Every generated T is opaque (private field, no trait impls, no accessors; `display`
   opts into Display). The JSON wire code (`to_json`/`from_json`, needs `serde_json`; bytes as hex) is emitted only
   for a pair whose two modules differ in `lang`, and such an API may ref only other cross-language APIs. Rust

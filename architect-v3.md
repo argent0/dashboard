@@ -40,6 +40,51 @@ A (generator) produces values; B (consumer) calls A. A module can be both: it is
 
 Because `T` is opaque (no derive, no public inner field, no accessors), a consumer cannot branch on a `T`. The rule is enforced by the API type's surface, not left to convention.
 
+## Elements and containers
+
+An opaque `T` lets a module compute only over data it owns. For data a consumer must compute over (rows of another domain), an API declares two more kinds of thing:
+
+- **Element**: readable, a flat sum of products over raw reprs (`string`, `bytes`, `i64`, `f64`, `bool`), never `T`s. A record is the one-variant case. An element is reachable only through a container, never as a constructor argument.
+- **Container**: a parametric `f a` with declared classes. The consumer gets exactly the classes' operations: no length, no index, no iteration it drives itself. The container's storage is private.
+
+```haskell
+query :: Foldable f => Method -> Arg -> f Row             -- generator
+total = foldr (\row acc -> acc + kcal row) 0 rows         -- consumer: an algebra TOTAL in Row
+```
+
+Constructors still bound control flow outside algebras. Inside an algebra the consumer decides on raw fields, which is the point; the algebra must match every variant of the element (no wildcard, the same rule as for constructors).
+
+**One module per class.** The v1 classes are `Foldable` (`foldr`), `Functor` (`fmap`), `Traversable` (`traverse`, over `Result`) and `Monoid` (`empty`, `append`). Each class module's API *is* its class: the tool generates the class trait and the class's **law tests**; nothing of the API is hand-written. The instance is hand-written and generic (`Seq a`, like `[a]`), in the API's `impl` files. `foldable` owns the type (`foldr` and `new` are the primitives); `functor`, `traversable` and `monoid` add their instances on top of `foldr` and `new`.
+
+```kdl
+api "foldable-nutrition"
+container "Seq" classes="Foldable"                 // owner: generic Seq a
+
+api "functor-nutrition"
+instance "Functor" for="foldable-nutrition.Seq"    // a class for a container another API owns
+
+api "db-nutrition"
+element "Row" {
+    variant "Consumption" "f64" "string"
+    variant "Product" "i64" "string"
+}
+container "Rows" of="Row" ref="foldable-nutrition.Seq"   // Seq Row
+constructor "Success" "Rows"
+```
+
+A consumer gets `fmap` on `Rows` only if it also consumes a `functor-*` API with an instance for that `Seq`. `Monoid` serves both the container (`append` is concatenation) and any accumulator a consumer folds into: the generated `fold_map` maps each element into a monoid the consumer implements.
+
+Laws (property tests over `i64` and `String` elements with generated functions; they run wherever the binding is compiled, so in the class module's own `test_cmd`):
+
+- Foldable: `new(xs)` holds `xs` in order; `foldr` is the right fold.
+- Functor: `fmap id == id`; `fmap (g . f) == fmap g . fmap f`; `foldr f z (fmap g xs) == foldr (f . g) z xs`.
+- Traversable: `traverse Ok == Ok`; naturality (mapping the error commutes); the first failure in element order wins; `fmap` recovered from `traverse` maps in order.
+- Monoid: left and right identity; associativity; `append` is concatenation; `fold_map` of singletons is the identity.
+
+**Budgets:** `max_elements` counts variants across an API's elements and `max_fields` their fields, since readable data widens the decision space like a constructor. A container argument is one `T` slot.
+
+**Files:** `impl` (per `[[api]]`) lists the hand-written instance files. They must lie under the generator module's paths: owned, budgeted and the worker's to edit (no `pins` strike), unlike the API's own paths. The generated Rust binding mounts each with `#[path]` beneath itself, so the instance sees the class trait as `super::Foldable`. A module's jail view also holds every API its APIs ref, transitively, with their `impl` files, so a consumer's tests use the real instance. `dashboard arch check` fails a declared class with no `impl Class for Container` in the API's `impl` files. Only the Rust generator renders elements, containers and instances so far.
+
 ## Changes and testing
 
 ### Intra-module change

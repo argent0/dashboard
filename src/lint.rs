@@ -1,11 +1,13 @@
 // The consumer contract checks (architect-v3.md, "Contracts"), language-aware
 // through tree-sitter rather than a toolchain: a consumer must match every
 // constructor of an API exhaustively, with no wildcard, and must not reach
-// into a T through the generated wire helpers. Heuristic where the language
-// has no types to ask: a match "is over an API" when an arm names one of its
-// constructors qualified by the API's sum type.
+// into a T through the generated wire helpers. The same holds for each of
+// an API's elements: an algebra over one must be total in its variants.
+// Heuristic where the language has no types to ask: a match "is over an API"
+// when an arm names one of its constructors qualified by the API's sum type
+// (or a variant by its element).
 
-use crate::idl::{Idl, pascal};
+use crate::idl::Idl;
 use regex::Regex;
 use tree_sitter::{Language, Node, Parser};
 
@@ -33,19 +35,32 @@ fn rust_catch_all(pat: &str) -> bool {
     pat.split('|').any(|p| re.is_match(p.trim()))
 }
 
-/// Wildcard arms in matches over `idl`'s sum type, in one file of `lang`.
+/// Wildcard arms in matches over `idl`'s sum type or any of its elements,
+/// in one file of `lang`.
 pub fn wildcard_arms(lang: &str, language: Language, src: &[u8], idl: &Idl) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (en, variants, element) in idl.sums() {
+        out.extend(wildcards_over(lang, language.clone(), src, &en, &variants, element));
+    }
+    out.sort_by_key(|f| f.line);
+    out
+}
+
+fn wildcards_over(lang: &str, language: Language, src: &[u8], en: &str, variants: &[&str], element: bool) -> Vec<Finding> {
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
         return Vec::new();
     }
     let Some(tree) = parser.parse(src, None) else { return Vec::new() };
-    let en = pascal(&idl.api);
     let mut out = Vec::new();
     let mut flag = |n: Node, what: &str| {
         out.push(Finding {
             line: n.start_position().row + 1,
-            message: format!("{what} in a match over {en}: adding a constructor must break the consumer"),
+            message: if element {
+                format!("{what} in a match over {en}: an algebra must be total in {en}")
+            } else {
+                format!("{what} in a match over {en}: adding a constructor must break the consumer")
+            },
         })
     };
     walk(tree.root_node(), &mut |n| match (lang, n.kind()) {
@@ -73,7 +88,7 @@ pub fn wildcard_arms(lang: &str, language: Language, src: &[u8], idl: &Idl) -> V
             let kids: Vec<Node> = n.children(&mut c).collect();
             let over_api = kids.iter().any(|k| {
                 k.kind() == "switch_case"
-                    && idl.ctors.iter().any(|c| text(*k, src).trim_start().starts_with(&format!("case \"{}\"", c.name)))
+                    && variants.iter().any(|c| text(*k, src).trim_start().starts_with(&format!("case \"{c}\"")))
             });
             if over_api {
                 for k in kids.iter().filter(|k| k.kind() == "switch_default") {
@@ -86,7 +101,7 @@ pub fn wildcard_arms(lang: &str, language: Language, src: &[u8], idl: &Idl) -> V
             let entries: Vec<Node> = n.children(&mut c).filter(|e| e.kind() == "when_entry").collect();
             let over_api = entries
                 .iter()
-                .any(|e| idl.ctors.iter().any(|c| text(*e, src).contains(&format!("{en}.{}", c.name))));
+                .any(|e| variants.iter().any(|c| text(*e, src).contains(&format!("{en}.{c}"))));
             if over_api {
                 for e in entries.iter().filter(|e| text(**e, src).trim_start().starts_with("else")) {
                     flag(*e, "else branch");
@@ -146,6 +161,22 @@ mod tests {
         assert_eq!(run("kotlin", kt.clone(), bad).len(), 1);
         let good = "fun f(x: Ab): Int = when (x) { is Ab.Created -> 1; Ab.Tick -> 2 }";
         assert!(run("kotlin", kt, good).is_empty());
+    }
+
+    #[test]
+    fn element_algebras_must_be_total() {
+        let idl = Idl::parse(
+            "api \"db\"\nelement \"Row\" {\n variant \"Meal\" \"f64\"\n variant \"Note\" \"string\"\n}\n\
+             container \"Rows\" of=\"Row\" ref=\"f.Seq\"\nconstructor \"Ok\" \"Rows\"\n",
+        )
+        .unwrap();
+        let rs: Language = tree_sitter_rust::LANGUAGE.into();
+        let bad = "fn k(r: &Row) -> f64 { match r { Row::Meal(k) => *k, _ => 0.0 } }";
+        let found = wildcard_arms("rust", rs.clone(), bad.as_bytes(), &idl);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].message.contains("an algebra must be total in Row"), "{:?}", found);
+        let total = "fn k(r: &Row) -> f64 { match r { Row::Meal(k) => *k, Row::Note(_) => 0.0 } }";
+        assert!(wildcard_arms("rust", rs, total.as_bytes(), &idl).is_empty());
     }
 
     #[test]

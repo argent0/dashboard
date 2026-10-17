@@ -960,6 +960,17 @@ pub struct ApiConfig {
     pub paths: Vec<String>,
     pub max_constructors: u64,
     pub max_types: u64,
+    /// Variants across the API's elements: readable data widens a
+    /// consumer's decision space like a constructor does.
+    pub max_elements: u64,
+    /// Fields across those variants.
+    pub max_fields: u64,
+    /// The hand-written instance of the API's container classes: under the
+    /// generator module's paths (owned, budgeted, the worker's to edit, so
+    /// never pinned), mounted beneath the generated binding and copied into
+    /// every consumer's view. Several APIs may share one file.
+    #[serde(rename = "impl")]
+    pub impls: Vec<String>,
 }
 
 /// The manifest's file name on `main`.
@@ -1015,6 +1026,18 @@ impl ArchConfig {
             }
             if a.paths.is_empty() {
                 return Err(format!("[[api]] {}: no paths", a.name));
+            }
+            let generator = self.modules.iter().find(|m| m.name == a.generator).unwrap();
+            for i in &a.impls {
+                if !path_under_test_paths(i, &generator.paths) {
+                    return Err(format!(
+                        "[[api]] {}: impl {i:?} is not under generator module {}'s paths",
+                        a.name, a.generator
+                    ));
+                }
+                if path_under_test_paths(i, &self.api_paths()) {
+                    return Err(format!("[[api]] {}: impl {i:?} is under an API's paths, so it would be pinned", a.name));
+                }
             }
         }
         // A link must never expose another module's sources into a view.

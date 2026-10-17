@@ -36,6 +36,8 @@ pub fn budgets(cfg: &ArchConfig) -> BTreeMap<String, u64> {
     for a in &cfg.apis {
         out.insert(format!("api {} max_constructors", a.name), a.max_constructors);
         out.insert(format!("api {} max_types", a.name), a.max_types);
+        out.insert(format!("api {} max_elements", a.name), a.max_elements);
+        out.insert(format!("api {} max_fields", a.name), a.max_fields);
     }
     out
 }
@@ -66,7 +68,7 @@ fn without_budgets(text: &str) -> Result<toml::Table, String> {
     t.remove("max_modules");
     for (key, fields) in [
         ("module", &["max_ast", "max_bytes"][..]),
-        ("api", &["max_constructors", "max_types"][..]),
+        ("api", &["max_constructors", "max_types", "max_elements", "max_fields"][..]),
     ] {
         if let Some(toml::Value::Array(items)) = t.get_mut(key) {
             for item in items {
