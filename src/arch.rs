@@ -74,7 +74,7 @@ impl Loaded {
                     out.api_dirs.insert(a.name.clone(), path.parent().unwrap_or(Path::new("")).to_path_buf());
                     out.idls.insert(a.name.clone(), idl);
                 }
-                Err(e) => out.errors.push(format!("api {}: {}: {e}", a.name, path.display())),
+                Err(e) => out.errors.extend(e.lines().map(|l| format!("api {}: {}: {l}", a.name, path.display()))),
             }
         }
         out
@@ -265,18 +265,29 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
                 errs.push(format!("{who}: a bytes max_len {b} exceeds the api's max_bytes_len {}", a.max_bytes_len));
             }
         }
-        if idl.fns.iter().any(|f| f.inputs.iter().any(|i| idl.containers.iter().any(|c| c.name == *i))) {
-            // The callee folds an input container, so the generator must
-            // consume the class API for that Seq (architect-v3.md, §1).
-            for (target, c) in idl.container_refs() {
-                if let Some(ta) = cfg.apis.iter().find(|x| x.name == target)
-                    && ta.consumer != a.generator
-                {
-                    errs.push(format!(
-                        "{who}: a fn takes a container of {target}.{c}, so generator {} must consume {target} (it is for {})",
-                        a.generator, ta.consumer
-                    ));
-                }
+        // The callee folds an input container, so the generator must consume
+        // the class API for its Seq (architect-v3.md, §1). A container only
+        // returned is folded by the consumer, which refs it already. A named
+        // sum taken as input carries its constructors' containers in.
+        let inputs: Vec<&String> = idl
+            .fns
+            .iter()
+            .flat_map(|f| &f.inputs)
+            .flat_map(|i| {
+                let carried = idl.sums.iter().filter(|s| s.name == *i).flat_map(|s| s.ctors.iter().flat_map(|c| &c.args));
+                std::iter::once(i).chain(carried)
+            })
+            .collect();
+        for c in &idl.containers {
+            let crate::idl::ContainerKind::Of(_, target, seq) = &c.kind else { continue };
+            if inputs.contains(&&c.name)
+                && let Some(ta) = cfg.apis.iter().find(|x| x.name == *target)
+                && ta.consumer != a.generator
+            {
+                errs.push(format!(
+                    "{who}: a fn takes a container of {target}.{seq}, so generator {} must consume {target} (it is for {})",
+                    a.generator, ta.consumer
+                ));
             }
         }
         for (target, c) in idl.container_refs() {
@@ -297,7 +308,14 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
                 _ => {}
             }
         }
-        if let Err(e) = instances_present(root, a, idl) {
+        // A class API for a TypeScript consumer: the TypeScript binding is
+        // the instance (with its laws), and the consumer never calls Rust,
+        // so the Rust side and its `impl` check are skipped. The same impl
+        // files are checked through the Rust consumers' class APIs.
+        let ts_class_api = ts_class_api(cfg, a, idl);
+        if !ts_class_api
+            && let Err(e) = instances_present(root, a, idl)
+        {
             errs.push(format!("{who}: {e}"));
         }
         for (target, ty) in idl.refs() {
@@ -342,6 +360,9 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
             }
         }
         let mut langs = vec![lang_of(&a.generator).unwrap_or(""), lang_of(&a.consumer).unwrap_or("")];
+        if ts_class_api {
+            langs.remove(0);
+        }
         langs.dedup();
         let mut files = Vec::new();
         let Some(api_dir) = loaded.api_dirs.get(&a.name) else { continue };
@@ -350,7 +371,7 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
         let impls: Vec<String> = a.impls.iter().map(|i| format!("{up}{i}")).collect();
         // The container classes a TypeScript consumer may use: the owner's,
         // plus every instance declared by an API the same module consumes.
-        let ts_classes: BTreeMap<String, Vec<crate::idl::Class>> = idl
+        let mut ts_classes: BTreeMap<String, Vec<crate::idl::Class>> = idl
             .container_refs()
             .iter()
             .map(|(owner, c)| {
@@ -366,9 +387,18 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
                 (format!("{owner}.{c}"), cs)
             })
             .collect();
+        // Its own generics: the classes it declares for them.
+        for c in &idl.containers {
+            if let crate::idl::ContainerKind::Generic(cs) = &c.kind {
+                let mut cs = cs.clone();
+                cs.sort();
+                cs.dedup();
+                ts_classes.insert(format!("{}.{}", a.name, c.name), cs);
+            }
+        }
         for lang in langs {
             let owns_classes = !idl.classes().is_empty();
-            if lang == "typescript" && owns_classes {
+            if lang == "typescript" && owns_classes && !ts_class_api {
                 errs.push(format!("{who}: a TypeScript API declares no container classes: the generated container is the instance"));
                 continue;
             }
@@ -421,6 +451,17 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
     errs.sort();
     errs.dedup();
     (out, errs)
+}
+
+/// A class API whose consumer is TypeScript and generator is not: only
+/// containers and instances, the consumer's binding is the instance (with
+/// its laws), and nothing on that side mounts the API's `impl` files.
+fn ts_class_api(cfg: &ArchConfig, a: &crate::config::ApiConfig, idl: &Idl) -> bool {
+    let lang_of = |m: &str| cfg.node(m).map(|(l, _)| l);
+    !idl.classes().is_empty()
+        && idl.only_containers()
+        && lang_of(&a.consumer) == Some("typescript")
+        && lang_of(&a.generator) != Some("typescript")
 }
 
 /// The cap on string `max_len`s in an API: its `max_string_len`, or 256.
@@ -733,7 +774,9 @@ fn run_view(
     paths.extend(cfg.shared.iter().cloned());
     for a in view_apis(cfg, bs, &m.name) {
         paths.extend(a.paths.iter().cloned());
-        paths.extend(a.impls.iter().cloned());
+        if !bs.iter().any(|b| b.name == a.name && ts_class_api(cfg, a, &b.idl)) {
+            paths.extend(a.impls.iter().cloned());
+        }
     }
     for f in expand(root, &paths)? {
         let to = view.join(&f);

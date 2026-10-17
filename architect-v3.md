@@ -218,9 +218,15 @@ serving `{"fn": …, "args": […]}` and a TypeScript `<Api>Client` over a
 `send` transport, so the root is wiring. Adding a `fn` breaks every generator,
 adding a constructor every consumer: both fail at post. `type Id : i64 store`
 generates the forwarding adapter (`rusqlite::ToSql`) so a callee can store a T
-without reading it. A `fn` taking a container means the generator folds it, so the
-generator module must consume the class API for that `Seq`; the caller
-builds it with `new` through the `ref`.
+without reading it. A `fn` taking a container (directly or inside an input sum) means the
+generator folds it, so the generator module must consume the class API for
+that `Seq`; the caller builds it with `new` through the `ref`. A container
+only returned asks nothing of the generator. A TypeScript module gets a
+container from a Rust-owned generic through its own class API
+(`foldable → sandbox`): that API's binding is TypeScript only, the instance
+and its laws, with no Rust side and no `impl` check (the impl files are
+checked through the Rust consumers' class APIs). A named sum may be a
+constructor argument, declared before the sum that takes it.
 
 ### The DAG
 

@@ -749,7 +749,9 @@ fn load_arch(root: &std::path::Path) -> dashboard::arch::Loaded {
     match dashboard::arch::load(root) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("dashboard: {e}");
+            for l in e.lines() {
+                eprintln!("dashboard: {l}");
+            }
             std::process::exit(1);
         }
     }

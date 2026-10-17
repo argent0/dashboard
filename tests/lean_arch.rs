@@ -68,8 +68,11 @@ fn lean_type_checks_the_manifest_and_the_tool_checks_the_rest() {
     write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("constructor X : Id", "constructor X : Nope"))]);
     assert!(arch::load(d.path()).unwrap_err().contains("Nope"));
     // Lean can't know a type is unused or a string unbounded: the tool does.
-    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("constructor X : Id", "constructor X"))]);
-    assert!(arch::load(d.path()).unwrap_err().contains("never used"));
+    // Every problem at once, not one per run.
+    let unused = LEAN_AB_IDL.replace("constructor X : Id", "constructor X").replace("  type Id", "  type Extra : i64\n  type Id");
+    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &unused)]);
+    let e = arch::load(d.path()).unwrap_err();
+    assert!(e.contains("Apis/ab.lean: type Extra: declared but never used\n") && e.contains("Apis/ab.lean: type Id: declared but never used"), "{e}");
     write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("string 16", "string"))]);
     let loaded = arch::load(d.path()).unwrap();
     let (problems, _) = report(d.path(), &loaded);
@@ -130,6 +133,16 @@ fn fns_sums_elements_and_containers_export_with_their_measures() {
     write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", NUTRITION_DB)]);
     let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
     assert!(problems.iter().any(|p| p.contains("generator db must consume foldable-db")), "{problems:?}");
+    // A container only returned is the consumer's to fold: no demand on db.
+    let returned = NUTRITION_DB.replace("fn log : Consumptions → Written", "fn log : Name → Written");
+    write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", &returned)]);
+    let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
+    assert!(!problems.iter().any(|p| p.contains("must consume")), "{problems:?}");
+    // Taken inside a sum, it is still an input.
+    let in_sum = NUTRITION_DB.replace("fn log : Consumptions → Written", "fn log : Rows → Written");
+    write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", &in_sum)]);
+    let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
+    assert!(problems.iter().any(|p| p.contains("generator db must consume foldable-db")), "{problems:?}");
 }
 
 const TOML3: &str = "max_modules = 4\n\
@@ -158,13 +171,17 @@ fn migrate_round_trips_the_toml_and_kdl_architecture() {
     for m in ["foldable", "monoid", "db", "nutrition"] {
         write_file(d.path(), &format!("{m}/lib.rs"), "");
     }
-    write_file(d.path(), "architecture.toml", TOML3);
+    // `store` is a DSL keyword: migrate writes it `«store»`.
+    let toml = TOML3.replace("name = \"db\"", "name = \"store\"").replace("generator = \"db\"", "generator = \"store\"");
+    write_file(d.path(), "architecture.toml", &toml);
     for (name, kdl) in KDLS {
         write_file(d.path(), &format!("apis/{name}/{name}.api.kdl"), kdl);
     }
     let before = arch::load(d.path()).expect("toml load");
     assert!(!before.lean && before.errors.is_empty(), "{:?}", before.errors);
     let wrote = lean::migrate(d.path(), &before.cfg, &before.idls).expect("migrate");
+    let manifest = std::fs::read_to_string(d.path().join("architecture/Architecture.lean")).unwrap();
+    assert!(manifest.contains("module «store» where") && manifest.contains(": «store» → nutrition"), "{manifest}");
     assert!(wrote.contains(&"architecture/Architecture.lean".to_string()) && wrote.contains(&"architecture/Apis/db-nutrition.lean".to_string()), "{wrote:?}");
     assert!(arch::load(d.path()).unwrap_err().contains("one architecture"));
     std::fs::remove_file(d.path().join("architecture.toml")).unwrap();
@@ -184,7 +201,7 @@ fn migrate_round_trips_the_toml_and_kdl_architecture() {
     assert_eq!(apis(&after.cfg), apis(&before.cfg));
     assert_eq!(after.cfg.max_modules, 4);
     // The TOML printers are the inverse of the parsers on this fixture too.
-    assert_eq!(arch_config_from_str(TOML3).unwrap().lean(), before.cfg.lean());
+    assert_eq!(arch_config_from_str(&toml).unwrap().lean(), before.cfg.lean());
     assert_eq!(Idl::parse(KDLS[2].1).unwrap().lean(), before.idls["db-nutrition"].lean());
     // The migrated IDL carries no bounds: the check says so until the
     // director adds them.

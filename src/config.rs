@@ -1232,11 +1232,7 @@ pub fn arch_config_from_json(v: serde_json::Value) -> Result<ArchConfig, String>
 }
 
 fn lean_ident(name: &str) -> String {
-    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
-        name.to_string()
-    } else {
-        format!("«{name}»")
-    }
+    crate::lean::ident(name)
 }
 
 fn lean_strs(xs: &[String]) -> String {

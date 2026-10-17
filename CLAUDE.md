@@ -446,6 +446,15 @@ ignored — no `deny_unknown_fields` anywhere.
   of `{"v": variant, "f": [raw fields]}` (Rust walks it with `foldr`, rebuilds with `new`; `<rows>_to_value`
   / `rowsFromValue` helpers), fields checked against their `max_len`. A TS API may not own classes or
   instances; Kotlin still has no element/container generator. Tests: `tests/wire.rs` (cargo + deno for real).
+  **A class API for a TypeScript consumer** (`foldable → <ts module>`, handover gap b; `arch::ts_class_api`): an
+  API of only containers/instances whose consumer is TS and generator isn't gets only its TS binding (its own
+  generics as `class Seq<A>` with their classes, plus laws), no Rust binding, no `impl` check
+  (`instances_present`) and no `impl` files in jail views; the same impl files are still checked through the Rust
+  consumers' class APIs. This is how a TS→TS API gets a container (a `ref` must share a module). Referring APIs
+  keep inlining their own `Seq` (not importing the class API's): their classes differ per consumer (instances), so
+  two inlined `Seq`s are nominally distinct and a module forwarding rows rebuilds them with `foldr`. Tests:
+  `tests/ts_classes.rs` (deno in the jail view). The "fn takes a container" rule applies only to containers some
+  fn takes (directly or inside an input sum), not to those only returned.
 - **Proofs supplied by the caller** (architect-v3.md, Lean only; `src/idl.rs` `Pred`/`Token`): a callee never
   branches on an input `T`, so the caller's proof travels in the type. `type Grams : f64 where 0 < v ∧ v ≤ 20000`
   (`type Day : string 10 where v.length = 10`, `type Span : i64 × i64 where v.1 < v.2`, `type Unit : string 8 where
@@ -461,7 +470,12 @@ ignored — no `deny_unknown_fields` anywhere.
   compiler); `versioned stale=Ctor` carries `(id, version)` (`[id, version]` on the wire; `store` adds `version()`
   beside `ToSql`). Every fn taking a versioned or linear token must return a sum containing its constructor
   (`Idl::fns_missing`, also through a `ref` re-export in `arch::bindings`). A named `sum` may be a fn input (a
-  closed vocabulary the callee matches; sums got value-level codecs for it). Budgets: `max_rules` (comparisons and
+  closed vocabulary the callee matches; sums got value-level codecs for it) and a constructor argument (sums
+  nest; one declared before the sum taking it, so never recursive; Kotlin's `toValue(v)` / `fromValue<Sum>`;
+  `tests/idl_gaps.rs`). `Idl::validate` lists every problem of every API at once (one per line), not the first.
+  `arch migrate` quotes `«…»` any module/API/IDL name that is a DSL keyword (every word atom of a `syntax` line in
+  `Dashboard.lean`), a Lean keyword or `v` (`lean::ident`); quoting can't help a manifest name that collides with a
+  Lean core declaration (`Unit`, `Empty`: `def Unit` exists already), so avoid those. Budgets: `max_rules` (comparisons and
   memberships across the API's `where`s), `max_tokens`. In Lean a token is `{ id : T // Name.Fact id }` with an
   opaque `Fact`, so there too only a fn of the API yields one. Tests: `tests/proofs.rs` (real `rustc`: a refined
   `new` refuses, a linear token used twice does not compile), `tests/lean_arch.rs`, `tests/wire.rs`.

@@ -450,41 +450,52 @@ impl Idl {
             sums: Vec::new(),
             fns: Vec::new(),
         };
-        idl.validate()?;
+        let errs = idl.validate();
+        if !errs.is_empty() {
+            return Err(errs.join("\n"));
+        }
         Ok(idl)
     }
 
     /// An IDL the Lean exporter produced (`lean::export`): the same checks
     /// the KDL parser runs, since Lean type-checks only part of them.
+    /// Every problem is listed, one per line.
     pub fn from_export(idl: Idl) -> Result<Idl, String> {
-        idl.validate()?;
+        let errs = idl.validate();
+        if !errs.is_empty() {
+            return Err(errs.join("\n"));
+        }
         Ok(idl)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    /// Every problem with the IDL, not just the first.
+    pub(crate) fn validate(&self) -> Vec<String> {
+        let mut errs = Vec::new();
         let mut names = BTreeSet::new();
         for t in &self.types {
             if !ident_ok(&t.name) || !names.insert(t.name.as_str()) {
-                return Err(format!("type {:?}: not a CamelCase identifier, or duplicate", t.name));
+                errs.push(format!("type {:?}: not a CamelCase identifier, or duplicate", t.name));
             }
             if let Kind::Tuple(fs) = &t.kind {
                 if !(2..=4).contains(&fs.len()) {
-                    return Err(format!("type {}: a product has two to four components", t.name));
+                    errs.push(format!("type {}: a product has two to four components", t.name));
                 }
                 if t.display || t.store {
-                    return Err(format!("type {}: display and store are for scalar types, not a product", t.name));
+                    errs.push(format!("type {}: display and store are for scalar types, not a product", t.name));
                 }
             }
             if let Some(p) = &t.pred {
                 if matches!(t.kind, Kind::Ref(..)) {
-                    return Err(format!("type {}: a ref carries its own refinement; `where` is for a repr or a product", t.name));
+                    errs.push(format!("type {}: a ref carries its own refinement; `where` is for a repr or a product", t.name));
                 }
-                p.check(&self.components(t)).map_err(|e| format!("type {}: {e}", t.name))?;
+                if let Err(e) = p.check(&self.components(t)) {
+                    errs.push(format!("type {}: {e}", t.name));
+                }
             }
         }
         for k in &self.tokens {
             if !ident_ok(&k.name) || !names.insert(k.name.as_str()) {
-                return Err(format!("token {:?}: not a CamelCase identifier, or duplicate", k.name));
+                errs.push(format!("token {:?}: not a CamelCase identifier, or duplicate", k.name));
             }
         }
         for (what, n) in self
@@ -494,61 +505,66 @@ impl Idl {
             .chain(self.containers.iter().map(|c| ("container", &c.name)))
         {
             if !ident_ok(n) || !names.insert(n.as_str()) {
-                return Err(format!("{what} {n:?}: not a CamelCase identifier, or duplicate"));
+                errs.push(format!("{what} {n:?}: not a CamelCase identifier, or duplicate"));
             }
         }
         for e in &self.elements {
             let mut vs = BTreeSet::new();
             for v in &e.variants {
                 if !ident_ok(&v.name) || !vs.insert(v.name.as_str()) {
-                    return Err(format!("element {}: variant {:?}: not a CamelCase identifier, or duplicate", e.name, v.name));
+                    errs.push(format!("element {}: variant {:?}: not a CamelCase identifier, or duplicate", e.name, v.name));
                 }
             }
             if e.variants.is_empty() {
-                return Err(format!("element {}: no variants", e.name));
+                errs.push(format!("element {}: no variants", e.name));
             }
             if !self.containers.iter().any(|c| matches!(&c.kind, ContainerKind::Of(of, ..) if *of == e.name)) {
-                return Err(format!("element {}: no container holds it (an element is reachable only through one)", e.name));
+                errs.push(format!("element {}: no container holds it (an element is reachable only through one)", e.name));
             }
         }
         for c in &self.containers {
             match &c.kind {
                 ContainerKind::Generic(classes) => {
                     if !classes.contains(&Class::Foldable) {
-                        return Err(format!("container {}: a generic's classes must include Foldable, its primitive", c.name));
+                        errs.push(format!("container {}: a generic's classes must include Foldable, its primitive", c.name));
                     }
                     if !self.instances.is_empty() {
-                        return Err(format!("container {}: an api owning a container adds no instances to another's", c.name));
+                        errs.push(format!("container {}: an api owning a container adds no instances to another's", c.name));
                     }
                 }
                 ContainerKind::Of(of, ..) => {
                     if !self.elements.iter().any(|e| e.name == *of) {
-                        return Err(format!("container {}: of={of:?} is not an element of this api", c.name));
+                        errs.push(format!("container {}: of={of:?} is not an element of this api", c.name));
                     }
                 }
             }
         }
-        if let Some(i) = self.instances.iter().find(|i| i.class == Class::Foldable) {
-            return Err(format!("instance Foldable for {}.{}: Foldable is declared by the api owning the container", i.api, i.container));
+        for i in self.instances.iter().filter(|i| i.class == Class::Foldable) {
+            errs.push(format!("instance Foldable for {}.{}: Foldable is declared by the api owning the container", i.api, i.container));
         }
         if self.instances.iter().any(|i| i.api != self.instances[0].api) {
-            return Err("instances: all for containers of one api".to_string());
+            errs.push("instances: all for containers of one api".to_string());
         }
         let mut cnames = BTreeSet::new();
         let mut used = BTreeSet::new();
         for c in &self.ctors {
             if !ident_ok(&c.name) || !cnames.insert(c.name.as_str()) {
-                return Err(format!("constructor {:?}: not a CamelCase identifier, or duplicate", c.name));
+                errs.push(format!("constructor {:?}: not a CamelCase identifier, or duplicate", c.name));
             }
             for a in &c.args {
+                if self.is_sum(a) {
+                    // A named sum nests: the consumer matches it in turn.
+                    used.insert(a.as_str());
+                    continue;
+                }
                 if !names.contains(a.as_str()) {
-                    return Err(format!("constructor {}: unknown type {a:?}", c.name));
+                    errs.push(format!("constructor {}: unknown type {a:?}", c.name));
                 }
                 if self.elements.iter().any(|e| e.name == *a) {
-                    return Err(format!("constructor {}: element {a} is reachable only through a container", c.name));
+                    errs.push(format!("constructor {}: element {a} is reachable only through a container", c.name));
                 }
                 if self.containers.iter().any(|x| x.name == *a && matches!(x.kind, ContainerKind::Generic(_))) {
-                    return Err(format!("constructor {}: {a} is generic; instantiate it with `container ... of=`", c.name));
+                    errs.push(format!("constructor {}: {a} is generic; instantiate it with `container ... of=`", c.name));
                 }
                 used.insert(a.as_str());
             }
@@ -557,24 +573,33 @@ impl Idl {
         let mut snames = BTreeSet::new();
         for s in &self.sums {
             if !ident_ok(&s.name) || names.contains(s.name.as_str()) || !snames.insert(s.name.as_str()) {
-                return Err(format!("sum {:?}: not a CamelCase identifier, or duplicate", s.name));
+                errs.push(format!("sum {:?}: not a CamelCase identifier, or duplicate", s.name));
             }
             if s.ctors.is_empty() {
-                return Err(format!("sum {}: no constructors", s.name));
+                errs.push(format!("sum {}: no constructors", s.name));
             }
             for c in &s.ctors {
                 if !ident_ok(&c.name) || !cnames.insert(c.name.as_str()) {
-                    return Err(format!("sum {}: constructor {:?}: not a CamelCase identifier, or duplicate across the api's sums", s.name, c.name));
+                    errs.push(format!("sum {}: constructor {:?}: not a CamelCase identifier, or duplicate across the api's sums", s.name, c.name));
                 }
                 for a in &c.args {
+                    if self.is_sum(a) {
+                        // Declared before this one: sums nest, never recursively.
+                        if snames.contains(a.as_str()) && *a != s.name {
+                            used.insert(a.as_str());
+                        } else {
+                            errs.push(format!("sum {}: constructor {}: sum {a} must be declared before {} (a sum never contains itself)", s.name, c.name, s.name));
+                        }
+                        continue;
+                    }
                     if !names.contains(a.as_str()) {
-                        return Err(format!("sum {}: constructor {}: unknown type {a:?}", s.name, c.name));
+                        errs.push(format!("sum {}: constructor {}: unknown type {a:?}", s.name, c.name));
                     }
                     if self.elements.iter().any(|e| e.name == *a) {
-                        return Err(format!("sum {}: constructor {}: element {a} is reachable only through a container", s.name, c.name));
+                        errs.push(format!("sum {}: constructor {}: element {a} is reachable only through a container", s.name, c.name));
                     }
                     if self.containers.iter().any(|x| x.name == *a && matches!(x.kind, ContainerKind::Generic(_))) {
-                        return Err(format!("sum {}: constructor {}: {a} is generic; instantiate it with `container ... of=`", s.name, c.name));
+                        errs.push(format!("sum {}: constructor {}: {a} is generic; instantiate it with `container ... of=`", s.name, c.name));
                     }
                     used.insert(a.as_str());
                 }
@@ -587,7 +612,7 @@ impl Idl {
                 || !f.name.chars().all(|c| c.is_ascii_alphanumeric())
                 || !fnames.insert(f.name.as_str())
             {
-                return Err(format!("fn {:?}: not a camelCase identifier, or duplicate", f.name));
+                errs.push(format!("fn {:?}: not a camelCase identifier, or duplicate", f.name));
             }
             for a in &f.inputs {
                 if snames.contains(a.as_str()) {
@@ -596,36 +621,35 @@ impl Idl {
                     continue;
                 }
                 if !names.contains(a.as_str()) {
-                    return Err(format!("fn {}: unknown input {a:?}", f.name));
+                    errs.push(format!("fn {}: unknown input {a:?}", f.name));
                 }
                 if self.elements.iter().any(|e| e.name == *a) {
-                    return Err(format!("fn {}: element {a} is reachable only through a container", f.name));
+                    errs.push(format!("fn {}: element {a} is reachable only through a container", f.name));
                 }
                 if self.containers.iter().any(|x| x.name == *a && matches!(x.kind, ContainerKind::Generic(_))) {
-                    return Err(format!("fn {}: {a} is generic; instantiate it with `container ... of=`", f.name));
+                    errs.push(format!("fn {}: {a} is generic; instantiate it with `container ... of=`", f.name));
                 }
                 used.insert(a.as_str());
             }
             if !snames.contains(f.returns.as_str()) {
-                return Err(format!("fn {}: returns {:?}, which is not a sum of this api", f.name, f.returns));
+                errs.push(format!("fn {}: returns {:?}, which is not a sum of this api", f.name, f.returns));
             }
             used.insert(f.returns.as_str());
         }
-        if let Some(s) = self.sums.iter().find(|s| !used.contains(s.name.as_str())) {
-            return Err(format!("sum {}: declared but no fn returns or takes it", s.name));
+        for s in self.sums.iter().filter(|s| !used.contains(s.name.as_str())) {
+            errs.push(format!("sum {}: declared but no fn returns or takes it", s.name));
         }
-        if let Some(t) = self.types.iter().find(|t| !used.contains(t.name.as_str())) {
-            return Err(format!("type {}: declared but never used", t.name));
+        for t in self.types.iter().filter(|t| !used.contains(t.name.as_str())) {
+            errs.push(format!("type {}: declared but never used", t.name));
         }
-        if let Some(k) = self.tokens.iter().find(|k| !used.contains(k.name.as_str())) {
-            return Err(format!("token {}: declared but never used", k.name));
+        for k in self.tokens.iter().filter(|k| !used.contains(k.name.as_str())) {
+            errs.push(format!("token {}: declared but never used", k.name));
         }
         // A fact that can change by the call: the signature admits it.
         for k in &self.tokens {
-            if let Some(c) = k.kind.failure()
-                && let Some(f) = self.fns_missing(&k.name, c).first()
-            {
-                return Err(format!(
+            let Some(c) = k.kind.failure() else { continue };
+            for f in self.fns_missing(&k.name, c) {
+                errs.push(format!(
                     "fn {}: takes {} ({}), so {} must have a `{c}` constructor: the fact may have changed by the call",
                     f.name,
                     k.name,
@@ -634,17 +658,17 @@ impl Idl {
                 ));
             }
         }
-        if let Some(c) = self
+        for c in self
             .containers
             .iter()
-            .find(|c| matches!(c.kind, ContainerKind::Of(..)) && !used.contains(c.name.as_str()))
+            .filter(|c| matches!(c.kind, ContainerKind::Of(..)) && !used.contains(c.name.as_str()))
         {
-            return Err(format!("container {}: declared but never used", c.name));
+            errs.push(format!("container {}: declared but never used", c.name));
         }
         if self.ctors.is_empty() && self.fns.is_empty() && self.classes().is_empty() {
-            return Err("no constructors".to_string());
+            errs.push("no constructors".to_string());
         }
-        Ok(())
+        errs
     }
 
     /// Every constructor across the default sum and the named sums.
@@ -824,6 +848,17 @@ impl Idl {
     /// only the Rust generator renders so far.
     pub fn has_containers(&self) -> bool {
         !self.elements.is_empty() || !self.containers.is_empty() || !self.instances.is_empty()
+    }
+
+    /// Whether this API declares nothing but containers and instances (a
+    /// class API).
+    pub fn only_containers(&self) -> bool {
+        self.types.is_empty()
+            && self.tokens.is_empty()
+            && self.ctors.is_empty()
+            && self.sums.is_empty()
+            && self.fns.is_empty()
+            && self.elements.is_empty()
     }
 
     /// `(api, container)` of every container `ref` and instance `for`.
@@ -1470,7 +1505,8 @@ impl Idl {
     }
 
     /// The generic container classes this API's `container ... :=` lines
-    /// ref, as `(generated class name, owner api, owner container)`.
+    /// ref, then those it owns, as `(generated class name, owner api, owner
+    /// container)`.
     fn ts_seqs(&self) -> Vec<(String, String, String)> {
         let mut out: Vec<(String, String, String)> = Vec::new();
         for c in &self.containers {
@@ -1478,6 +1514,11 @@ impl Idl {
                 && !out.iter().any(|(_, oa, ot)| oa == a && ot == t)
             {
                 out.push((t.clone(), a.clone(), t.clone()));
+            }
+        }
+        for c in &self.containers {
+            if matches!(c.kind, ContainerKind::Generic(_)) {
+                out.push((c.name.clone(), self.api.clone(), c.name.clone()));
             }
         }
         // Two owners with the same container name: prefix the owner.
@@ -1517,8 +1558,12 @@ impl Idl {
                     let vals: Vec<String> = v.fields.iter().enumerate().map(|(i, f)| ts_raw_encode(f.repr, &format!("e.f{i}"))).collect();
                     o.push_str(&format!("    case \"{}\": return {{ v: \"{}\", f: [{}] }};\n", v.name, v.name, vals.join(", ")));
                 }
+                // One variant is no union: TypeScript can't narrow it to never.
+                if e.variants.len() > 1 {
+                    o.push_str("    default: { const never: never = e; throw new Error(String(never)); }\n");
+                }
                 o.push_str(&format!(
-                    "    default: {{ const never: never = e; throw new Error(String(never)); }}\n  }}\n}}\n\n\
+                    "  }}\n}}\n\n\
                      export function {cm}FromValue(x: unknown): {} {{\n  \
                      const j = x as {{ v?: unknown; f?: unknown }};\n  if (!Array.isArray(j.f)) throw new Error(\"missing f\");\n  const f: unknown[] = j.f;\n  switch (j.v) {{\n",
                     e.name
@@ -1846,10 +1891,22 @@ impl Idl {
             }
             o.push_str("}\n");
             if wire {
+                // Value-level codecs too: a sum may be another sum's argument.
                 let from = if is_default { "fromJson".to_string() } else { format!("fromJson{name}") };
-                o.push_str(&format!("\nfun toJson(v: {name}): String = Wire.write(when (v) {{\n"));
+                o.push_str(&format!(
+                    "\nfun toJson(v: {name}): String = Wire.write(toValue(v))\n\n\
+                     fun {from}(s: String): {name} {{\n    val j = Wire.read(s)\n    \
+                     ((j as? Map<*, *>)?.get(\"error\") as? String)?.let {{ throw IllegalArgumentException(it) }}\n    \
+                     return fromValue{name}(j)\n}}\n\n\
+                     internal fun toValue(v: {name}): Any? = when (v) {{\n"
+                ));
                 for c in ctors {
-                    let vals: Vec<String> = (0..c.args.len()).map(|i| format!("v.a{i}.toValue()")).collect();
+                    let vals: Vec<String> = c
+                        .args
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| if self.is_sum(t) { format!("toValue(v.a{i})") } else { format!("v.a{i}.toValue()") })
+                        .collect();
                     let pat = if c.args.is_empty() { format!("{name}.{}", c.name) } else { format!("is {name}.{}", c.name) };
                     o.push_str(&format!(
                         "    {pat} -> mapOf(\"c\" to \"{}\", \"a\" to listOf<Any?>({}))\n",
@@ -1857,13 +1914,17 @@ impl Idl {
                     ));
                 }
                 o.push_str(&format!(
-                    "}})\n\nfun {from}(s: String): {name} {{\n    val j = Wire.read(s) as? Map<*, *> ?: throw IllegalArgumentException(\"expected object\")\n    \
-                     (j[\"error\"] as? String)?.let {{ throw IllegalArgumentException(it) }}\n    \
+                    "}}\n\ninternal fun fromValue{name}(x: Any?): {name} {{\n    val j = x as? Map<*, *> ?: throw IllegalArgumentException(\"expected object\")\n    \
                      val a = j[\"a\"] as? List<*> ?: throw IllegalArgumentException(\"missing a\")\n    return when (val c = j[\"c\"]) {{\n"
                 ));
                 for c in ctors {
                     let n = c.args.len();
-                    let args: Vec<String> = c.args.iter().enumerate().map(|(i, t)| format!("{t}.fromValue(a[{i}])")).collect();
+                    let args: Vec<String> = c
+                        .args
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| if self.is_sum(t) { format!("fromValue{t}(a[{i}])") } else { format!("{t}.fromValue(a[{i}])") })
+                        .collect();
                     let build = if n == 0 { format!("{name}.{}", c.name) } else { format!("{name}.{}({})", c.name, args.join(", ")) };
                     o.push_str(&format!(
                         "        \"{}\" -> {{\n            require(a.size == {n}) {{ \"wrong argument count for {}\" }}\n            {build}\n        }}\n",
@@ -2463,11 +2524,11 @@ const MONOID_LAWS: &str = "
 ";
 
 fn lean_ident(name: &str) -> String {
-    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        name.to_string()
-    } else {
-        format!("«{name}»")
-    }
+    crate::lean::ident(name)
+}
+
+fn lean_idents(names: &[String]) -> Vec<String> {
+    names.iter().map(|n| lean_ident(n)).collect()
 }
 
 fn lean_prim(repr: Repr, max_len: u64) -> String {
@@ -2484,9 +2545,9 @@ fn lean_prim(repr: Repr, max_len: u64) -> String {
 
 fn lean_ctor(c: &Ctor) -> String {
     if c.args.is_empty() {
-        format!("  | {}\n", c.name)
+        format!("  | {}\n", lean_ident(&c.name))
     } else {
-        format!("  | {} : {}\n", c.name, c.args.join(" → "))
+        format!("  | {} : {}\n", lean_ident(&c.name), lean_idents(&c.args).join(" → "))
     }
 }
 
@@ -2506,14 +2567,14 @@ impl Idl {
         o.push_str(&format!("open Dashboard\n\nidl {} where\n", lean_ident(&self.api)));
         for t in &self.types {
             match &t.kind {
-                Kind::Repr(r) => o.push_str(&format!("  type {} : {}", t.name, lean_prim(*r, t.max_len))),
+                Kind::Repr(r) => o.push_str(&format!("  type {} : {}", lean_ident(&t.name), lean_prim(*r, t.max_len))),
                 Kind::Tuple(fs) => o.push_str(&format!(
                     "  type {} : {}",
-                    t.name,
+                    lean_ident(&t.name),
                     fs.iter().map(|f| lean_prim(f.repr, f.max_len)).collect::<Vec<_>>().join(" × ")
                 )),
                 Kind::Ref(a, ty) => {
-                    o.push_str(&format!("  type {} : ref {}.{ty}\n", t.name, lean_ident(a)));
+                    o.push_str(&format!("  type {} : ref {}.{}\n", lean_ident(&t.name), lean_ident(a), lean_ident(ty)));
                     continue;
                 }
             }
@@ -2531,23 +2592,23 @@ impl Idl {
         for k in &self.tokens {
             let kind = match &k.kind {
                 TokenKind::Permanent => "permanent".to_string(),
-                TokenKind::Versioned(c) => format!("versioned stale={c}"),
-                TokenKind::Linear(c) => format!("linear spent={c}"),
+                TokenKind::Versioned(c) => format!("versioned stale={}", lean_ident(c)),
+                TokenKind::Linear(c) => format!("linear spent={}", lean_ident(c)),
             };
-            o.push_str(&format!("  token {} : {} {kind}", k.name, lean_prim(k.repr, k.max_len)));
+            o.push_str(&format!("  token {} : {} {kind}", lean_ident(&k.name), lean_prim(k.repr, k.max_len)));
             if k.store {
                 o.push_str(" store");
             }
             o.push('\n');
         }
         for e in &self.elements {
-            o.push_str(&format!("  element {}\n", e.name));
+            o.push_str(&format!("  element {}\n", lean_ident(&e.name)));
             for v in &e.variants {
                 if v.fields.is_empty() {
-                    o.push_str(&format!("    | {}\n", v.name));
+                    o.push_str(&format!("    | {}\n", lean_ident(&v.name)));
                 } else {
                     let fs: Vec<String> = v.fields.iter().map(|f| lean_prim(f.repr, f.max_len)).collect();
-                    o.push_str(&format!("    | {} : {}\n", v.name, fs.join(" → ")));
+                    o.push_str(&format!("    | {} : {}\n", lean_ident(&v.name), fs.join(" → ")));
                 }
             }
         }
@@ -2555,30 +2616,30 @@ impl Idl {
             match &c.kind {
                 ContainerKind::Generic(cs) => {
                     let names: Vec<&str> = cs.iter().map(|c| c.name()).collect();
-                    o.push_str(&format!("  container {} : {}\n", c.name, names.join(", ")));
+                    o.push_str(&format!("  container {} : {}\n", lean_ident(&c.name), names.join(", ")));
                 }
-                ContainerKind::Of(of, a, t) => o.push_str(&format!("  container {} := {}.{t} {of}\n", c.name, lean_ident(a))),
+                ContainerKind::Of(of, a, t) => o.push_str(&format!("  container {} := {}.{} {}\n", lean_ident(&c.name), lean_ident(a), lean_ident(t), lean_ident(of))),
             }
         }
         for i in &self.instances {
-            o.push_str(&format!("  instance {} for {}.{}\n", i.class.name(), lean_ident(&i.api), i.container));
+            o.push_str(&format!("  instance {} for {}.{}\n", i.class.name(), lean_ident(&i.api), lean_ident(&i.container)));
         }
         for s in &self.sums {
-            o.push_str(&format!("  sum {}\n", s.name));
+            o.push_str(&format!("  sum {}\n", lean_ident(&s.name)));
             for c in &s.ctors {
                 o.push_str(&format!("  {}", lean_ctor(c)));
             }
         }
         for f in &self.fns {
-            let mut sig: Vec<&str> = f.inputs.iter().map(String::as_str).collect();
-            sig.push(&f.returns);
-            o.push_str(&format!("  fn {} : {}\n", f.name, sig.join(" → ")));
+            let mut sig = lean_idents(&f.inputs);
+            sig.push(lean_ident(&f.returns));
+            o.push_str(&format!("  fn {} : {}\n", lean_ident(&f.name), sig.join(" → ")));
         }
         for c in &self.ctors {
             if c.args.is_empty() {
-                o.push_str(&format!("  constructor {}\n", c.name));
+                o.push_str(&format!("  constructor {}\n", lean_ident(&c.name)));
             } else {
-                o.push_str(&format!("  constructor {} : {}\n", c.name, c.args.join(" → ")));
+                o.push_str(&format!("  constructor {} : {}\n", lean_ident(&c.name), lean_idents(&c.args).join(" → ")));
             }
         }
         o
@@ -2633,6 +2694,21 @@ mod tests {
             let e = Idl::parse(bad).unwrap_err();
             assert!(e.contains(want), "{bad}: {e}");
         }
+    }
+
+    #[test]
+    fn lists_every_problem_at_once() {
+        let e = Idl::parse("api \"a\"\ntype \"T\" repr=\"string\"\ntype \"U\" repr=\"i64\"\nconstructor \"X\" \"Nope\"\nconstructor \"x\"").unwrap_err();
+        let lines: Vec<&str> = e.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "constructor X: unknown type \"Nope\"",
+                "constructor \"x\": not a CamelCase identifier, or duplicate",
+                "type T: declared but never used",
+                "type U: declared but never used",
+            ]
+        );
     }
 
     const DB: &str = r#"

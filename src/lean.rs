@@ -42,6 +42,44 @@ globs = [\"Apis.+\"]
 ";
 const GITIGNORE: &str = ".lake/\nlake-manifest.json\n";
 
+/// Lean's own keywords that can collide with a module, API or IDL name.
+const LEAN_KEYWORDS: &[&str] = &[
+    "abbrev", "at", "attribute", "axiom", "break", "by", "calc", "catch", "class", "continue", "def", "deriving", "do",
+    "else", "end", "example", "export", "extends", "finally", "for", "from", "fun", "have", "if", "import", "in",
+    "inductive", "instance", "let", "local", "macro", "match", "mut", "namespace", "noncomputable", "nomatch", "nofun",
+    "obtain", "open", "partial", "private", "Prop", "protected", "return", "scoped", "section", "set_option", "show",
+    "Sort", "structure", "suffices", "syntax", "then", "theorem", "this", "try", "Type", "universe", "unless",
+    "variable", "where", "with",
+];
+
+/// Every name `«…»` must quote: each word atom of a `syntax` line in the
+/// DSL (`store`, `display`, `ref`, …: tokens once the DSL is open), Lean's
+/// keywords, and `v`, the variable of a `where` predicate.
+pub fn keywords() -> &'static std::collections::BTreeSet<String> {
+    static WORDS: std::sync::OnceLock<std::collections::BTreeSet<String>> = std::sync::OnceLock::new();
+    WORDS.get_or_init(|| {
+        let mut out: std::collections::BTreeSet<String> = LEAN_KEYWORDS.iter().map(|s| s.to_string()).collect();
+        out.insert("v".to_string());
+        for line in DASHBOARD_LEAN.lines().filter(|l| l.trim_start().starts_with("syntax")) {
+            for (i, atom) in line.split('"').enumerate() {
+                let w = atom.trim();
+                if i % 2 == 1 && !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && w.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+                    out.insert(w.to_string());
+                }
+            }
+        }
+        out
+    })
+}
+
+/// `name` as a Lean identifier: as is, or `«name»` when it is no plain
+/// identifier or is a keyword.
+pub fn ident(name: &str) -> String {
+    let plain = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    if plain && !keywords().contains(name) { name.to_string() } else { format!("«{name}»") }
+}
+
 /// The files `dashboard` owns inside the package, relative to it.
 pub fn vendored() -> Vec<(&'static str, String)> {
     vec![
@@ -190,19 +228,27 @@ pub fn export(pkg: &Path, sandbox: &Sandbox) -> Result<Exported, String> {
 pub fn parse(text: &str) -> Result<Exported, String> {
     let json: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("export: {e}"))?;
     if let Some(errs) = json.get("errors").and_then(|e| e.as_array())
-        && let Some(e) = errs.first()
+        && !errs.is_empty()
     {
-        return Err(e.as_str().unwrap_or("export error").to_string());
+        return Err(errs.iter().map(|e| e.as_str().unwrap_or("export error")).collect::<Vec<_>>().join("\n"));
     }
     let arch = config::arch_config_from_json(json.get("arch").cloned().unwrap_or_default())
         .map_err(|e| format!("Architecture.lean: {e}"))?;
+    // Every API's every problem, not just the first.
     let mut idls = BTreeMap::new();
+    let mut errs = Vec::new();
     if let Some(map) = json.get("idls").and_then(|i| i.as_object()) {
         for (name, v) in map {
-            let idl: Idl = serde_json::from_value(v.clone()).map_err(|e| format!("{}: {e}", api_file(name)))?;
-            let idl = Idl::from_export(idl).map_err(|e| format!("{}: {e}", api_file(name)))?;
-            idls.insert(name.clone(), idl);
+            match serde_json::from_value(v.clone()).map_err(|e| e.to_string()).and_then(Idl::from_export) {
+                Ok(idl) => {
+                    idls.insert(name.clone(), idl);
+                }
+                Err(e) => errs.extend(e.lines().map(|l| format!("{}: {l}", api_file(name)))),
+            }
         }
+    }
+    if !errs.is_empty() {
+        return Err(errs.join("\n"));
     }
     for a in &arch.apis {
         if !idls.contains_key(&a.name) {
@@ -274,5 +320,14 @@ mod tests {
         std::fs::write(d.path().join("architecture/lean-toolchain"), "other\n").unwrap();
         assert_eq!(drift(d.path()), ["architecture/lean-toolchain"]);
         assert_eq!(write_vendored(d.path()).unwrap(), ["architecture/lean-toolchain"]);
+    }
+
+    #[test]
+    fn quotes_dsl_and_lean_keywords() {
+        for k in ["store", "display", "ref", "v", "permanent", "container", "idl", "where", "fun"] {
+            assert_eq!(ident(k), format!("«{k}»"), "{k}");
+        }
+        assert_eq!(ident("db"), "db");
+        assert_eq!(ident("engine-client"), "«engine-client»");
     }
 }
