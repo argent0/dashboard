@@ -369,6 +369,12 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
         let gen_dir = api_dir.join("gen");
         let up = "../".repeat(gen_dir.components().count());
         let impls: Vec<String> = a.impls.iter().map(|i| format!("{up}{i}")).collect();
+        // Each ref'd API's TypeScript binding, relative to this gen dir.
+        let ts_imports: BTreeMap<String, String> = idl
+            .refs()
+            .into_iter()
+            .filter_map(|(t, _)| loaded.api_dirs.get(t).map(|d| (t.to_string(), relative(&gen_dir, &d.join("gen").join(t.replace('-', "_"))))))
+            .collect();
         // The container classes a TypeScript consumer may use: the owner's,
         // plus every instance declared by an API the same module consumes.
         let mut ts_classes: BTreeMap<String, Vec<crate::idl::Class>> = idl
@@ -408,7 +414,7 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
             }
             let (ext, text) = match lang {
                 "rust" => ("rs", idl.rust(is_wire(a), &impls)),
-                "typescript" => ("ts", idl.typescript(is_wire(a), &ts_classes)),
+                "typescript" => ("ts", idl.typescript(is_wire(a), &ts_classes, &ts_imports)),
                 "kotlin" => ("kt", idl.kotlin(is_wire(a))),
                 _ => {
                     errs.push(format!("{who}: no {lang} generator yet"));
@@ -456,6 +462,15 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
 /// A class API whose consumer is TypeScript and generator is not: only
 /// containers and instances, the consumer's binding is the instance (with
 /// its laws), and nothing on that side mounts the API's `impl` files.
+/// `to` as a module specifier from the directory `from` (both root-relative).
+fn relative(from: &Path, to: &Path) -> String {
+    let (f, t): (Vec<_>, Vec<_>) = (from.components().collect(), to.components().collect());
+    let common = f.iter().zip(&t).take_while(|(a, b)| a == b).count();
+    let up = "../".repeat(f.len() - common);
+    let down: Vec<String> = t[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    format!("{}{}", if up.is_empty() { "./".to_string() } else { up }, down.join("/"))
+}
+
 fn ts_class_api(cfg: &ArchConfig, a: &crate::config::ApiConfig, idl: &Idl) -> bool {
     let lang_of = |m: &str| cfg.node(m).map(|(l, _)| l);
     !idl.classes().is_empty()
@@ -811,6 +826,14 @@ fn run_view(
 mod tests {
     use super::*;
     use crate::config::arch_config_from_str;
+
+    #[test]
+    fn relative_climbs_to_the_common_dir() {
+        let gen_dir = Path::new("apis/store-approval/gen");
+        assert_eq!(relative(gen_dir, Path::new("apis/test-approval/gen/test_approval")), "../../test-approval/gen/test_approval");
+        assert_eq!(relative(gen_dir, Path::new("apis/store-approval/gen/x")), "./x");
+        assert_eq!(relative(Path::new("a/gen"), Path::new("b/c/gen/d")), "../../b/c/gen/d");
+    }
 
     fn write(root: &Path, rel: &str, body: &str) {
         let p = root.join(rel);

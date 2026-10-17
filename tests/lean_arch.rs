@@ -300,3 +300,50 @@ fn refinements_and_tokens_are_elaborated_exported_budgeted_and_linted() {
     assert!(problems.iter().any(|p| p == "nutrition/lib.rs:1: mints the evidence token ProductRef; only the generator of its api may"), "{problems:?}");
     assert!(!problems.iter().any(|p| p.starts_with("db/lib.rs")), "{problems:?}");
 }
+
+const REFS_MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
+module testing where\n  lang = typescript\n  paths = [\"testing\"]\n\n\
+module approval where\n  lang = typescript\n  paths = [\"approval\"]\n\n\
+module «store» where\n  lang = typescript\n  paths = [\"store\"]\n\n\
+api «test-report» : testing → «store» where\n  paths = [\"apis/test-report\"]\n\n\
+api «test-approval» : testing → approval where\n  paths = [\"apis/test-approval\"]\n\n\
+api «store-approval» : «store» → approval where\n  paths = [\"apis/store-approval\"]\n";
+
+const REFS_REPORT: &str = "import Architecture\nopen Dashboard\n\nidl «test-report» where\n  \
+token PassedSha : string 40 permanent\n  \
+sum Tested | Passed : PassedSha | Failed\n  \
+fn run : Tested\n";
+
+const REFS_TEST_APPROVAL: &str = "import Architecture\nimport Apis.«test-report»\nopen Dashboard\n\nidl «test-approval» where\n  \
+type PassedSha : ref «test-report».PassedSha\n  \
+sum Approved | Approved : PassedSha | Refused\n  \
+fn approve : PassedSha → Approved\n";
+
+const REFS_STORE_APPROVAL: &str = "import Architecture\nimport Apis.«test-approval»\nopen Dashboard\n\nidl «store-approval» where\n  \
+type PassedSha : ref «test-approval».PassedSha\n  \
+sum Stored | Stored : PassedSha | Refused\n  \
+fn keep : PassedSha → Stored\n";
+
+#[test]
+fn typescript_refs_import_the_target_gen_file() {
+    let d = project();
+    let r = d.path();
+    for a in ["test-report", "test-approval", "store-approval"] {
+        write_file(r, &format!("apis/{a}/.keep"), "");
+    }
+    write_lean_arch(r, REFS_MANIFEST, &[("test-report", REFS_REPORT), ("test-approval", REFS_TEST_APPROVAL), ("store-approval", REFS_STORE_APPROVAL)]);
+    let loaded = arch::load(r).expect("load");
+    let (_, errs) = sync_bindings(r, &loaded, true);
+    assert!(errs.is_empty(), "{errs:?}");
+    let store = std::fs::read_to_string(r.join("apis/store-approval/gen/store_approval.ts")).unwrap();
+    assert!(store.contains("import * as test_approval from \"../../test-approval/gen/test_approval\";"), "{store}");
+    let approval = std::fs::read_to_string(r.join("apis/test-approval/gen/test_approval.ts")).unwrap();
+    assert!(approval.contains("import * as test_report from \"../../test-report/gen/test_report\";"), "{approval}");
+    // Extensionless, as under `moduleResolution: "bundler"`.
+    let o = std::process::Command::new("deno")
+        .current_dir(r)
+        .args(["check", "--quiet", "--unstable-sloppy-imports", "apis/store-approval/gen/store_approval.ts"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+}

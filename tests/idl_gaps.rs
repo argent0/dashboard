@@ -74,7 +74,7 @@ fn rust_nests_the_sum() {
 #[test]
 fn typescript_round_trips_the_nested_sum() {
     let d = tempfile::tempdir().unwrap();
-    std::fs::write(d.path().join("desk.ts"), idl().typescript(true, &BTreeMap::new())).unwrap();
+    std::fs::write(d.path().join("desk.ts"), idl().typescript(true, &BTreeMap::new(), &BTreeMap::new())).unwrap();
     std::fs::write(d.path().join("desk.test.ts"), TS_TEST).unwrap();
     let o = Command::new("deno").current_dir(d.path()).args(["test", "--quiet", "desk.test.ts"]).output().unwrap();
     assert!(o.status.success(), "{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
@@ -125,7 +125,7 @@ test("a one-variant element round-trips", () => {
 fn a_one_variant_element_type_checks_in_typescript() {
     let idl = Idl::from_export(serde_json::from_str(ONE_VARIANT).unwrap()).unwrap();
     let d = tempfile::tempdir().unwrap();
-    let ts = idl.typescript(true, &BTreeMap::new());
+    let ts = idl.typescript(true, &BTreeMap::new(), &BTreeMap::new());
     assert!(!ts.contains("const never: never = e"), "{ts}");
     std::fs::write(d.path().join("notes.ts"), ts).unwrap();
     std::fs::write(d.path().join("notes.test.ts"), ONE_VARIANT_TEST).unwrap();

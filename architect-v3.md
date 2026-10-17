@@ -185,6 +185,10 @@ The three compiled forms:
   `ref`, keeping their kind (the rule on the fn's sum follows them) and never
   gaining `mint`. `max_tokens` counts them. In Lean a token is a subtype over
   an opaque `Fact`, so a value exists only as a `fn`'s result there too.
+  A TypeScript binding imports each ref'd API from its gen file, by the
+  path relative to its own (`../../test-report/gen/test_report`,
+  extensionless). A Rust binding names it `super::<api_snake>`: the crate
+  mounts every API its bindings ref, transitively, as sibling `#[path]` mods.
 - **The owner's constraints** for state-dependent facts: uniqueness, time
   windows, holds and one-shot use are decided by the store (`UNIQUE`, foreign
   keys, triggers, `where version = ?`), answered as constructors (`Rejected
