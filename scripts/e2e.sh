@@ -7,7 +7,8 @@
 #   plan alpha -> post alpha -> tmux launch -> tested -> send-back -> tested
 #   -> accept -> plan+post beta (depends on alpha) -> block -> escalated
 #   -> retire -> a spike (answer, send back, conclude) -> two tasks in
-#   parallel, a conflicting accept, its resolution -> task agents on: a
+#   parallel, a conflicting accept, its resolution -> a worker that keeps
+#   dying: relaunch, the relaunch cap, --reset -> task agents on: a
 #   fake task agent posts and reviews a task in its own tmux session -> an
 #   `arch check` suite check whose module view links a build cache -> a
 #   director rejection on main
@@ -43,6 +44,10 @@ HOME_DIR="$WORK/home"
 FAKE_AGENT="$WORK/fake-agent.sh"
 FAKE_TASK_AGENT="$WORK/fake-task-agent.sh"
 TA_TEMPLATES="$WORK/ta-templates"
+# What the fake worker saw: <slug>.prompts (every launch prompt, as `$1`
+# arrived through tmux) and <slug>.pastes (everything pasted into its
+# session). A <slug>.die file makes the worker crash at startup.
+AGENT_LOGS="$WORK/agent-logs"
 
 TIMEOUT_SECS=60
 POLL_SECS=0.5
@@ -67,6 +72,9 @@ trap cleanup EXIT
 # --------------------------------------------------------------------------
 # Small helpers
 # --------------------------------------------------------------------------
+
+# How many `kind` events about `slug` the log holds (cursor untouched).
+event_count() { dash wait --all | grep -cE "^#[0-9]+ $1 +$2( |$)" || true; }
 
 dash() { "$BIN" --home "$HOME_DIR" "$@"; }
 dash_status() { dash status --no-color; }
@@ -156,10 +164,26 @@ write_fake_agent() {
   cat >"$FAKE_AGENT" <<'FAKE_AGENT_EOF'
 #!/bin/sh
 # Fake worker driver (written by scripts/e2e.sh). $1 is the prompt text,
-# ignored: the real instructions live in tasks/<slug>/agent*.sh, which this
-# loop just executes. Never touches anything under tasks/<slug>/ besides
+# only logged: the real instructions live in tasks/<slug>/agent*.sh, which
+# this loop just executes. Never touches anything under tasks/<slug>/ besides
 # reading it (those paths are pinned).
 set -eu
+LOGS=__LOGS__
+
+start_slug=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+start_slug=${start_slug#task/}
+printf '%s\n----\n' "$1" >>"$LOGS/$start_slug.prompts"
+if [ -e "$LOGS/$start_slug.die" ]; then
+  echo "fake worker: simulated crash at startup"
+  sleep 1
+  exit 3
+fi
+# Whatever the player pastes arrives on the pane's tty (our stdin; an
+# asynchronous list would get /dev/null, hence fd 3).
+exec 3<&0
+cat <&3 >>"$LOGS/$start_slug.pastes" &
+paster=$!
+trap 'kill "$paster" 2>/dev/null || true' EXIT
 
 git config user.name "E2E Fake Worker" || true
 git config user.email "fake-worker@example.com" || true
@@ -223,6 +247,7 @@ while [ "$(date +%s)" -lt "$end" ]; do
   sleep 0.5
 done
 FAKE_AGENT_EOF
+  sed -i "s|__LOGS__|$AGENT_LOGS|" "$FAKE_AGENT"
   chmod +x "$FAKE_AGENT"
 }
 
@@ -286,6 +311,7 @@ FAKE_TASK_AGENT_EOF
 # Setup: throwaway director repo + hub
 # --------------------------------------------------------------------------
 
+mkdir -p "$AGENT_LOGS"
 write_fake_agent
 write_fake_task_agent
 
@@ -374,6 +400,10 @@ git -C "$DIR_REPO" commit -q -m "post: alpha"
 
 wait_until "task/alpha's tmux session exists" session_alive alpha
 wait_until "task/alpha tested" task_status_is alpha tested
+alpha_prompt=$(cat "$AGENT_LOGS/alpha.prompts")
+assert_contains "$alpha_prompt" "You are the worker for task \`alpha\` in project \`$PROJECT\`" "alpha's launch prompt"
+assert_contains "$alpha_prompt" "tests.d/alpha.toml" "alpha's launch prompt (its pinned files)"
+assert_contains "$alpha_prompt" "Implement the feature: create feature.txt." "alpha's launch prompt (prompt.md)"
 
 # --------------------------------------------------------------------------
 # 3. `dashboard wait --timeout 5` prints the tested event.
@@ -420,6 +450,11 @@ git -C "$DIR_REPO" commit -q -m "send-back: alpha r1"
 send_back_out=$(tick_capture)
 assert_contains "$send_back_out" "(send_back)" "the send-back tick's report"
 wait_until "task/alpha tested again" task_status_is alpha tested
+alpha_pasted() { grep -qF "Please also add feature2.txt." "$AGENT_LOGS/alpha.pastes" 2>/dev/null; }
+wait_until "the review pasted into alpha's session" alpha_pasted
+alpha_pastes=$(cat "$AGENT_LOGS/alpha.pastes")
+assert_contains "$alpha_pastes" "finish accepted" "alpha's pasted relays"
+assert_contains "$alpha_pastes" "Review round 1 from the director" "alpha's pasted relays"
 
 # --------------------------------------------------------------------------
 # 5. Accept alpha. Tick -> hub main has a merge with Task: alpha, the tmux
@@ -661,14 +696,72 @@ for t in gamma delta; do
 done
 
 # --------------------------------------------------------------------------
-# 7d. Task agents (spec §17): a roadmap commit on main turns them on; the
+# 7d. A worker that keeps dying (eta): each death is a session_died event
+#     with its exit status and last screen; `dashboard relaunch` (its own
+#     process) restarts it up to max_relaunches; one more is refused and
+#     escalates; once the cause is gone, `relaunch --reset` clears that
+#     escalation (a `resumed` event) and the task goes on to be accepted.
+# --------------------------------------------------------------------------
+
+log "step 7d: a dying worker, relaunch, the cap, --reset (eta)"
+touch "$AGENT_LOGS/eta.die"
+git -C "$DIR_REPO" checkout -q main
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/main
+git -C "$DIR_REPO" checkout -q -b task/eta main
+mkdir -p "$DIR_REPO/tasks/eta"
+printf 'title = "eta"\nphase = "p1"\n' >"$DIR_REPO/tasks/eta/task.toml"
+git -C "$DIR_REPO" add -A
+git -C "$DIR_REPO" commit -q -m "plan: eta"
+wait_until "eta is ready" task_status_is eta ready
+echo "Create eta.txt." >"$DIR_REPO/tasks/eta/prompt.md"
+printf 'title = "eta"\nphase = "p1"\n\n[check]\nname = "eta-check"\ncmd = "test -f eta.txt"\n' >"$DIR_REPO/tasks/eta/task.toml"
+printf '#!/bin/sh\necho ok > eta.txt\n' >"$DIR_REPO/tasks/eta/agent.sh"
+printf '[[check]]\nname = "eta-check"\ncmd = "test -f eta.txt"\n' >"$DIR_REPO/tests.d/eta.toml"
+git -C "$DIR_REPO" add -A
+git -C "$DIR_REPO" commit -q -m "post: eta"
+
+eta_died() { [ "$(event_count session_died eta)" -ge "$1" ] && session_gone eta; }
+wait_until "eta's worker died" eta_died 1
+died_out=$(dash wait --all | grep -A30 -E "^#[0-9]+ session_died +eta")
+assert_contains "$died_out" "exit status 3" "eta's session_died event"
+assert_contains "$died_out" "fake worker: simulated crash at startup" "eta's session_died event (last screen)"
+
+for n in 1 2; do
+  relaunch_out=$(dash relaunch eta)
+  assert_contains "$relaunch_out" "eta" "dashboard relaunch output"
+  wait_until "eta's worker died again (relaunch $n)" eta_died $((n + 1))
+  assert_contains "$(dash_status)" "relaunched $n/2" "dashboard status"
+done
+if dash relaunch eta >/dev/null 2>&1; then
+  echo "e2e: a relaunch past max_relaunches was not refused" >&2
+  exit 1
+fi
+wait_until "eta escalated by the relaunch cap" task_status_is eta escalated
+hub_ref_exists refs/dashboard/escalated/eta || { echo "e2e: no escalation ref for eta" >&2; exit 1; }
+[ "$(grep -c '^----$' "$AGENT_LOGS/eta.prompts")" -eq 3 ] || { echo "e2e: eta's worker should have launched 3 times" >&2; exit 1; }
+
+# The operator fixes the cause; --reset clears that escalation and relaunches.
+rm "$AGENT_LOGS/eta.die"
+dash relaunch eta --reset >/dev/null
+eta_resumed() { [ "$(event_count resumed eta)" -ge 1 ]; }
+wait_until "eta resumed" eta_resumed
+wait_until "task/eta tested" task_status_is eta tested
+hub_ref_exists refs/dashboard/escalated/eta && { echo "e2e: eta's escalation ref survived --reset" >&2; exit 1; }
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/task/eta
+git -C "$DIR_REPO" commit -q --allow-empty -m "accept: eta"
+wait_until "task/eta accepted" task_status_is eta accepted
+
+# --------------------------------------------------------------------------
+# 7e. Task agents (spec §17): a roadmap commit on main turns them on; the
 #     player launches a fake task agent for the newly planned epsilon in
 #     its own tmux session; it posts (imported as the task agent's), the
 #     worker finishes, the task agent reports accept, the director accepts
 #     on it, and the task agent's session ends with the task.
 # --------------------------------------------------------------------------
 
-log "step 7d: a task agent posts and reviews epsilon"
+log "step 7e: a task agent posts and reviews epsilon"
 git -C "$DIR_REPO" checkout -q main
 git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" merge -q --ff-only hub/main
@@ -717,7 +810,7 @@ wait_until "task/epsilon accepted" task_status_is epsilon accepted
 wait_until "epsilon's task agent session ended" session_gone epsilon_agent
 
 # --------------------------------------------------------------------------
-# 7e. Module views link build caches: the director commits an
+# 7f. Module views link build caches: the director commits an
 #     architecture.toml with `linked = ["cache"]`; zeta's post adds a suite
 #     check that builds cache/ and runs `dashboard arch check` (in the jail),
 #     whose module test_cmd only passes if its view links the cache and has
@@ -725,7 +818,7 @@ wait_until "epsilon's task agent session ended" session_gone epsilon_agent
 #     worker writes it, accepted.
 # --------------------------------------------------------------------------
 
-log "step 7e: arch check views link a build cache (zeta)"
+log "step 7f: arch check views link a build cache (zeta)"
 git -C "$DIR_REPO" checkout -q main
 git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" merge -q --ff-only hub/main
