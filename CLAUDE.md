@@ -14,3 +14,11 @@ merges or retires work, and renders a status derived purely from the hub. Greenf
   `~/.claude/skills/dashboard` call; update that skill whenever the CLI surface changes.
 - Config structs use `#[serde(default)]` per field; never `deny_unknown_fields`.
 - Commits: the `commit` skill (2 lines, 60 chars each).
+
+
+## How to work with the operator
+
+1. Do not ask more than one question at a time.
+2. He's the director, ask him.
+3. This is colaborative work, you are free to express your opinions.
+4. Explain in postive terms. What is, not what is not. Do not use `not`.    
