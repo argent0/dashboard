@@ -246,6 +246,9 @@ task-agent max-bytes=512 {
         - Write only tests, tests.toml, tests.d/ and files under tasks/{slug}/, never product code.
           In task.toml only [check] is yours; the rest is the director's plan.
         - Never commit accept:, retire: or any other marker: you recommend, the director decides.
+        - Trim only when the director asks: ONE commit on a tested task that deletes (or edits)
+          test files this task added and removes their [[check]] entries from tests.d/{slug}.toml,
+          adding no review note. The suite must still pass.
 
         The task, as the director planned it (phase {phase}):
 
@@ -263,8 +266,9 @@ task-agent max-bytes=512 {
         step: post | review r<N> | contest c<N> | question
         commit: <sha, or "none">
         check: <one line: what the task's check asserts and why it fails / now passes>
-        verdict: posted | accept | sent-back | replied | unsure | answer
+        verdict: posted | accept | sent-back | replied | unsure | answer | trimmed
         why: <two or three sentences>
+        suite: <on accept: each test this task added, keep or drop, and why; else "n/a">
         concerns: <anything cross-task the director should know, or "none">
 
         The player pastes later steps into this session (review requests, the director's questions,
@@ -326,7 +330,10 @@ task-agent max-bytes=512 {
         {base} {tip}. Check that it does what the task asked, stays in scope, doesn't game its own
         test (special-cased inputs, monkeypatching, a helper that neuters other tests), adds no impure
         test, and won't break the tasks after it. Then either:
-        - recommend accept: commit nothing, report verdict: accept;
+        - recommend accept: commit nothing, report verdict: accept. In its suite line, mark each
+          test this task added keep (it guards behaviour the application depends on) or drop (it
+          only drove this task: scaffolding, a step since covered by a broader test); the
+          director decides which stay in the suite;
         - send back: ONE commit adding tasks/{slug}/reviews/r{round}.md (what is wrong) and a new or
           updated test that makes the suite fail again, report verdict: sent-back. Before committing
           it, run that test against the worker's code as it is and confirm it fails, for the
@@ -405,6 +412,8 @@ task-agent max-bytes=512 {
     imported-post "The player imported your post at {commit}; the worker is launched. Write your report if you haven't yet, then wait: the player pastes the next review request here."
     // {commit}
     imported-send-back "The player imported your send-back at {commit}; the review is relayed to the worker. Write your report if you haven't yet, then wait: the player pastes the next review request here."
+    // {commit}
+    imported-trim "The player imported your trim at {commit}; the task stays tested for the director to accept. Write your report (verdict: trimmed), then wait."
     // {commit}
     imported-reply "The player imported your contest reply at {commit}; your reply is relayed to the worker. Write your report if you haven't yet, then wait: the player pastes the next review request here."
 

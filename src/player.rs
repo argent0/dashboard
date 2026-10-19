@@ -2188,6 +2188,24 @@ impl<S: Sessions> Player<S> {
                 );
                 self.reject(slug, candidate, Reason::Ownership, msg, report)
             }
+            Some(Status::Tested) if ctx.is_some_and(|c| !c.spike) && is_trim(slug, &diffs) => {
+                match verdict(Move::Trim) {
+                    Some(Verdict::Allow) => self.try_trim(
+                        slug,
+                        tip,
+                        candidate,
+                        &diffs,
+                        &hub_state,
+                        Actor::Director,
+                        report,
+                    ),
+                    Some(Verdict::Reject(reason)) => {
+                        let msg = format!("trim: task/{slug} must be tested to trim its tests");
+                        self.reject(slug, candidate, reason, msg, report)
+                    }
+                    _ => Ok(()),
+                }
+            }
             Some(Status::Tested) => match verdict(Move::SendBack) {
                 Some(Verdict::Allow) if ctx.is_some_and(|c| c.spike) => {
                     self.try_spike_send_back(slug, tip, candidate, &diffs, &hub_state, report)
@@ -2881,6 +2899,110 @@ impl<S: Sessions> Player<S> {
         );
         self.relay(slug, &text);
         Ok(())
+    }
+
+    // ---- trim (spec §6.5) ----
+
+    /// A commit on a `tested` task that drops tests the task added from the
+    /// suite: the director keeps only those that matter to the application.
+    /// It may delete or edit test files the task added (absent on `main`)
+    /// and remove `[[check]]` entries from `tests.d/<slug>.toml`; the suite
+    /// must still pass. The task stays `tested`, re-pinned at the trim, and
+    /// its task agent is asked for no new review.
+    fn try_trim(
+        &mut self,
+        slug: &str,
+        tip: &str,
+        candidate: &str,
+        diffs: &[(char, String)],
+        hub_state: &state::HubState,
+        actor: Actor,
+        report: &mut TickReport,
+    ) -> Result<(), String> {
+        let main_tip = self
+            .hub
+            .rev_parse("refs/heads/main")
+            .ok_or_else(|| "hub has no main".to_string())?;
+        let test_paths = self
+            .hub
+            .show_file(tip, "tests.toml")
+            .and_then(|t| config::tests_config_from_str(&t).ok())
+            .map(|c| c.test_paths)
+            .unwrap_or_default();
+        let fragment_path = config::suite_fragment_path(slug);
+        for (status, path) in diffs {
+            if *path == fragment_path {
+                continue;
+            }
+            let added_by_task = self.hub.blob_hash(&main_tip, path).is_none();
+            if *status != 'A' && added_by_task && path_under_test_paths(path, &test_paths) {
+                continue;
+            }
+            let msg = format!(
+                "trim: task/{slug}: a trim only deletes or edits test files this task added and removes checks from {fragment_path}, not {path:?} (a send-back adds tasks/{slug}/reviews/r<N>.md)"
+            );
+            return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
+        }
+        if let Some(extra) = self.fragment_additions(tip, candidate, &fragment_path) {
+            let msg = format!(
+                "trim: task/{slug}: {fragment_path} may only lose [[check]] entries; {extra:?} is new or changed"
+            );
+            return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
+        }
+
+        let suite = self.runner.run_suite(candidate);
+        self.note_ledgers(slug, candidate, &suite);
+        if !suite.pass {
+            let msg = format!(
+                "trim: task/{slug}: the suite fails without the trimmed tests\n{}",
+                suite.summary()
+            );
+            return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
+        }
+
+        let hub_ref = format!("refs/heads/task/{slug}");
+        self.hub
+            .update_ref_cas(&hub_ref, candidate, tip)
+            .map_err(|e| e.to_string())?;
+        records::record_import(&self.hub, candidate, actor, Transition::Trim, Some(slug))?;
+        report
+            .imported
+            .push((hub_ref, candidate.to_string(), Transition::Trim));
+        records::set_pins(&self.hub, slug, candidate)?;
+        // Already reviewed: the trim is the review's outcome, not new work.
+        let agent = hub_state
+            .tasks
+            .iter()
+            .find(|t| t.slug == slug)
+            .is_some_and(|t| t.agent.is_some());
+        if agent && records::agent_asked(&self.hub, slug).as_deref() == Some(tip) {
+            records::set_agent_asked(&self.hub, slug, candidate)?;
+        }
+        Ok(())
+    }
+
+    /// The first `[[check]]` of `path` at `candidate` that `tip`'s copy
+    /// lacks verbatim (by name when it changed), or `None` when every entry
+    /// was already there: a trim only removes checks.
+    fn fragment_additions(&self, tip: &str, candidate: &str, path: &str) -> Option<String> {
+        let checks = |c: &str| -> Vec<toml::Value> {
+            self.hub
+                .show_file(c, path)
+                .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+                .and_then(|mut t| t.remove("check"))
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+        };
+        let before = checks(tip);
+        checks(candidate)
+            .into_iter()
+            .find(|c| !before.contains(c))
+            .map(|c| {
+                c.get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("?")
+                    .to_string()
+            })
     }
 
     // ---- contest (spec §18) ----
@@ -5098,6 +5220,7 @@ impl<S: Sessions> Player<S> {
 
         let mv = match status {
             Status::Staged => Move::Post,
+            Status::Tested if is_trim(slug, &diffs) => Move::Trim,
             Status::Tested => Move::SendBack,
             Status::Contested => Move::ContestReply,
             _ => Move::Post,
@@ -5149,6 +5272,18 @@ impl<S: Sessions> Player<S> {
                 )?;
                 "send-back"
             }
+            (Verdict::Allow, Move::Trim) => {
+                self.try_trim(
+                    slug,
+                    tip,
+                    candidate,
+                    &diffs,
+                    &hub_state,
+                    Actor::TaskAgent,
+                    report,
+                )?;
+                "trim"
+            }
             (Verdict::Allow, Move::ContestReply) => {
                 self.try_contest_reply(
                     slug,
@@ -5197,6 +5332,7 @@ impl<S: Sessions> Player<S> {
             let template = match step {
                 "post" => "task-agent.imported-post",
                 "send-back" => "task-agent.imported-send-back",
+                "trim" => "task-agent.imported-trim",
                 _ => "task-agent.imported-reply",
             };
             let text = self
@@ -5895,6 +6031,14 @@ fn path_allowed(path: &str, docs_paths: &[String]) -> bool {
 /// `path`'s basename looks like a review note (`tasks/<slug>/reviews/r<N>.md`):
 /// used only to tell "no review file at all" apart from "wrong round number"
 /// in a send-back rejection message (spec §9).
+/// Whether a non-empty commit on a `tested` task is a trim (spec §6.5):
+/// it leaves `tasks/<slug>/` alone, so it adds no review note (no
+/// send-back) and edits no plan.
+fn is_trim(slug: &str, diffs: &[(char, String)]) -> bool {
+    let task_prefix = format!("tasks/{slug}/");
+    !diffs.iter().any(|(_, path)| path.starts_with(&task_prefix))
+}
+
 fn is_review_filename(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or("");
     base.starts_with('r') && base.ends_with(".md")

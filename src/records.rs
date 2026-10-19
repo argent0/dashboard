@@ -72,6 +72,9 @@ pub enum Transition {
     Stage,
     /// A director's `unstage:` marker: release a `staged` task.
     Unstage,
+    /// A `tested` task's tests the director keeps out of the suite, removed
+    /// before accept (spec §6.5): the task stays `tested`.
+    Trim,
 }
 
 impl Transition {
@@ -96,6 +99,7 @@ impl Transition {
             Transition::ContestReply => "contest_reply",
             Transition::Stage => "stage",
             Transition::Unstage => "unstage",
+            Transition::Trim => "trim",
         }
     }
 }

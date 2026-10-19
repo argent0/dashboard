@@ -658,6 +658,91 @@ fn send_back_exceeding_max_review_rounds_escalates_instead_of_importing() {
 }
 
 // --------------------------------------------------------------------------
+// Trim (spec §6.5)
+// --------------------------------------------------------------------------
+
+#[test]
+fn trim_drops_the_task_check_from_the_suite_and_accept_lands_without_it() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    post_and_finish(&repo, &hub, &home, &mut player, "tr");
+    director_pull_task_branch(repo.path(), "tr");
+    std::fs::remove_file(repo.path().join("tests.d/tr.toml")).unwrap();
+    commit(repo.path(), "trim: tr's check only drove this task");
+
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.imported.len(), 1, "{report}");
+    assert_eq!(report.imported[0].2, Transition::Trim);
+    assert_eq!(task_status(&hub, "tr"), Status::Tested);
+    let trimmed = hub.rev_parse("refs/heads/task/tr").unwrap();
+    assert_eq!(
+        hub.rev_parse("refs/dashboard/pins/tr").as_deref(),
+        Some(trimmed.as_str())
+    );
+    assert!(player.sessions().sent.is_empty(), "a trim relays nothing");
+
+    commit_empty(repo.path(), "accept: looks good");
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(task_status(&hub, "tr"), Status::Accepted, "{report}");
+    let main_tip = hub.rev_parse("refs/heads/main").unwrap();
+    assert!(hub.blob_hash(&main_tip, "tests.d/tr.toml").is_none());
+    assert!(hub.blob_hash(&main_tip, "tasks/tr/task.toml").is_some());
+}
+
+#[test]
+fn trim_rejected_when_touching_a_file_already_on_main() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    post_and_finish(&repo, &hub, &home, &mut player, "tm");
+    director_pull_task_branch(repo.path(), "tm");
+    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\nruns = 2\n");
+    commit(repo.path(), "trim: edits the project suite");
+
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Accept);
+    assert!(
+        report.rejected[0].message.contains("tests.toml"),
+        "{}",
+        report.rejected[0].message
+    );
+    assert_eq!(task_status(&hub, "tm"), Status::Tested);
+}
+
+#[test]
+fn trim_rejected_when_the_fragment_gains_a_check() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    post_and_finish(&repo, &hub, &home, &mut player, "tg");
+    director_pull_task_branch(repo.path(), "tg");
+    write_file(
+        repo.path(),
+        "tests.d/tg.toml",
+        "[[check]]\nname = \"tg-check\"\ncmd = \"true\"\n",
+    );
+    commit(repo.path(), "trim: weakens the check instead");
+
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Accept);
+    assert!(
+        report.rejected[0].message.contains("tg-check"),
+        "{}",
+        report.rejected[0].message
+    );
+    assert_eq!(task_status(&hub, "tg"), Status::Tested);
+}
+
+// --------------------------------------------------------------------------
 // Accept
 // --------------------------------------------------------------------------
 

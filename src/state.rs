@@ -444,7 +444,7 @@ fn derive_task(
         Status::Conflicted
     } else {
         match note.as_ref().map(|n| n.transition) {
-            Some(Transition::Finish) => Status::Tested,
+            Some(Transition::Finish | Transition::Trim) => Status::Tested,
             Some(Transition::SendBack | Transition::SyncRevision | Transition::ContestReply) => {
                 Status::InRevision
             }

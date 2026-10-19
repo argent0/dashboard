@@ -30,6 +30,9 @@ pub enum Move {
     /// Changes only `tasks/<slug>/task.toml`.
     Replan,
     SendBack,
+    /// Removes tests the task added, before accept: the director keeps in
+    /// the suite only those that matter to the application.
+    Trim,
     ContestReply,
     Stage,
     Unstage,
@@ -47,10 +50,11 @@ pub enum Move {
 }
 
 impl Move {
-    pub const ALL: [Move; 14] = [
+    pub const ALL: [Move; 15] = [
         Move::Post,
         Move::Replan,
         Move::SendBack,
+        Move::Trim,
         Move::ContestReply,
         Move::Stage,
         Move::Unstage,
@@ -148,6 +152,7 @@ pub fn decide(actor: Actor, mv: Move, ctx: Ctx) -> Verdict {
             Move::Post
             | Move::Replan
             | Move::SendBack
+            | Move::Trim
             | Move::ContestReply
             | Move::Stage
             | Move::Unstage
@@ -158,7 +163,8 @@ pub fn decide(actor: Actor, mv: Move, ctx: Ctx) -> Verdict {
             | Move::Other => Reject(Reason::Ownership),
         },
         // A task agent posts while staged, sends back while tested, replies
-        // to a contest while contested; never a marker, never the plan.
+        // to a contest while contested, trims while tested (when the director
+        // asks it to); never a marker, never the plan.
         Actor::TaskAgent => match mv {
             Move::Post if status == Status::Staged && managed => Allow,
             // The director's plan moved the task out from under a running
@@ -171,11 +177,14 @@ pub fn decide(actor: Actor, mv: Move, ctx: Ctx) -> Verdict {
             {
                 Hold
             }
-            Move::SendBack if status == Status::Tested && managed && !spike => Allow,
+            Move::SendBack | Move::Trim if status == Status::Tested && managed && !spike => {
+                Allow
+            }
             Move::ContestReply if status == Status::Contested && managed => Allow,
             Move::Post
             | Move::Replan
             | Move::SendBack
+            | Move::Trim
             | Move::ContestReply
             | Move::Stage
             | Move::Unstage
@@ -220,6 +229,15 @@ pub fn decide(actor: Actor, mv: Move, ctx: Ctx) -> Verdict {
                         Allow
                     } else {
                         Reject(Reason::Ownership)
+                    }
+                }
+                // The director's call on any task, managed or not: which of
+                // the task's tests stay in the suite.
+                Move::Trim => {
+                    if status == Status::Tested && !spike {
+                        Allow
+                    } else {
+                        Reject(Reason::Accept)
                     }
                 }
                 Move::ContestReply => {
@@ -364,6 +382,7 @@ mod tests {
                 Move::Post
                 | Move::Replan
                 | Move::SendBack
+                | Move::Trim
                 | Move::ContestReply
                 | Move::Stage
                 | Move::Unstage
@@ -400,6 +419,7 @@ mod tests {
                 &["pending", "orphaned", "ready", "staged"],
             ),
             (Actor::Director, Move::SendBack, &["tested"]),
+            (Actor::Director, Move::Trim, &["tested"]),
             (Actor::Director, Move::ContestReply, &["contested"]),
             (Actor::Director, Move::Stage, &["ready"]),
             (Actor::Director, Move::Unstage, &["staged"]),
@@ -426,6 +446,7 @@ mod tests {
             (Actor::Director, Move::Other, &[]),
             (Actor::TaskAgent, Move::Post, &["staged"]),
             (Actor::TaskAgent, Move::SendBack, &["tested"]),
+            (Actor::TaskAgent, Move::Trim, &["tested"]),
             (Actor::TaskAgent, Move::ContestReply, &["contested"]),
             (Actor::TaskAgent, Move::Replan, &[]),
             (Actor::TaskAgent, Move::Stage, &[]),
@@ -496,10 +517,11 @@ mod tests {
                     "task agent {m:?} allowed on an unmanaged task: {c:?}"
                 );
             }
-            // A spike never merges and is never staged; only a spike concludes.
+            // A spike never merges, is never staged and keeps no tests;
+            // only a spike concludes.
             if c.spike {
                 assert!(
-                    !matches!(m, Move::Accept | Move::Stage),
+                    !matches!(m, Move::Accept | Move::Stage | Move::Trim),
                     "{m:?} allowed on a spike: {c:?}"
                 );
             } else {
@@ -552,6 +574,11 @@ mod tests {
             d(Move::Accept, at(Status::Tested, false, true, false)),
             Reject(Reason::Accept)
         );
+        assert_eq!(
+            d(Move::Trim, at(Status::InRevision, true, false, true)),
+            Reject(Reason::Accept)
+        );
+        assert_eq!(d(Move::Trim, at(Status::Tested, true, false, true)), Allow);
         assert_eq!(
             d(Move::Retire, at(Status::Posted, false, false, false)),
             Reject(Reason::Retire)

@@ -199,8 +199,9 @@ invariant is that the project suite passes at every commit on `main`.
 Each task's `task.toml` declares the task's own check (same shape as
 `[[check]]`): the thing that must fail at post and is the task's reason to
 exist. In the post commit the director also adds it to the task's own
-suite fragment, `tests.d/<slug>.toml`, so on completion it is part of the
-suite. It goes there, not into `tests.toml`.
+suite fragment, `tests.d/<slug>.toml`, so while the task runs it is part of
+the suite. It goes there, not into `tests.toml`. Whether it stays there
+after accept is the director's call (§6.5).
 
 ### 6.4 Stale tests
 
@@ -215,6 +216,29 @@ belongs to the director, never the worker:
   **blocks**, explaining the conflict. That escalates the task (§10); the
   director and operator replan, typically retiring it and posting a
   replacement whose post commit fixes the stale test.
+
+### 6.5 Trimming before accept
+
+A task's tests drive its work; only some of them guard behaviour the
+application depends on. Those are the ones worth keeping in the suite, where
+every later task runs them. The rest (scaffolding for one step, a case a
+broader test now covers) cost suite time for nothing once the task lands.
+
+The director decides which stay. The task agent's review report recommends
+keep or drop for each test the task added (§17); before `accept:` the
+director (or the task agent, at its request) makes a **trim** commit on the
+`tested` task that:
+
+- deletes or edits test files the task added (under `test_paths`, absent on
+  `main`), and
+- removes `[[check]]` entries from `tests.d/<slug>.toml` (or the whole
+  fragment).
+
+Everything else stays: tests already on `main`, the task check in
+`tasks/<slug>/task.toml` (the record of what the task asked), and the
+dropped tests themselves in the branch's history. The suite must still pass
+at the trim. The task stays `tested`, re-pinned at the trim; accept then
+lands the trimmed branch. A task with nothing to drop needs no trim.
 
 ## 7. Worker commits
 
@@ -297,6 +321,7 @@ failed validation is a rejection with the listed reason (§10).
 | **block** | `block:` marker (worker) | — | — (escalates) |
 | **contest** / **reply** | `contest:` marker (worker); the reply (task agent or director) | §18 | §18 |
 | **send back** | adds `reviews/r<N>.md` + new/updated tests (director, or its task agent §17) | task is `tested`; project suite now **fails**; re-pins; relays the note | `review` |
+| **trim** | deletes/edits test files the task added, removes checks from `tests.d/<slug>.toml`; leaves `tasks/<slug>/` alone (director, or its task agent §17) | task is `tested`; touches nothing else; the fragment only loses entries; project suite **passes**; re-pins; stays `tested` (§6.5) | `accept` |
 | **accept** | `accept:` marker (director) | task is `tested`; the player lands it (§11), merging `main` in first if it moved: a conflict leaves it `conflicted`, a suite failure caused by the merge sends it back to the worker | `accept` |
 | **resolve** | merge of the recorded `main` commit into the task tip (director) | task is `conflicted`; merges exactly the `main` commit the conflict was recorded against; differs from git's own merge only on the recorded paths; re-pins; the player then lands the accept (§11) | `history`, `ownership` |
 | **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is conflicted, contested or escalated; player moves the branch to `refs/retired/<slug>` and ends the worker session | `retire` |
@@ -407,7 +432,7 @@ commits.
 | `staged` | `ready`, released by the director's latest `stage:` marker (§9): the task agent is launched and posts. Resolved by walking the branch's first-parent history past the player's `merge_unblock` merges and replans, so `main` moving doesn't un-stage it |
 | `posted` | validated post, no live worker session yet |
 | `in_progress` | worker session alive and working (runtime, not git) |
-| `tested` | latest worker commit validated as passing, awaiting director |
+| `tested` | latest worker commit validated as passing (or a trim on top of it, §6.5), awaiting director |
 | `in_revision` | latest director commit is a send-back or a contest reply (§18), or landing an accept merged `main` in and the suite failed (§11); round N = count of `reviews/r*.md` |
 | `contested` | latest worker commit is a `contest:` marker: the task agent (or director) must reply (§18) |
 | `conflicted` | landing an accept couldn't merge `main` in; the tip carries the conflict (the `main` commit and paths) for the director to resolve (§11) |
@@ -722,6 +747,7 @@ fetch is validated, as one cumulative change from the hub tip:
 |---|---|---|---|
 | `ready` | adds `prompt.md`, the test files, `tests.d/<slug>.toml`, `[check]` in `task.toml` | the post row of §9 | `post`, `evidence` |
 | `tested` | adds `reviews/r<N>.md` + new/updated tests | the send-back row of §9 | `review` |
+| `tested` | leaves `tasks/<slug>/` alone: removes tests the task added | the trim row of §9, only when the director asks | `accept` |
 | `contested` | adds `contests/c<N>.md` + optionally fixed tests | the reply row of §18 | `ownership` |
 | any | touches a path outside `tests.toml`, `tests.d/`, the hub's `test_paths` and `tasks/<slug>/`; changes `task.toml` beyond `[check]`; any other status | — | `ownership` |
 | any | an empty (marker) commit | — | `ownership` |
@@ -736,16 +762,18 @@ strike.
 
 While task agents are on, a director post or send-back on an agent-managed
 task is an `ownership` rejection: those are the task agent's. Plan, replan,
-accept, retire and conflict resolution stay the director's.
+trim, accept, retire and conflict resolution stay the director's.
 
 **Reports.** After each step and each question, the task agent writes a
-fixed block (`slug`, `step`, `commit`, `check`, `verdict`, `why`,
-`concerns`; verdict `posted | accept | sent-back | unsure | answer`) to
+fixed block (`slug`, `step`, `commit`, `check`, `verdict`, `why`, `suite`,
+`concerns`; verdict `posted | accept | sent-back | replied | unsure | answer |
+trimmed`; `suite` marks each test the task added keep or drop on an
+`accept` verdict, §6.5) to
 `dashboard-report.md` in its clone's git directory. The player reads and
 removes it, notes it on the task tip (`refs/notes/dashboard-agent-reports`,
 a list), and emits an `agent_report` event carrying the block. `status`
 shows each task agent's session, liveness and latest verdict. The director
-accepts on an `accept` verdict, asks (`dashboard ask`) or takes an `unsure`
+trims what it drops (§6.5) and accepts on an `accept` verdict, asks (`dashboard ask`) or takes an `unsure`
 to the operator; the decision stays the director's.
 
 **Events.** `agent_launched`, `agent_report`, `agent_died`. For an
