@@ -87,7 +87,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f {feature}\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f {feature}\"\n"
         ),
     );
     write_file(
@@ -165,7 +165,7 @@ fn player_tick_emits_the_full_set_of_director_relevant_events() {
         repo.path(),
         "task/Bad_Slug",
         "tasks/Bad_Slug/task.toml",
-        "title = \"Bad\"\nphase = \"p1\"\n",
+        "title = \"Bad\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: Bad_Slug",
     );
     player.tick().expect("tick should succeed");
@@ -182,13 +182,13 @@ fn player_tick_emits_the_full_set_of_director_relevant_events() {
         &repo,
         &mut player,
         "dep",
-        "title = \"Dep\"\nphase = \"p1\"\n",
+        "title = \"Dep\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     plan(
         &repo,
         &mut player,
         "depender",
-        "title = \"Depender\"\nphase = \"p1\"\ndepends_on = [\"dep\"]\n",
+        "title = \"Depender\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"dep\"]\n",
     );
     post(&repo, &mut player, "dep");
     commit_in_clone(&repo, "dep", "feature-dep.txt", "done\n", "finish work");
@@ -229,7 +229,7 @@ fn player_tick_emits_the_full_set_of_director_relevant_events() {
         &repo,
         &mut player,
         "blk",
-        "title = \"Blocked\"\nphase = \"p1\"\n",
+        "title = \"Blocked\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "blk");
     block_in_clone(
@@ -293,7 +293,7 @@ fn no_reemission_after_reconstructing_the_player() {
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
 
-    plan(&repo, &mut player, "x", "title = \"X\"\nphase = \"p1\"\n");
+    plan(&repo, &mut player, "x", "title = \"X\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     post(&repo, &mut player, "x");
     commit_in_clone(&repo, "x", "feature-x.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
@@ -336,7 +336,7 @@ fn first_run_with_no_state_file_emits_nothing_for_preexisting_statuses() {
         &repo,
         &mut player,
         "already",
-        "title = \"Already\"\nphase = \"p1\"\n",
+        "title = \"Already\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "already");
     commit_in_clone(
@@ -387,7 +387,7 @@ fn session_dying_while_in_progress_emits_session_died() {
         &repo,
         &mut player,
         "die",
-        "title = \"Die\"\nphase = \"p1\"\n",
+        "title = \"Die\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "die");
     assert!(
@@ -412,7 +412,7 @@ fn killing_a_session_via_accept_does_not_emit_session_died() {
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
 
-    plan(&repo, &mut player, "ok", "title = \"Ok\"\nphase = \"p1\"\n");
+    plan(&repo, &mut player, "ok", "title = \"Ok\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     post(&repo, &mut player, "ok");
     commit_in_clone(&repo, "ok", "feature-ok.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
@@ -433,7 +433,7 @@ fn a_session_dead_before_any_tick_saw_it_is_reported_once_per_launch() {
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
 
-    plan(&repo, &mut player, "sb", "title = \"Sb\"\nphase = \"p1\"\n");
+    plan(&repo, &mut player, "sb", "title = \"Sb\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     // The worker's command crashes at startup: dead by the end of the very
     // tick that launched it, never once seen alive.
     player.sessions_mut().stillborn.insert("sb".to_string());
@@ -487,7 +487,7 @@ fn a_worker_stopped_while_it_owes_a_finish_is_reported_idle_once_per_stop() {
         &repo,
         &mut player,
         "idl",
-        "title = \"Idl\"\nphase = \"p1\"\n",
+        "title = \"Idl\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "idl");
 
@@ -575,7 +575,7 @@ fn a_worker_whose_screen_goes_stale_while_it_owes_a_finish_is_reported_idle_once
         &repo,
         &mut player,
         "stl",
-        "title = \"Stl\"\nphase = \"p1\"\n",
+        "title = \"Stl\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "stl");
     let idle = || events_for(&home, "stl", EventKind::SessionIdle);
@@ -647,7 +647,7 @@ fn a_stale_screen_and_a_stop_are_one_idle_report() {
         &repo,
         &mut player,
         "one",
-        "title = \"One\"\nphase = \"p1\"\n",
+        "title = \"One\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "one");
     let idle = || events_for(&home, "one", EventKind::SessionIdle);
@@ -700,7 +700,7 @@ fn idle_after_zero_turns_stale_screen_detection_off() {
         &repo,
         &mut player,
         "off",
-        "title = \"Off\"\nphase = \"p1\"\n",
+        "title = \"Off\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "off");
 
@@ -728,7 +728,7 @@ fn the_stop_hook_merges_into_existing_settings() {
     commit(repo.path(), "project settings");
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
-    plan(&repo, &mut player, "mg", "title = \"Mg\"\nphase = \"p1\"\n");
+    plan(&repo, &mut player, "mg", "title = \"Mg\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     post(&repo, &mut player, "mg");
 
     let clone = paths::worker_clone(&repo.director_path(), "mg");
@@ -757,9 +757,9 @@ fn a_player_state_in_the_old_format_is_migrated() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
-    plan(&repo, &mut player, "a", "title = \"A\"\nphase = \"p1\"\n");
+    plan(&repo, &mut player, "a", "title = \"A\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     post(&repo, &mut player, "a");
-    plan(&repo, &mut player, "b", "title = \"B\"\nphase = \"p1\"\n");
+    plan(&repo, &mut player, "b", "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     post(&repo, &mut player, "b");
     drop(player);
 
@@ -910,7 +910,7 @@ fn idle_events_carry_the_screen_tail() {
         &repo,
         &mut player,
         "scr",
-        "title = \"Scr\"\nphase = \"p1\"\n",
+        "title = \"Scr\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "scr");
     let idle = || events_for(&home, "scr", EventKind::SessionIdle);
@@ -958,7 +958,7 @@ fn an_idle_event_with_an_empty_screen_says_so() {
         &repo,
         &mut player,
         "emp",
-        "title = \"Emp\"\nphase = \"p1\"\n",
+        "title = \"Emp\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "emp");
     player.tick().expect("tick");
@@ -993,7 +993,7 @@ fn a_died_event_carries_the_dead_panes_output_and_exit_status_then_reaps_it() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
-    plan(&repo, &mut player, "cr", "title = \"Cr\"\nphase = \"p1\"\n");
+    plan(&repo, &mut player, "cr", "title = \"Cr\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     post(&repo, &mut player, "cr");
     player.tick().expect("tick");
 
@@ -1045,7 +1045,7 @@ fn a_dead_session_nobody_watches_is_still_reaped() {
         &repo,
         &mut player,
         "fin",
-        "title = \"Fin\"\nphase = \"p1\"\n",
+        "title = \"Fin\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "fin");
     commit_in_clone(&repo, "fin", "feature-fin.txt", "done\n", "finish work");

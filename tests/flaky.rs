@@ -61,7 +61,7 @@ fn alternating(dir: &Path) -> String {
 
 fn task_toml(evidence_cmd: &str) -> String {
     format!(
-        "title = \"fix\"\nphase = \"p1\"\nkind = \"flaky-test-fix\"\nfix_paths = [\"tests/inventory.txt\"]\n\n\
+        "title = \"fix\"\nphase = \"p1\"\nmodules = [\"app\"]\nkind = \"flaky-test-fix\"\nfix_paths = [\"tests/inventory.txt\"]\n\n\
 [[replace]]\nold = \"flaky\"\nnew = \"flaky_stable\"\n\n\
 [[evidence]]\nname = \"flake\"\ncmd = {evidence_cmd:?}\nruns = 4\nmin_pass = 1\nmax_pass = 3\n\n\
 [check]\nname = \"stable\"\ncmd = \"grep -qx flaky_stable tests/inventory.txt\"\n"

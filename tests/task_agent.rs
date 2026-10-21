@@ -20,7 +20,7 @@ use dashboard::state::{self, Status};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-const PLAN: &str = "title = \"s\"\nphase = \"p1\"\nbrief = \"mind the widget cache\"\n";
+const PLAN: &str = "title = \"s\"\nphase = \"p1\"\nmodules = [\"app\"]\nbrief = \"mind the widget cache\"\n";
 const CHECK: &str = "\n[check]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n";
 
 // --------------------------------------------------------------------------
@@ -234,7 +234,7 @@ fn spikes_and_disabled_task_agents_launch_none() {
         repo.path(),
         "task/sp",
         "tasks/sp/task.toml",
-        "title = \"sp\"\nkind = \"spike\"\nphase = \"p1\"\n",
+        "title = \"sp\"\nkind = \"spike\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: sp",
     );
     let report = player.tick().expect("tick");
@@ -385,7 +385,7 @@ fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
             (
                 "tasks/s/task.toml",
                 &format!(
-                    "title = \"s, renamed\"\nphase = \"p1\"\nbrief = \"mind the widget cache\"\n{CHECK}"
+                    "title = \"s, renamed\"\nphase = \"p1\"\nmodules = [\"app\"]\nbrief = \"mind the widget cache\"\n{CHECK}"
                 ),
             ),
             (
@@ -1112,7 +1112,7 @@ fn another_tasks_agent_commits_merged_in_from_main_still_ask_for_a_rebase() {
         repo.path(),
         "task/t",
         "tasks/t/task.toml",
-        "title = \"t\"\nphase = \"p1\"\n",
+        "title = \"t\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: t",
     );
     commit_empty(repo.path(), "stage: go");
@@ -1144,7 +1144,7 @@ fn another_tasks_agent_commits_merged_in_from_main_still_ask_for_a_rebase() {
     write_file(
         &t_dir,
         "tasks/t/task.toml",
-        "title = \"t\"\nphase = \"p1\"\n\n[check]\nname = \"t-check\"\ncmd = \"test -f t.txt\"\n",
+        "title = \"t\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"t-check\"\ncmd = \"test -f t.txt\"\n",
     );
     write_file(
         &t_dir,
@@ -1298,7 +1298,7 @@ fn a_task_agent_may_commit_api_files_but_never_the_manifest() {
         ("architecture/Architecture.lean", true),
     ] {
         let repo = repo_with_task_agents();
-        write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
+        write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[]);
         commit(repo.path(), "add architecture");
         let (_home_dir, home) = init_hub(&repo);
         let mut player = open_player(&home);

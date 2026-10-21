@@ -16,7 +16,7 @@ use dashboard::records::{self, Actor, Transition};
 use dashboard::state::{self, Status};
 use tempfile::TempDir;
 
-const PLAN: &str = "title = \"s\"\nphase = \"p1\"\n";
+const PLAN: &str = "title = \"s\"\nphase = \"p1\"\nmodules = [\"app\"]\n";
 const ROADMAP: &str = "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"fake-task-agent\"\n";
 
 fn setup() -> (DirectorRepo, TempDir, Home, Player<NullSessions>) {
@@ -187,7 +187,7 @@ fn staging_a_pending_task_and_a_spike_is_refused() {
         repo.path(),
         "task/p",
         "tasks/p/task.toml",
-        "title = \"p\"\nphase = \"p1\"\ndepends_on = [\"s\"]\n",
+        "title = \"p\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"s\"]\n",
         "plan: p",
     );
     commit_empty(repo.path(), "stage: too early");
@@ -200,7 +200,7 @@ fn staging_a_pending_task_and_a_spike_is_refused() {
         repo.path(),
         "task/sp",
         "tasks/sp/task.toml",
-        "title = \"sp\"\nphase = \"p1\"\nkind = \"spike\"\n",
+        "title = \"sp\"\nphase = \"p1\"\nmodules = [\"app\"]\nkind = \"spike\"\n",
         "plan: sp",
     );
     tick(&mut player);
@@ -238,7 +238,7 @@ fn a_dependent_task_waits_ready_after_its_dependency_is_accepted() {
     let (repo, _h, home, mut player) = setup();
     let hub = Git::new(home.hub());
     director_commit_on_branch(repo.path(), "task/t", "tasks/t/task.toml",
-        "title = \"t\"\nphase = \"p1\"\ndepends_on = [\"s\"]\n", "plan: t");
+        "title = \"t\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"s\"]\n", "plan: t");
     director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", PLAN, "plan: s");
     tick(&mut player);
     stage(&repo, &mut player);

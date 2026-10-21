@@ -591,6 +591,9 @@ pub struct TaskConfig {
     pub phase: String,
     pub milestone: bool,
     pub depends_on: Vec<String>,
+    /// The modules and roots the task changes (spec §8.2): its worker's
+    /// scope and its run set. Required for `kind = "task"`.
+    pub modules: Vec<String>,
     pub check: Option<Check>,
     /// The director's context for the task agent (spec §17): pasted into
     /// its prompt verbatim.
@@ -607,6 +610,14 @@ pub struct TaskConfig {
 
 impl TaskConfig {
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.kind == TaskKind::Task && self.modules.is_empty() {
+            return Err("modules: a task names the modules and roots it changes, e.g. modules = [\"a\"]".to_string());
+        }
+        for (i, m) in self.modules.iter().enumerate() {
+            if self.modules[..i].contains(m) {
+                return Err(format!("modules: {m:?} is named twice"));
+            }
+        }
         if let Some(c) = &self.check {
             c.validate()?;
         }
@@ -1497,10 +1508,16 @@ mod tests {
         let toml = r#"
             title = "Do the thing"
             depends_on = ["a", "b"]
+            modules = ["a"]
             mystery_field = "ignored"
         "#;
         let cfg = task_config_from_str(toml).unwrap();
         assert_eq!(cfg.title, "Do the thing");
+        assert_eq!(cfg.modules, ["a"]);
+        let err = task_config_from_str("title = \"t\"\n").unwrap_err();
+        assert!(err.contains("modules"), "{err}");
+        let err = task_config_from_str("title = \"t\"\nmodules = [\"a\", \"a\"]\n").unwrap_err();
+        assert!(err.contains("named twice"), "{err}");
         assert_eq!(cfg.phase, "");
         assert!(!cfg.milestone);
         assert_eq!(cfg.depends_on, vec!["a".to_string(), "b".to_string()]);
@@ -1519,7 +1536,7 @@ mod tests {
         let ok = task_config_from_str("kind = \"spike\"\ntitle = \"s\"\n").unwrap();
         assert_eq!(ok.kind, TaskKind::Spike);
         assert_eq!(
-            task_config_from_str("title = \"t\"\n").unwrap().kind,
+            task_config_from_str("title = \"t\"\nmodules = [\"a\"]\n").unwrap().kind,
             TaskKind::Task
         );
         assert!(task_config_from_str("kind = \"spike\"\ndepends_on = [\"a\"]\n").is_err());
@@ -1685,7 +1702,7 @@ mod tests {
         bad("[[evidence]]", "[[unused]]");
         // The new fields are rejected on any other kind.
         assert!(
-            task_config_from_str(&FLAKY.replace("kind = \"flaky-test-fix\"", "kind = \"task\""))
+            task_config_from_str(&FLAKY.replace("kind = \"flaky-test-fix\"", "kind = \"task\"\nmodules = [\"a\"]"))
                 .is_err()
         );
     }
@@ -1694,6 +1711,7 @@ mod tests {
     fn task_config_with_check_validated() {
         let toml = r#"
             title = "Do the thing"
+            modules = ["a"]
 
             [check]
             name = "t"

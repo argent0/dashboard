@@ -90,7 +90,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
         ),
     );
     write_file(
@@ -132,7 +132,7 @@ fn post_and_finish(
         repo,
         player,
         slug,
-        &format!("title = \"{slug}\"\nphase = \"p1\"\n"),
+        &format!("title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n"),
     );
     post(repo, player, slug);
     let sha = finish(home, hub, slug);
@@ -184,7 +184,7 @@ fn post_happy_path() {
         &repo,
         &mut player,
         "foo",
-        "title = \"Foo\"\nphase = \"p1\"\n",
+        "title = \"Foo\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     assert_eq!(task_status(&hub, "foo"), Status::Ready);
     post(&repo, &mut player, "foo");
@@ -202,7 +202,7 @@ fn post_rejected_when_the_task_check_already_passes() {
         &repo,
         &mut player,
         "eager",
-        "title = \"Eager\"\nphase = \"p1\"\n",
+        "title = \"Eager\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
 
     checkout_branch(repo.path(), "task/eager");
@@ -210,7 +210,7 @@ fn post_rejected_when_the_task_check_already_passes() {
     write_file(
         repo.path(),
         "tasks/eager/task.toml",
-        "title = \"Eager\"\nphase = \"p1\"\n\n[check]\nname = \"eager-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"Eager\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"eager-check\"\ncmd = \"test -f feature.txt\"\n",
     );
     write_file(
         repo.path(),
@@ -240,12 +240,12 @@ fn post_rejected_when_dependencies_are_not_accepted() {
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
 
-    plan(&repo, &mut player, "a", "title = \"A\"\nphase = \"p1\"\n");
+    plan(&repo, &mut player, "a", "title = \"A\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     plan(
         &repo,
         &mut player,
         "b",
-        "title = \"B\"\nphase = \"p1\"\ndepends_on = [\"a\"]\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n",
     );
     assert_eq!(task_status(&hub, "b"), Status::Pending);
 
@@ -254,7 +254,7 @@ fn post_rejected_when_dependencies_are_not_accepted() {
     write_file(
         repo.path(),
         "tasks/b/task.toml",
-        "title = \"B\"\nphase = \"p1\"\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n",
     );
     write_file(
         repo.path(),
@@ -291,7 +291,7 @@ fn post_rejected_when_the_suite_fragment_is_missing() {
         &repo,
         &mut player,
         "notests",
-        "title = \"No tests entry\"\nphase = \"p1\"\n",
+        "title = \"No tests entry\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
 
     checkout_branch(repo.path(), "task/notests");
@@ -299,7 +299,7 @@ fn post_rejected_when_the_suite_fragment_is_missing() {
     write_file(
         repo.path(),
         "tasks/notests/task.toml",
-        "title = \"No tests entry\"\nphase = \"p1\"\n\n[check]\nname = \"notests-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"No tests entry\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"notests-check\"\ncmd = \"test -f feature.txt\"\n",
     );
     // architecture/Tests/notests.lean deliberately not added.
     commit(repo.path(), "post: notests (forgot its Tests file)");
@@ -328,7 +328,7 @@ fn post_rejected_when_the_task_check_goes_in_tests_lean() {
         &repo,
         &mut player,
         "shared",
-        "title = \"Shared\"\nphase = \"p1\"\n",
+        "title = \"Shared\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
 
     checkout_branch(repo.path(), "task/shared");
@@ -336,7 +336,7 @@ fn post_rejected_when_the_task_check_goes_in_tests_lean() {
     write_file(
         repo.path(),
         "tasks/shared/task.toml",
-        "title = \"Shared\"\nphase = \"p1\"\n\n[check]\nname = \"shared-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"Shared\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"shared-check\"\ncmd = \"test -f feature.txt\"\n",
     );
     // The old shape: appended to the file every parallel post would edit.
     write_file(
@@ -367,7 +367,7 @@ fn post_rejected_when_a_check_name_is_declared_twice() {
         &repo,
         &mut player,
         "dup",
-        "title = \"Dup\"\nphase = \"p1\"\n",
+        "title = \"Dup\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
 
     checkout_branch(repo.path(), "task/dup");
@@ -375,7 +375,7 @@ fn post_rejected_when_a_check_name_is_declared_twice() {
     write_file(
         repo.path(),
         "tasks/dup/task.toml",
-        "title = \"Dup\"\nphase = \"p1\"\n\n[check]\nname = \"unit\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"Dup\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"unit\"\ncmd = \"test -f feature.txt\"\n",
     );
     write_file(
         repo.path(),
@@ -405,12 +405,12 @@ fn post_rejected_when_a_dependency_is_accepted_but_not_yet_merged_into_the_branc
     // so the director's local clone (and B's branch, built on the
     // pre-acceptance main) never sees it — mirroring
     // tests/player.rs's unblock-merge test.
-    plan(&repo, &mut player, "a", "title = \"A\"\nphase = \"p1\"\n");
+    plan(&repo, &mut player, "a", "title = \"A\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     plan(
         &repo,
         &mut player,
         "b",
-        "title = \"B\"\nphase = \"p1\"\ndepends_on = [\"a\"]\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n",
     );
     hand_accept(&hub, "a");
     assert_eq!(
@@ -424,7 +424,7 @@ fn post_rejected_when_a_dependency_is_accepted_but_not_yet_merged_into_the_branc
     write_file(
         repo.path(),
         "tasks/b/task.toml",
-        "title = \"B\"\nphase = \"p1\"\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n",
     );
     write_file(
         repo.path(),
@@ -785,7 +785,7 @@ fn accept_rejected_when_not_tested() {
         &repo,
         &mut player,
         "early",
-        "title = \"Early\"\nphase = \"p1\"\n",
+        "title = \"Early\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "early");
     // Still just posted — no finish claim yet.
@@ -819,7 +819,7 @@ fn accept_stops_at_a_conflict_with_a_main_that_moved() {
         &repo,
         &mut player,
         "conflicted",
-        "title = \"conflicted\"\nphase = \"p1\"\n",
+        "title = \"conflicted\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "conflicted");
     worker_commit(
@@ -867,7 +867,7 @@ fn retire_of_a_pending_task_moves_the_branch_and_shows_the_post_mortem() {
         &repo,
         &mut player,
         "deadend",
-        "title = \"Dead end\"\nphase = \"p1\"\n",
+        "title = \"Dead end\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     commit_empty(
         repo.path(),
@@ -908,7 +908,7 @@ fn retire_of_an_escalated_task_works() {
         &repo,
         &mut player,
         "blocked",
-        "title = \"Blocked\"\nphase = \"p1\"\n",
+        "title = \"Blocked\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "blocked");
     let block_sha = worker_empty_commit(
@@ -973,7 +973,7 @@ fn director_commit_while_posted_is_rejected_with_ownership() {
         &repo,
         &mut player,
         "midflight",
-        "title = \"Mid flight\"\nphase = \"p1\"\n",
+        "title = \"Mid flight\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "midflight");
     // `post`'s tick also launches the worker (step 6): `NullSessions`
@@ -1018,7 +1018,7 @@ fn director_block_marker_is_rejected_with_ownership() {
         &repo,
         &mut player,
         "notmine",
-        "title = \"Not mine to block\"\nphase = \"p1\"\n",
+        "title = \"Not mine to block\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     let tip_before = hub.rev_parse("refs/heads/task/notmine").unwrap();
     commit_empty(repo.path(), "block: the director may not write this");
@@ -1043,7 +1043,7 @@ fn empty_marker_on_top_of_a_rejected_non_empty_commit_is_ownership() {
         &repo,
         &mut player,
         "stack",
-        "title = \"Stack\"\nphase = \"p1\"\n",
+        "title = \"Stack\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
 
     checkout_branch(repo.path(), "task/stack");
@@ -1051,7 +1051,7 @@ fn empty_marker_on_top_of_a_rejected_non_empty_commit_is_ownership() {
     write_file(
         repo.path(),
         "tasks/stack/task.toml",
-        "title = \"Stack\"\nphase = \"p1\"\n\n[check]\nname = \"stack-check\"\ncmd = \"true\"\n",
+        "title = \"Stack\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"stack-check\"\ncmd = \"true\"\n",
     );
     write_file(
         repo.path(),
@@ -1087,7 +1087,7 @@ fn two_post_rejections_escalate_the_task() {
         &repo,
         &mut player,
         "strikeout",
-        "title = \"Strikeout\"\nphase = \"p1\"\n",
+        "title = \"Strikeout\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
 
     checkout_branch(repo.path(), "task/strikeout");
@@ -1095,7 +1095,7 @@ fn two_post_rejections_escalate_the_task() {
     write_file(
         repo.path(),
         "tasks/strikeout/task.toml",
-        "title = \"Strikeout\"\nphase = \"p1\"\n\n[check]\nname = \"strikeout-check\"\ncmd = \"true\"\n",
+        "title = \"Strikeout\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"strikeout-check\"\ncmd = \"true\"\n",
     );
     write_file(
         repo.path(),
@@ -1121,4 +1121,52 @@ fn two_post_rejections_escalate_the_task() {
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Post);
     assert_eq!(task_status(&hub, "strikeout"), Status::Escalated);
+}
+
+// --------------------------------------------------------------------------
+// modules (spec §8.2)
+// --------------------------------------------------------------------------
+
+/// Commits `task_toml` as the plan of `slug` and ticks once.
+fn plan_once(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task_toml: &str) -> dashboard::player::TickReport {
+    director_commit_on_branch(
+        repo.path(),
+        &format!("task/{slug}"),
+        &format!("tasks/{slug}/task.toml"),
+        task_toml,
+        &format!("plan: {slug}"),
+    );
+    player.tick().expect("tick should succeed")
+}
+
+#[test]
+fn a_plan_names_modules_main_declares() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+
+    let report = plan_once(&repo, &mut player, "bare", "title = \"Bare\"\nphase = \"p1\"\n");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Plan);
+    assert!(report.rejected[0].message.contains("modules"), "{}", report.rejected[0].message);
+    assert!(!hub.ref_exists("refs/heads/task/bare"));
+
+    let report = plan_once(&repo, &mut player, "ghost", "title = \"Ghost\"\nphase = \"p1\"\nmodules = [\"app\", \"ghost\"]\n");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Plan);
+    assert!(report.rejected[0].message.contains("\"ghost\""), "{}", report.rejected[0].message);
+    assert!(!hub.ref_exists("refs/heads/task/ghost"));
+
+    // A spike changes no code: it names no modules.
+    let report = plan_once(&repo, &mut player, "probe", "kind = \"spike\"\ntitle = \"Probe\"\nphase = \"p1\"\n");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(task_status(&hub, "probe"), Status::Ready);
+
+    // The run set of a plan is noted on main's architecture tree.
+    let report = plan_once(&repo, &mut player, "ok", "title = \"Ok\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
+    assert!(report.rejected.is_empty(), "{report}");
+    let tree = hub.rev_parse("refs/heads/main:architecture").unwrap();
+    let note = hub.notes_show(records::RUNSETS_NOTES, &tree).expect("run set noted");
+    assert_eq!(note.trim(), "{\"app\":[\"unit\"]}");
 }

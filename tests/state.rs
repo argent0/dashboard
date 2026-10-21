@@ -101,7 +101,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "accepted-task",
-        "title = \"Accepted\"\nphase = \"p1\"\n",
+        "title = \"Accepted\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     checkout(path, "main");
     Git::new(path)
@@ -121,7 +121,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "ready-nodeps",
-        "title = \"Ready no deps\"\nphase = \"p1\"\n",
+        "title = \"Ready no deps\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
 
     // ---- ready-dep-accepted: depends on the already-accepted task ----
@@ -129,7 +129,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "ready-dep-accepted",
-        "title = \"Ready dep accepted\"\nphase = \"p1\"\ndepends_on = [\"accepted-task\"]\n",
+        "title = \"Ready dep accepted\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"accepted-task\"]\n",
     );
 
     // ---- pending-dep-unmet: depends on a task that's only ready, not accepted ----
@@ -137,7 +137,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "pending-dep-unmet",
-        "title = \"Pending\"\nphase = \"p1\"\ndepends_on = [\"ready-nodeps\"]\n",
+        "title = \"Pending\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"ready-nodeps\"]\n",
     );
 
     // ---- retired-task: planned, retired, moved under refs/retired/ ----
@@ -145,7 +145,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "retired-task",
-        "title = \"Retired\"\nphase = \"p1\"\n",
+        "title = \"Retired\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     let retire_sha = commit_empty(
         path,
@@ -169,7 +169,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "orphaned-dep-retired",
-        "title = \"Orphaned\"\nphase = \"p1\"\ndepends_on = [\"retired-task\"]\n",
+        "title = \"Orphaned\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"retired-task\"]\n",
     );
 
     // ---- posted-task: posted, no live worker session yet ----
@@ -177,7 +177,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "posted-task",
-        "title = \"Posted\"\nphase = \"p1\"\n",
+        "title = \"Posted\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(path, "tasks/posted-task/prompt.md", "do the thing\n");
     let post_sha = commit(path, "post: posted-task");
@@ -196,7 +196,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "tested-task",
-        "title = \"Tested\"\nphase = \"p1\"\n",
+        "title = \"Tested\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(path, "tasks/tested-task/prompt.md", "do it\n");
     commit(path, "post: tested-task");
@@ -217,7 +217,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "revision-task",
-        "title = \"Revision\"\nphase = \"p1\"\n",
+        "title = \"Revision\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(path, "tasks/revision-task/prompt.md", "do it\n");
     commit(path, "post: revision-task");
@@ -240,7 +240,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "escalated-strikes",
-        "title = \"Escalated strikes\"\nphase = \"p1\"\n",
+        "title = \"Escalated strikes\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     records::record_rejection(
         &hub,
@@ -269,7 +269,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "escalated-block",
-        "title = \"Escalated block\"\nphase = \"p1\"\n",
+        "title = \"Escalated block\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     let block_sha = commit_empty(
         path,
@@ -290,7 +290,7 @@ fn derive_computes_expected_status_for_every_case() {
         path,
         &hub,
         "escalated-record",
-        "title = \"Escalated record\"\nphase = \"p1\"\n",
+        "title = \"Escalated record\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(path, "tasks/escalated-record/prompt.md", "do it\n");
     let post_sha2 = commit(path, "post: escalated-record");
@@ -428,7 +428,7 @@ fn strikes_are_counted_per_reason_and_main_rejections_are_excluded() {
         path,
         &hub,
         "strikey",
-        "title = \"Strikey\"\nphase = \"p1\"\n",
+        "title = \"Strikey\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(path, "attempt-1.txt", "first finish attempt\n");
     let attempt_1 = commit(path, "finish attempt 1");
@@ -518,7 +518,7 @@ fn pins_are_recomputed_and_violations_detected() {
         path,
         &hub,
         "pinned-task",
-        "title = \"Pinned\"\nphase = \"p1\"\n",
+        "title = \"Pinned\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(path, "tasks/pinned-task/prompt.md", "do it\n");
     write_file(
@@ -594,7 +594,7 @@ fn pinned_files_is_none_when_never_set() {
         path,
         &hub,
         "unpinned-task",
-        "title = \"Unpinned\"\nphase = \"p1\"\n",
+        "title = \"Unpinned\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     assert!(records::pinned_files(&hub, "unpinned-task").is_none());
     assert!(records::check_pins(&hub, "unpinned-task", "HEAD").is_empty());

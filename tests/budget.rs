@@ -106,7 +106,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
         ),
     );
     write_file(
@@ -136,7 +136,7 @@ fn plan_and_post(
         repo,
         player,
         slug,
-        &format!("title = \"{slug}\"\nphase = \"p1\"\n"),
+        &format!("title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n"),
     );
     let report = post(repo, player, slug);
     assert_eq!(report.launched, vec![slug.to_string()], "{report}");

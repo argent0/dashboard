@@ -122,7 +122,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
         ),
     );
     write_file(
@@ -152,7 +152,7 @@ fn plan_and_post(
         repo,
         player,
         slug,
-        &format!("title = \"{slug}\"\nphase = \"p1\"\n"),
+        &format!("title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n"),
     );
     let report = post(repo, player, slug);
     assert_eq!(report.launched, vec![slug.to_string()], "{report}");
@@ -194,7 +194,7 @@ fn commit_multi_in_clone(
 
 
 const SPEED_TOML: &str =
-    "title = \"speed\"\nphase = \"p1\"\nkind = \"test-speedup\"\n\n[[slow]]\ncheck = \"slow\"\n";
+    "title = \"speed\"\nphase = \"p1\"\nmodules = [\"app\"]\nkind = \"test-speedup\"\n\n[[slow]]\ncheck = \"slow\"\n";
 
 /// Plans and posts a test-speedup `slug` naming `slow_check`; returns the
 /// post tick's report.

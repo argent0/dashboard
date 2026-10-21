@@ -235,7 +235,7 @@ fn run_task_check_reads_task_toml() {
     write_file(
         repo.path(),
         "tasks/foo/task.toml",
-        "title = \"Foo\"\n\n[check]\nname = \"foo-check\"\ncmd = \"true\"\n",
+        "title = \"Foo\"\nmodules = [\"app\"]\n\n[check]\nname = \"foo-check\"\ncmd = \"true\"\n",
     );
     let sha = commit(repo.path(), "plan: foo");
     push_main_to_hub(repo.path());

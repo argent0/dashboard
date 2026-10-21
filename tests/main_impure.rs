@@ -65,7 +65,7 @@ fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
         repo.path(),
         "task/a",
         "tasks/a/task.toml",
-        "title = \"a\"\nphase = \"p1\"\n",
+        "title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: a",
     );
     let report = player.tick().unwrap();
@@ -74,7 +74,7 @@ fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
     write_file(
         repo.path(),
         "tasks/a/task.toml",
-        "title = \"a\"\nphase = \"p1\"\n\n[check]\nname = \"a-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"a-check\"\ncmd = \"test -f feature.txt\"\n",
     );
     write_file(
         repo.path(),

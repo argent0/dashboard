@@ -61,7 +61,7 @@ fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &
         repo.path(),
         &format!("task/{slug}"),
         &format!("tasks/{slug}/task.toml"),
-        &format!("title = \"{slug}\"\nphase = \"p1\"\n"),
+        &format!("title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n"),
         &format!("plan: {slug}"),
     );
     let report = player.tick().expect("plan tick");
@@ -72,7 +72,7 @@ fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"{cmd}\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"{cmd}\"\n"
         ),
     );
     write_file(

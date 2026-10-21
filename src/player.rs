@@ -3977,6 +3977,21 @@ impl<S: Sessions> Player<S> {
         if self.creates_cycle(&accepted, slug, &cfg.depends_on) {
             return Err(format!("plan: task/{slug}'s dependencies contain a cycle"));
         }
+
+        if !cfg.modules.is_empty() {
+            let exporter = self.runner.exporter();
+            let arch = records::exported_at(&self.hub, main_tip, Some(exporter))
+                .map_err(|e| format!("plan: task/{slug}: {e}"))?
+                .ok_or_else(|| format!("plan: task/{slug}: main has no {}", config::ARCH_LEAN_MANIFEST))?
+                .arch;
+            for m in &cfg.modules {
+                if arch.node(m).is_none() {
+                    return Err(format!("plan: task/{slug}: modules names unknown {m:?}"));
+                }
+            }
+            records::impacted_at(&self.hub, main_tip, &cfg.modules, Some(exporter))
+                .map_err(|e| format!("plan: task/{slug}: {e}"))?;
+        }
         Ok(())
     }
 

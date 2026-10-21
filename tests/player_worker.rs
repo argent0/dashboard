@@ -93,7 +93,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
         ),
     );
     write_file(
@@ -123,7 +123,7 @@ fn plan_and_post(
         repo,
         player,
         slug,
-        &format!("title = \"{slug}\"\nphase = \"p1\"\n"),
+        &format!("title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n"),
     );
     let report = post(repo, player, slug);
     assert_eq!(report.launched, vec![slug.to_string()], "{report}");
@@ -188,7 +188,7 @@ fn post_launches_a_worker_clone_with_pins_and_a_prompt_file() {
         &repo,
         &mut player,
         "foo",
-        "title = \"Foo\"\nphase = \"p1\"\n",
+        "title = \"Foo\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     plan_and_post(&repo, &mut player, "foo");
 
@@ -281,7 +281,7 @@ fn launch_skipped_with_an_error_when_the_clone_dir_already_exists() {
         &repo,
         &mut player,
         "leftover",
-        "title = \"Leftover\"\nphase = \"p1\"\n",
+        "title = \"Leftover\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
 
     // A leftover directory from some previous, unrelated run — the player
@@ -299,7 +299,7 @@ fn launch_skipped_with_an_error_when_the_clone_dir_already_exists() {
     write_file(
         repo.path(),
         "tasks/leftover/task.toml",
-        "title = \"Leftover\"\nphase = \"p1\"\n\n[check]\nname = \"leftover-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"Leftover\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"leftover-check\"\ncmd = \"test -f feature.txt\"\n",
     );
     write_file(
         repo.path(),
@@ -501,7 +501,7 @@ fn finish_modifying_a_pinned_file_is_rejected_with_pins_and_relayed() {
         &repo,
         "y",
         "tasks/y/task.toml",
-        "title = \"Y (tampered)\"\nphase = \"p1\"\n\n[check]\nname = \"y-check\"\ncmd = \"true\"\n",
+        "title = \"Y (tampered)\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"y-check\"\ncmd = \"true\"\n",
         "tamper with the pinned task.toml",
     );
 
@@ -1193,7 +1193,7 @@ fn tmux_smoke_test() {
 fn finish_touching_an_api_file_or_the_manifest_is_rejected_with_pins() {
     for target in ["api/ab.rs", "architecture/Apis/ab.lean", "architecture/Architecture.lean"] {
         let repo = director_repo();
-        write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
+        write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[]);
         write_file(repo.path(), "api/ab.rs", "pub enum Ab { X }\n");
         commit(repo.path(), "add architecture");
         let (_home_dir, home) = init_hub(&repo);

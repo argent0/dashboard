@@ -1007,6 +1007,38 @@ pub fn exported_at(
     Ok(Some(e))
 }
 
+/// The notes ref caching run sets by `architecture/` tree id: a JSON map
+/// from the sorted, comma-joined module list to the check names.
+pub const RUNSETS_NOTES: &str = "refs/notes/dashboard-runsets";
+
+/// The run set of `modules` at `commit` (spec §6.6): Lean's `impacted`,
+/// noted on the package's tree; on a miss `exporter` computes it.
+pub fn impacted_at(
+    hub: &Git,
+    commit: &str,
+    modules: &[String],
+    exporter: Option<&crate::lean::Exporter>,
+) -> Result<Vec<String>, String> {
+    let tree = hub
+        .rev_parse(&format!("{commit}:{}", config::ARCH_DIR))
+        .ok_or_else(|| format!("{}: no tree at {commit}", config::ARCH_DIR))?;
+    let mut sorted = modules.to_vec();
+    sorted.sort();
+    let key = sorted.join(",");
+    let mut map: BTreeMap<String, Vec<String>> =
+        hub.notes_show(RUNSETS_NOTES, &tree).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    if let Some(names) = map.get(&key) {
+        return Ok(names.clone());
+    }
+    let Some(exporter) = exporter else {
+        return Err(format!("{}: run set of [{key}] not computed yet", config::ARCH_DIR));
+    };
+    let names = exporter.impacted_tree(hub, &tree, &sorted)?;
+    map.insert(key, names.clone());
+    let _ = hub.notes_add(RUNSETS_NOTES, &tree, &(serde_json::to_string(&map).unwrap_or_default() + "\n"));
+    Ok(names)
+}
+
 /// The suite at `commit` (spec §6.2): the checks of `architecture/Tests.lean`
 /// and `architecture/Tests/*.lean`, through the export.
 pub fn suite_at(hub: &Git, commit: &str, exporter: Option<&crate::lean::Exporter>) -> Result<config::Suite, String> {

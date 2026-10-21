@@ -200,7 +200,7 @@ fn an_impure_task_check_cannot_stand_in_for_a_failing_one_at_post() {
         repo.path(),
         "task/a",
         "tasks/a/task.toml",
-        "title = \"a\"\nphase = \"p1\"\n",
+        "title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: a",
     );
     let report = player.tick().unwrap();
@@ -212,7 +212,7 @@ fn an_impure_task_check_cannot_stand_in_for_a_failing_one_at_post() {
     write_file(
         repo.path(),
         "tasks/a/task.toml",
-        &format!("title = \"a\"\nphase = \"p1\"\n\n[check]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
+        &format!("title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
     );
     write_file(
         repo.path(),
@@ -357,7 +357,7 @@ fn a_task_check_failing_only_against_the_jail_cannot_be_posted() {
         repo.path(),
         "task/a",
         "tasks/a/task.toml",
-        "title = \"a\"\nphase = \"p1\"\n",
+        "title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: a",
     );
     player.tick().unwrap();
@@ -368,7 +368,7 @@ fn a_task_check_failing_only_against_the_jail_cannot_be_posted() {
     write_file(
         repo.path(),
         "tasks/a/task.toml",
-        &format!("title = \"a\"\nphase = \"p1\"\n\n[check]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
+        &format!("title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
     );
     write_file(
         repo.path(),
@@ -422,7 +422,7 @@ fn a_held_launch_is_reported_once_per_tip() {
         repo.path(),
         "task/a",
         "tasks/a/task.toml",
-        "title = \"a\"\nphase = \"p1\"\n",
+        "title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: a",
     );
     player.tick().unwrap();
@@ -434,7 +434,7 @@ fn a_held_launch_is_reported_once_per_tip() {
     write_file(
         repo.path(),
         "tasks/a/task.toml",
-        &format!("title = \"a\"\nphase = \"p1\"\n\n[check]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
+        &format!("title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
     );
     write_file(
         repo.path(),

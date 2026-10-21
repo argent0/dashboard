@@ -66,7 +66,7 @@ fn strikes(hub: &Git, slug: &str, reason: Reason) -> u32 {
 }
 
 fn plan_spike(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
-    let toml = format!("kind = \"spike\"\ntitle = \"{slug} spike\"\nphase = \"p1\"\n");
+    let toml = format!("kind = \"spike\"\ntitle = \"{slug} spike\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     director_commit_on_branch(
         repo.path(),
         &format!("task/{slug}"),
@@ -238,7 +238,7 @@ fn nothing_may_depend_on_a_spike() {
         repo.path(),
         "task/after",
         "tasks/after/task.toml",
-        "title = \"after\"\nphase = \"p1\"\ndepends_on = [\"probe\"]\n",
+        "title = \"after\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"probe\"]\n",
         "plan: after",
     );
     let report = player.tick().unwrap();
@@ -1159,7 +1159,7 @@ fn conclude_on_an_ordinary_task_is_ownership() {
         repo.path(),
         "task/plain",
         "tasks/plain/task.toml",
-        "title = \"plain\"\nphase = \"p1\"\n",
+        "title = \"plain\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: plain",
     );
     player.tick().unwrap();
@@ -1220,7 +1220,7 @@ fn an_explored_slug_is_never_reused() {
         repo.path(),
         "task/second",
         "tasks/second/task.toml",
-        "title = \"second\"\nphase = \"p1\"\ndepends_on = [\"probe\"]\n",
+        "title = \"second\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"probe\"]\n",
         "plan: second",
     );
     let msg = one_rejection(&player.tick().unwrap(), Reason::Plan);

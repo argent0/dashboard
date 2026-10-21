@@ -189,7 +189,7 @@ fn plan_happy_path() {
         repo.path(),
         "task/foo",
         "tasks/foo/task.toml",
-        "title = \"Foo\"\nphase = \"p1\"\n",
+        "title = \"Foo\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: foo",
     );
 
@@ -232,7 +232,7 @@ fn plan_rejects_unknown_dependency() {
         repo.path(),
         "task/needs-ghost",
         "tasks/needs-ghost/task.toml",
-        "title = \"Needs ghost\"\nphase = \"p1\"\ndepends_on = [\"ghost\"]\n",
+        "title = \"Needs ghost\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"ghost\"]\n",
         "plan: needs-ghost",
     );
 
@@ -258,14 +258,14 @@ fn plan_batch_resolves_same_tick_dependency_regardless_of_ref_order() {
         repo.path(),
         "task/zeta",
         "tasks/zeta/task.toml",
-        "title = \"Zeta\"\nphase = \"p1\"\n",
+        "title = \"Zeta\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: zeta",
     );
     director_commit_on_branch(
         repo.path(),
         "task/alpha",
         "tasks/alpha/task.toml",
-        "title = \"Alpha\"\nphase = \"p1\"\ndepends_on = [\"zeta\"]\n",
+        "title = \"Alpha\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"zeta\"]\n",
         "plan: alpha",
     );
 
@@ -287,7 +287,7 @@ fn plan_rejects_retired_dependency() {
         repo.path(),
         "task/deadend",
         "tasks/deadend/task.toml",
-        "title = \"Dead end\"\nphase = \"p1\"\n",
+        "title = \"Dead end\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: deadend",
     );
     player.tick().expect("tick should succeed");
@@ -303,7 +303,7 @@ fn plan_rejects_retired_dependency() {
         repo.path(),
         "task/needs-deadend",
         "tasks/needs-deadend/task.toml",
-        "title = \"Needs deadend\"\nphase = \"p1\"\ndepends_on = [\"deadend\"]\n",
+        "title = \"Needs deadend\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"deadend\"]\n",
         "plan: needs-deadend",
     );
     let report = player.tick().expect("tick should succeed");
@@ -323,7 +323,7 @@ fn plan_rejects_bad_phase() {
         repo.path(),
         "task/bad-phase",
         "tasks/bad-phase/task.toml",
-        "title = \"Bad phase\"\nphase = \"nonexistent\"\n",
+        "title = \"Bad phase\"\nphase = \"nonexistent\"\nmodules = [\"app\"]\n",
         "plan: bad phase",
     );
 
@@ -344,7 +344,7 @@ fn plan_rejects_extra_paths_in_the_plan_commit() {
     write_file(
         repo.path(),
         "tasks/extra-paths/task.toml",
-        "title = \"Extra\"\nphase = \"p1\"\n",
+        "title = \"Extra\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(repo.path(), "extra.txt", "this shouldn't be here\n");
     commit(repo.path(), "plan: extra-paths (with a stray file)");
@@ -370,7 +370,7 @@ fn plan_rejects_a_cycle_via_replan() {
         repo.path(),
         "task/b",
         "tasks/b/task.toml",
-        "title = \"B\"\nphase = \"p1\"\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: b",
     );
     let report = player.tick().expect("tick should succeed");
@@ -382,7 +382,7 @@ fn plan_rejects_a_cycle_via_replan() {
         repo.path(),
         "task/a",
         "tasks/a/task.toml",
-        "title = \"A\"\nphase = \"p1\"\ndepends_on = [\"b\"]\n",
+        "title = \"A\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"b\"]\n",
         "plan: a",
     );
     let report = player.tick().expect("tick should succeed");
@@ -395,7 +395,7 @@ fn plan_rejects_a_cycle_via_replan() {
         repo.path(),
         "task/b",
         "tasks/b/task.toml",
-        "title = \"B\"\nphase = \"p1\"\ndepends_on = [\"a\"]\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n",
         "replan: b depends on a",
     );
     let report = player.tick().expect("tick should succeed");
@@ -419,7 +419,7 @@ fn fix_on_top_commit_after_a_rejected_plan_passes_cumulatively() {
     write_file(
         repo.path(),
         "tasks/fix/task.toml",
-        "title = \"Fix\"\nphase = \"p1\"\n",
+        "title = \"Fix\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(repo.path(), "extra.txt", "oops\n");
     commit(repo.path(), "plan: fix (bad, has an extra file)");
@@ -453,7 +453,7 @@ fn merge_commit_on_a_task_branch_is_rejected_with_history() {
         repo.path(),
         "task/x",
         "tasks/x/task.toml",
-        "title = \"X\"\nphase = \"p1\"\n",
+        "title = \"X\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: x",
     );
     player.tick().expect("tick should succeed");
@@ -511,7 +511,7 @@ fn replan_happy_path() {
         repo.path(),
         "task/replan-me",
         "tasks/replan-me/task.toml",
-        "title = \"Original\"\nphase = \"p1\"\n",
+        "title = \"Original\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: replan-me",
     );
     player.tick().expect("tick should succeed");
@@ -520,7 +520,7 @@ fn replan_happy_path() {
         repo.path(),
         "task/replan-me",
         "tasks/replan-me/task.toml",
-        "title = \"Revised\"\nphase = \"p1\"\n",
+        "title = \"Revised\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "replan: replan-me",
     );
     let report = player.tick().expect("tick should succeed");
@@ -547,7 +547,7 @@ fn post_missing_a_check_in_task_toml_is_rejected_with_post() {
         repo.path(),
         "task/nocheck",
         "tasks/nocheck/task.toml",
-        "title = \"No check\"\nphase = \"p1\"\n",
+        "title = \"No check\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: nocheck",
     );
     player.tick().expect("tick should succeed");
@@ -593,14 +593,14 @@ fn unblock_merge_brings_an_accepted_dependency_into_the_branch() {
         repo.path(),
         "task/a",
         "tasks/a/task.toml",
-        "title = \"A\"\nphase = \"p1\"\n",
+        "title = \"A\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: a",
     );
     director_commit_on_branch(
         repo.path(),
         "task/b",
         "tasks/b/task.toml",
-        "title = \"B\"\nphase = \"p1\"\ndepends_on = [\"a\"]\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n",
         "plan: b",
     );
     let report = player.tick().expect("tick should succeed");
@@ -658,14 +658,14 @@ fn unposted_ready_branch_keeps_picking_up_main() {
         repo.path(),
         "task/a",
         "tasks/a/task.toml",
-        "title = \"A\"\nphase = \"p1\"\n",
+        "title = \"A\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: a",
     );
     director_commit_on_branch(
         repo.path(),
         "task/c",
         "tasks/c/task.toml",
-        "title = \"C\"\nphase = \"p1\"\n",
+        "title = \"C\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "plan: c",
     );
     player.tick().expect("tick should succeed");

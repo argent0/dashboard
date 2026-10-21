@@ -346,6 +346,8 @@ EOF
 # with a suite of one check.
 "$BIN" arch gen --root "$DIR_REPO" >/dev/null
 task_tests "$DIR_REPO/architecture/Tests.lean" baseline true
+# One root, `app`, for the tasks to name in `modules`.
+printf '\nroot app where\n  lang = rust\n  paths = ["src"]\n' >>"$DIR_REPO/architecture/Architecture.lean"
 
 # Step 7c's suite check builds this cache in the checkout: ignored build
 # output, which the jail's clean-worktree check allows.
@@ -370,6 +372,7 @@ mkdir -p "$DIR_REPO/tasks/alpha"
 cat >"$DIR_REPO/tasks/alpha/task.toml" <<'EOF'
 title = "Add feature"
 phase = "p1"
+modules = ["app"]
 EOF
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: alpha"
@@ -387,6 +390,7 @@ EOF
 cat >"$DIR_REPO/tasks/alpha/task.toml" <<'EOF'
 title = "Add feature"
 phase = "p1"
+modules = ["app"]
 
 [check]
 name = "alpha-check"
@@ -484,6 +488,7 @@ mkdir -p "$DIR_REPO/tasks/beta"
 cat >"$DIR_REPO/tasks/beta/task.toml" <<'EOF'
 title = "Second feature"
 phase = "p1"
+modules = ["app"]
 depends_on = ["alpha"]
 EOF
 git -C "$DIR_REPO" add -A
@@ -496,6 +501,7 @@ EOF
 cat >"$DIR_REPO/tasks/beta/task.toml" <<'EOF'
 title = "Second feature"
 phase = "p1"
+modules = ["app"]
 depends_on = ["alpha"]
 
 [check]
@@ -636,7 +642,7 @@ git -C "$DIR_REPO" merge -q --ff-only hub/main
 for t in gamma delta; do
   git -C "$DIR_REPO" checkout -q -b "task/$t" main
   mkdir -p "$DIR_REPO/tasks/$t"
-  printf 'title = "%s"\nphase = "p1"\n' "$t" >"$DIR_REPO/tasks/$t/task.toml"
+  printf 'title = "%s"\nphase = "p1"\nmodules = ["app"]\n' "$t" >"$DIR_REPO/tasks/$t/task.toml"
   git -C "$DIR_REPO" add -A
   git -C "$DIR_REPO" commit -q -m "plan: $t"
 done
@@ -647,7 +653,7 @@ wait_until "gamma and delta planned" both_ready
 for t in gamma delta; do
   git -C "$DIR_REPO" checkout -q "task/$t"
   echo "Create $t.txt." >"$DIR_REPO/tasks/$t/prompt.md"
-  printf 'title = "%s"\nphase = "p1"\n\n[check]\nname = "%s-check"\ncmd = "test -f %s.txt"\n' "$t" "$t" "$t" >"$DIR_REPO/tasks/$t/task.toml"
+  printf 'title = "%s"\nphase = "p1"\nmodules = ["app"]\n\n[check]\nname = "%s-check"\ncmd = "test -f %s.txt"\n' "$t" "$t" "$t" >"$DIR_REPO/tasks/$t/task.toml"
   printf '#!/bin/sh\necho ok > %s.txt\necho %s > shared.txt\n' "$t" "$t" >"$DIR_REPO/tasks/$t/agent.sh"
   task_tests "$DIR_REPO/architecture/Tests/$t.lean" "$t-check" "test -f $t.txt"
   git -C "$DIR_REPO" add -A
@@ -704,12 +710,12 @@ git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" merge -q --ff-only hub/main
 git -C "$DIR_REPO" checkout -q -b task/eta main
 mkdir -p "$DIR_REPO/tasks/eta"
-printf 'title = "eta"\nphase = "p1"\n' >"$DIR_REPO/tasks/eta/task.toml"
+printf 'title = "eta"\nphase = "p1"\nmodules = ["app"]\n' >"$DIR_REPO/tasks/eta/task.toml"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: eta"
 wait_until "eta is ready" task_status_is eta ready
 echo "Create eta.txt." >"$DIR_REPO/tasks/eta/prompt.md"
-printf 'title = "eta"\nphase = "p1"\n\n[check]\nname = "eta-check"\ncmd = "test -f eta.txt"\n' >"$DIR_REPO/tasks/eta/task.toml"
+printf 'title = "eta"\nphase = "p1"\nmodules = ["app"]\n\n[check]\nname = "eta-check"\ncmd = "test -f eta.txt"\n' >"$DIR_REPO/tasks/eta/task.toml"
 printf '#!/bin/sh\necho ok > eta.txt\n' >"$DIR_REPO/tasks/eta/agent.sh"
 task_tests "$DIR_REPO/architecture/Tests/eta.lean" eta-check "test -f eta.txt"
 git -C "$DIR_REPO" add -A
@@ -771,7 +777,7 @@ task_tests "$TA_TEMPLATES/epsilon/architecture/Tests/epsilon.lean" epsilon-check
 
 git -C "$DIR_REPO" checkout -q -b task/epsilon main
 mkdir -p "$DIR_REPO/tasks/epsilon"
-printf 'title = "epsilon"\nphase = "p1"\nbrief = "a fake task agent posts this"\n\n[check]\nname = "epsilon-check"\ncmd = "test -f epsilon.txt"\n' >"$DIR_REPO/tasks/epsilon/task.toml"
+printf 'title = "epsilon"\nphase = "p1"\nmodules = ["app"]\nbrief = "a fake task agent posts this"\n\n[check]\nname = "epsilon-check"\ncmd = "test -f epsilon.txt"\n' >"$DIR_REPO/tasks/epsilon/task.toml"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: epsilon"
 
@@ -846,7 +852,7 @@ task_tests "$TA_TEMPLATES/zeta/architecture/Tests/zeta.lean" zeta-arch "$arch_cm
 
 git -C "$DIR_REPO" checkout -q -b task/zeta main
 mkdir -p "$DIR_REPO/tasks/zeta"
-printf 'title = "zeta"\nphase = "p1"\nbrief = "a module test in a view with a linked cache"\n\n[check]\nname = "zeta-arch"\ncmd = "%s"\n' "$arch_cmd" >"$DIR_REPO/tasks/zeta/task.toml"
+printf 'title = "zeta"\nphase = "p1"\nmodules = ["zeta"]\nbrief = "a module test in a view with a linked cache"\n\n[check]\nname = "zeta-arch"\ncmd = "%s"\n' "$arch_cmd" >"$DIR_REPO/tasks/zeta/task.toml"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: zeta"
 wait_until "zeta is ready" task_status_is zeta ready

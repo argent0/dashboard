@@ -13,7 +13,8 @@ use tempfile::TempDir;
 
 /// A throwaway director clone: `git init -b main` with a committer identity
 /// and gpg signing disabled, and a minimal `roadmap.toml` (title + one
-/// phase) plus the starter Lean package (no modules; `Tests.lean` with one
+/// phase) plus the starter Lean package (no modules, a root `app` over
+/// `src/`; `Tests.lean` with one
 /// deterministic check, `unit`, `cmd = "true"`, `covers = all`) committed
 /// on `main`.
 pub struct DirectorRepo {
@@ -54,6 +55,8 @@ pub fn director_repo() -> DirectorRepo {
         ),
     );
     write_starter(dir.path(), &suite_lean("[[check]]\nname = \"unit\"\ncmd = \"true\"\n"));
+    write_file(dir.path(), "architecture/Architecture.lean", STARTER_MANIFEST);
+    write_file(dir.path(), "src/.keep", "");
     commit(dir.path(), "initial roadmap and test suite");
 
     DirectorRepo { dir }
@@ -277,6 +280,14 @@ pub fn lean_check(name: &str, cmd: &str, covers: &str) -> String {
 pub fn lean_task_tests(name: &str, cmd: &str, covers: &str) -> String {
     format!("import Architecture\nopen Dashboard\n\n{}", lean_check(name, cmd, covers))
 }
+
+/// `director_repo()`'s manifest: no modules, one root `app` over `src/`,
+/// so every fixture task can name `modules = ["app"]`.
+pub const STARTER_MANIFEST: &str =
+    "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 0\n\nroot app where\n  lang = rust\n  paths = [\"src\"]\n";
+
+/// The root `app` over `src/`, to append to another manifest.
+pub const APP_ROOT: &str = "\nroot app where\n  lang = rust\n  paths = [\"src\"]\n";
 
 /// `architecture/Tests.lean`.
 pub const TESTS_LEAN: &str = "architecture/Tests.lean";
