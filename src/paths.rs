@@ -39,6 +39,17 @@ impl Home {
         self.root.join("work")
     }
 
+    /// Per-check views (spec §6.6): a copy of a check's `covers`, built
+    /// for each run and removed after.
+    pub fn views(&self) -> PathBuf {
+        self.root.join("views")
+    }
+
+    /// `dashboard test`'s own worktree, beside the player's `work`.
+    pub fn work_cli(&self) -> PathBuf {
+        self.root.join("work-cli")
+    }
+
     pub fn events(&self) -> PathBuf {
         self.root.join("events.jsonl")
     }

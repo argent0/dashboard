@@ -84,6 +84,28 @@ pub struct CheckResult {
     /// A run was killed for exceeding `timeout`; never retried.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
+    /// The check's `covers`, `all` and `files` when it ran: a changed scope
+    /// never reuses an old verdict.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covers: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    /// Where it ran (`view_kind`): older notes lack it and so re-run.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub view: String,
+}
+
+/// Whether `check` runs in a view of its `covers` (spec §6.6) rather than
+/// the whole worktree.
+fn in_view(check: &Check) -> bool {
+    !check.all && !check.covers.is_empty()
+}
+
+/// The fingerprint of where `check` runs, versioned like the sandbox's.
+fn view_kind(check: &Check) -> &'static str {
+    if in_view(check) { "v1 view" } else { "v1 worktree" }
 }
 
 fn is_zero_u64(n: &u64) -> bool {
@@ -153,6 +175,10 @@ impl CheckResult {
             && self.max_pass == max_pass
             && self.retry_failed == check.retry_failed
             && self.retry_on == check.retry_on
+            && self.covers == check.covers
+            && self.all == check.all
+            && self.files == check.files
+            && self.view == view_kind(check)
     }
 }
 
@@ -161,6 +187,25 @@ impl CheckResult {
 struct Note {
     #[serde(default)]
     checks: BTreeMap<String, CheckResult>,
+}
+
+// --------------------------------------------------------------------------
+// RunSet
+// --------------------------------------------------------------------------
+
+/// The checks a judgement runs (spec §6.6): a task's run set, or the whole
+/// suite, and why.
+#[derive(Debug, Clone)]
+pub struct RunSet {
+    pub checks: Vec<Check>,
+    pub whole: bool,
+    pub why: String,
+}
+
+impl RunSet {
+    pub fn whole(checks: Vec<Check>, why: &str) -> RunSet {
+        RunSet { checks, whole: true, why: why.to_string() }
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -326,6 +371,8 @@ impl SuiteResult {
 pub struct Runner {
     hub: Git,
     work: PathBuf,
+    /// Per-check views are built here (`Home::views`).
+    views: PathBuf,
     sandbox: Sandbox,
     budget: BudgetConfig,
     /// Exports the suite's Lean package at `<home>/arch`, jailed like a check.
@@ -343,6 +390,7 @@ impl Runner {
         Self {
             hub: Git::new(home.hub()),
             work: home.work(),
+            views: home.views(),
             sandbox: Sandbox::off(),
             budget: BudgetConfig::default(),
             exporter: Exporter::new(home.root.join("arch"), Sandbox::off()),
@@ -351,8 +399,11 @@ impl Runner {
 
     /// Runs every check from now on under `sandbox` (off by default). The
     /// hub stays readable inside it: the worktree's `.git` points there.
+    /// Views and the worktree (whose `linked` caches a view links to) are
+    /// writable in it.
     pub fn set_sandbox(&mut self, sandbox: Sandbox) {
-        self.sandbox = sandbox.with_readable(&self.hub.dir);
+        let _ = std::fs::create_dir_all(&self.views);
+        self.sandbox = sandbox.with_readable(&self.hub.dir).with_writable(&self.views).with_writable(&self.work);
         self.exporter.set_sandbox(self.sandbox.clone());
     }
 
@@ -622,6 +673,10 @@ impl Runner {
             millis: 0,
             timeout: timeout.map_or(0, |t| t.as_secs()),
             timed_out: false,
+            covers: check.covers.clone(),
+            all: check.all,
+            files: check.files.clone(),
+            view: view_kind(check).to_string(),
         };
         if let Err(e) = self.prepare(commit) {
             return CheckResult {
@@ -629,7 +684,65 @@ impl Runner {
                 ..base
             };
         }
+        // Every run and retry of the check shares one view.
+        let view = if in_view(check) {
+            match self.build_view(commit, check) {
+                Ok(dir) => Some(dir),
+                Err(e) => {
+                    return CheckResult {
+                        output_tail: Some(format!("view of {}: {e}", check.covers.join(", "))),
+                        ..base
+                    };
+                }
+            }
+        } else {
+            None
+        };
+        let dir = view.clone().unwrap_or_else(|| self.work.clone());
+        let result = self.attempts(check, timeout, max_pass, base, &dir, view.is_some());
+        if let Some(v) = view {
+            let _ = std::fs::remove_dir_all(v);
+        }
+        result
+    }
 
+    /// The view of `check`'s `covers` at `commit` (worktree prepared): the
+    /// nodes' files with their APIs, `shared`, `test_paths` and the check's
+    /// `files`, as a throwaway git repo so `leaks` works there unchanged.
+    fn build_view(&self, commit: &str, check: &Check) -> Result<PathBuf, String> {
+        let e = crate::records::exported_at(&self.hub, commit, Some(&self.exporter))?
+            .ok_or("no architecture/Architecture.lean")?;
+        if let Some(n) = check.covers.iter().find(|n| e.arch.node(n).is_none()) {
+            return Err(format!("covers names {n:?}, which the architecture lacks"));
+        }
+        let mut extra = e.suite.test_paths.clone();
+        extra.extend(check.files.iter().cloned());
+        let nodes: Vec<&str> = check.covers.iter().map(|s| s.as_str()).collect();
+        let paths = crate::arch::view_paths(&e.arch, &e.idls, &nodes, &extra);
+        let name: String = check.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+        let dir = self.views.join(name);
+        crate::arch::build_view(&self.work, &e.arch, &paths, &dir)?;
+        let git = Git::new(&dir);
+        for args in [
+            &["init", "-q"][..],
+            &["add", "-A"][..],
+            &["-c", "user.name=player", "-c", "user.email=player@dashboard", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "view"][..],
+        ] {
+            git.run(args).map_err(|e| e.to_string())?;
+        }
+        Ok(dir)
+    }
+
+    /// The attempts of `execute` in `dir` (the worktree or a view).
+    fn attempts(
+        &self,
+        check: &Check,
+        timeout: Option<Duration>,
+        max_pass: Option<u32>,
+        base: CheckResult,
+        dir: &std::path::Path,
+        view: bool,
+    ) -> CheckResult {
         let patterns: Vec<regex::Regex> = check
             .retry_on
             .iter()
@@ -639,7 +752,7 @@ impl Runner {
         let mut retry_outputs = Vec::new();
         let started = Instant::now();
         loop {
-            let (mut result, failed_output) = self.attempt(check, timeout, max_pass, base.clone());
+            let (mut result, failed_output) = self.attempt(check, timeout, max_pass, base.clone(), dir, view);
             let retry = !result.pass
                 && !result.timed_out
                 && result.impurity().is_none()
@@ -665,7 +778,20 @@ impl Runner {
         timeout: Option<Duration>,
         max_pass: Option<u32>,
         mut result: CheckResult,
+        dir: &std::path::Path,
+        view: bool,
     ) -> (CheckResult, String) {
+        // A view check learns what it covers and where the whole tree is.
+        let cmd = if view {
+            format!(
+                "export DASHBOARD_COVERS={} DASHBOARD_ROOT={}; {}",
+                shell_word(&check.covers.join(",")),
+                shell_word(&self.work.display().to_string()),
+                check.cmd
+            )
+        } else {
+            check.cmd.clone()
+        };
         let mut exits = Vec::new();
         let mut passes: u32 = 0;
         let mut failed_output = String::new();
@@ -673,13 +799,15 @@ impl Runner {
         for i in 0..check.runs {
             let remaining_after_this = check.runs - i - 1;
 
-            let (code, stdout, combined) =
-                run_command(&self.sandbox, &check.cmd, &self.work, timeout);
+            let (code, stdout, combined) = run_command(&self.sandbox, &cmd, dir, timeout);
             result.metrics = parse_metrics(&stdout);
 
             // Impure: the run changed the worktree. Every later run would
             // see that state, so stop here, failing whatever the exit code.
-            let leaked = self.leaks();
+            let mut leaked = self.leaks(dir);
+            if view {
+                leaked.extend(self.leaks(&self.work));
+            }
             if !leaked.is_empty() {
                 exits.push(code);
                 result.leaked = leaked;
@@ -744,8 +872,8 @@ impl Runner {
     /// What a run left in the worktree, as `git status --porcelain` lines:
     /// changed tracked files and new untracked ones. Ignored files (build
     /// caches) don't count; `prepare` keeps those between runs anyway.
-    fn leaks(&self) -> Vec<String> {
-        match Git::new(&self.work).run(&["status", "--porcelain", "--untracked-files=all"]) {
+    fn leaks(&self, dir: &std::path::Path) -> Vec<String> {
+        match Git::new(dir).run(&["status", "--porcelain", "--untracked-files=all"]) {
             Ok(out) => out
                 .lines()
                 .map(|l| l.trim().to_string())
@@ -760,16 +888,19 @@ impl Runner {
     /// or invalid suite is reported via `error`, not a panic. An empty check
     /// list passes.
     pub fn run_suite(&self, commit: &str) -> SuiteResult {
-        let cfg = match crate::records::suite_at(&self.hub, commit, Some(&self.exporter)) {
-            Ok(c) => c,
-            Err(e) => return SuiteResult::failing(e),
-        };
+        match crate::records::suite_at(&self.hub, commit, Some(&self.exporter)) {
+            Ok(suite) => self.run_set(commit, &RunSet::whole(suite.checks, "the whole suite")),
+            Err(e) => SuiteResult::failing(e),
+        }
+    }
 
+    /// Runs every check of `set` at `commit`.
+    pub fn run_set(&self, commit: &str, set: &RunSet) -> SuiteResult {
         let timeout =
             (self.budget.check_timeout > 0).then(|| Duration::from_secs(self.budget.check_timeout));
-        let mut checks = Vec::with_capacity(cfg.checks.len());
+        let mut checks = Vec::with_capacity(set.checks.len());
         let mut pass = true;
-        for check in &cfg.checks {
+        for check in &set.checks {
             let result = self.run_check_timed(commit, check, timeout, None);
             pass &= result.pass;
             checks.push(result);
@@ -779,6 +910,33 @@ impl Runner {
             checks,
             error: None,
         }
+    }
+
+    /// The run set of a task on `modules` at `commit` (spec §6.6): Lean's
+    /// `impacted` (noted on the architecture tree), resolved against the
+    /// commit's suite. The whole suite when `modules` is empty, or when
+    /// `diff_from` is given and the diff from it touches a `shared` path.
+    pub fn run_set_for(&self, commit: &str, modules: &[String], diff_from: Option<&str>) -> Result<RunSet, String> {
+        let e = crate::records::exported_at(&self.hub, commit, Some(&self.exporter))?
+            .ok_or_else(|| format!("no {} at {commit}", config::ARCH_LEAN_MANIFEST))?;
+        if modules.is_empty() {
+            return Ok(RunSet::whole(e.suite.checks, "no modules: the whole suite"));
+        }
+        if let Some(from) = diff_from
+            && let Some((_, path)) = self
+                .hub
+                .diff_names(from, commit)
+                .into_iter()
+                .find(|(_, p)| config::path_under_test_paths(p, &e.arch.shared))
+        {
+            return Ok(RunSet::whole(e.suite.checks, &format!("{path} is shared: the whole suite")));
+        }
+        let names = crate::records::impacted_at(&self.hub, commit, modules, Some(&self.exporter))?;
+        let checks = names
+            .iter()
+            .map(|n| e.suite.check(n).cloned().ok_or_else(|| format!("run set names check {n:?}, which the suite lacks")))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(RunSet { checks, whole: false, why: format!("the run set of {}", modules.join(", ")) })
     }
 
     /// Reads `tasks/<slug>/task.toml` at `commit` and runs its `[check]`.
@@ -798,6 +956,11 @@ impl Runner {
         // the task exists" (spec §6.3): no retries here.
         Ok(self.run_check(commit, &check.without_retries()))
     }
+}
+
+/// `s` quoted for `sh`.
+fn shell_word(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Runs `sh -c <cmd>` in `cwd` (jailed by `sandbox`), returning `(exit code, stdout, stdout +
@@ -969,11 +1132,14 @@ mod tests {
             pass: true,
             output_tail: None,
             metrics: None,
+            view: "v1 worktree".into(),
             ..Default::default()
         };
         assert!(result.reusable_for(&check, None, "", None));
         assert!(!result.reusable_for(&check, Some(2), "", None));
         assert!(!result.reusable_for(&check, None, "v1 jail=off", None));
+        let in_view = Check { covers: vec!["a".into()], ..check.clone() };
+        assert!(!result.reusable_for(&in_view, None, "", None), "another scope");
 
         let mut other_cmd = check.clone();
         other_cmd.cmd = "false".into();
@@ -1037,6 +1203,7 @@ mod tests {
             runs: 1,
             min_pass: 1,
             timeout: 5,
+            view: "v1 worktree".into(),
             ..Default::default()
         };
         assert!(result.reusable_for(&check, None, "", Some(Duration::from_secs(5))));

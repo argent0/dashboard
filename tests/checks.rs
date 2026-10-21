@@ -441,3 +441,94 @@ fn changing_the_retry_policy_invalidates_the_cached_verdict() {
         1
     );
 }
+
+// --------------------------------------------------------------------------
+// Run sets and views (spec §6.6)
+// --------------------------------------------------------------------------
+
+const AB_SHARED: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n  shared = [\"shared.txt\"]\n\n\
+module a where\n  lang = rust\n  paths = [\"a\"]\n  test_cmd = \"test -e a/lib.rs\"\n\n\
+module b where\n  lang = rust\n  paths = [\"b\"]\n\n\
+api ab : a → b where\n  paths = [\"api\"]\n";
+
+const AB_SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+check only_a where\n  cmd = \"test ! -e b/lib.rs && test -e a/lib.rs\"\n  covers = [a]\n\n\
+check sees_both where\n  cmd = \"test -e a/lib.rs && test -e b/lib.rs && test -e api/gen.rs\"\n  covers = [a, b]\n\n\
+check global where\n  cmd = \"test -e b/lib.rs\"\n  covers = all\n";
+
+/// A hub whose main has modules `a` and `b` and `AB_SUITE`.
+fn ab_hub() -> (DirectorRepo, TempDir, Home, String) {
+    let repo = director_repo();
+    write_lean_arch(repo.path(), AB_SHARED, &[("ab", LEAN_AB_IDL)], &[("Tests", AB_SUITE)]);
+    write_file(repo.path(), "a/lib.rs", "pub fn f() {}\n");
+    write_file(repo.path(), "b/lib.rs", "pub fn g() {}\n");
+    write_file(repo.path(), "api/gen.rs", "\n");
+    write_file(repo.path(), "shared.txt", "1\n");
+    write_file(repo.path(), ".gitignore", "/out/\n");
+    let commit = commit(repo.path(), "modules a and b");
+    let (home_dir, home) = init_hub(&repo);
+    (repo, home_dir, home, commit)
+}
+
+fn names(set: &checks::RunSet) -> Vec<String> {
+    let mut n: Vec<String> = set.checks.iter().map(|c| c.name.clone()).collect();
+    n.sort();
+    n
+}
+
+#[test]
+fn a_run_set_runs_each_check_in_a_view_of_what_it_covers() {
+    let (_repo, _home_dir, home, commit) = ab_hub();
+    let runner = Runner::new(&home);
+    let set = runner.run_set_for(&commit, &["a".into()], None).unwrap();
+    assert!(!set.whole);
+    assert_eq!(names(&set), ["a", "global", "only_a", "sees_both"]);
+    assert_eq!(names(&runner.run_set_for(&commit, &["b".into()], None).unwrap()), ["global", "sees_both"]);
+    assert!(runner.run_set_for(&commit, &[], None).unwrap().whole);
+
+    // `only_a` sees no b/lib.rs; `global` runs in the worktree and does.
+    let first = runner.run_set(&commit, &set);
+    assert!(first.pass, "{}", first.summary());
+    let only_a = first.checks.iter().find(|c| c.name == "only_a").unwrap();
+    assert_eq!((only_a.view.as_str(), only_a.covers.clone()), ("v1 view", vec!["a".to_string()]));
+    // The second run is all cache hits.
+    let second = runner.run_set(&commit, &set);
+    assert_eq!(first.checks, second.checks);
+    // A changed `covers` is another check: it re-runs.
+    let mut wider = set.checks.iter().find(|c| c.name == "only_a").unwrap().clone();
+    wider.covers.push("b".into());
+    let r = runner.run_check(&commit, &wider);
+    assert!(!r.pass, "b/lib.rs is in the view now: {r:?}");
+    assert_eq!(r.covers, ["a", "b"]);
+}
+
+#[test]
+fn a_view_check_that_writes_leaks_unless_the_path_is_ignored() {
+    let (_repo, _home_dir, home, commit) = ab_hub();
+    let runner = Runner::new(&home);
+    let in_a = |name: &str, cmd: &str| Check { covers: vec!["a".into()], ..check(name, cmd, 1, 1) };
+    let r = runner.run_check(&commit, &in_a("writes", "echo x > a/new.txt"));
+    assert!(!r.pass);
+    assert!(r.leaked.iter().any(|l| l.contains("a/new.txt")), "{r:?}");
+    let r = runner.run_check(&commit, &in_a("builds", "mkdir -p out && echo x > out/x"));
+    assert!(r.pass, "{r:?}");
+    let r = runner.run_check(&commit, &in_a("env", "test \"$DASHBOARD_COVERS\" = a && test -d \"$DASHBOARD_ROOT/b\""));
+    assert!(r.pass, "{r:?}");
+    let r = runner.run_check(&commit, &Check { covers: vec!["zzz".into()], ..check("ghost", "true", 1, 1) });
+    assert!(!r.pass && r.exits.is_empty(), "{r:?}");
+    assert!(r.output_tail.as_deref().unwrap_or("").contains("zzz"), "{r:?}");
+}
+
+#[test]
+fn a_diff_touching_shared_runs_the_whole_suite() {
+    let (repo, _home_dir, home, base) = ab_hub();
+    let runner = Runner::new(&home);
+    write_file(repo.path(), "a/lib.rs", "pub fn f() { }\n");
+    let in_a = commit(repo.path(), "a only");
+    write_file(repo.path(), "shared.txt", "2\n");
+    let shared = commit(repo.path(), "shared");
+    push_main_to_hub(repo.path());
+    assert!(!runner.run_set_for(&in_a, &["a".into()], Some(&base)).unwrap().whole);
+    let set = runner.run_set_for(&shared, &["a".into()], Some(&base)).unwrap();
+    assert!(set.whole && set.why.contains("shared.txt"), "{}", set.why);
+}

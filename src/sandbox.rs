@@ -29,6 +29,8 @@ struct Jail {
     /// hub living under `/tmp` would otherwise vanish, and with it the
     /// worktree's `.git`.
     readable: Vec<PathBuf>,
+    /// Bound read-write like `writable`, but the runner's own (`with_writable`).
+    scratch: Vec<PathBuf>,
 }
 
 impl Sandbox {
@@ -60,6 +62,7 @@ impl Sandbox {
                 network: cfg.network,
                 writable,
                 readable: Vec::new(),
+                scratch: Vec::new(),
             }),
         })
     }
@@ -68,6 +71,16 @@ impl Sandbox {
     pub fn with_readable(mut self, path: &Path) -> Self {
         if let Some(j) = self.jail.as_mut() {
             j.readable.push(canonical(path));
+        }
+        self
+    }
+
+    /// Also binds `path` read-write inside the jail: the runner's own
+    /// directories (its worktree, its views), so not part of the policy's
+    /// fingerprint, which `state` recomputes from `[sandbox]` alone.
+    pub fn with_writable(mut self, path: &Path) -> Self {
+        if let Some(j) = self.jail.as_mut() {
+            j.scratch.push(canonical(path));
         }
         self
     }
@@ -158,7 +171,7 @@ impl Sandbox {
         }
         // A writable path that doesn't exist on this host (say, a cache the
         // toolchain hasn't created yet) is skipped rather than fatal.
-        for w in &j.writable {
+        for w in j.writable.iter().chain(&j.scratch) {
             c.arg("--bind-try").arg(w).arg(w);
         }
         c.arg("--bind").arg(&cwd).arg(&cwd);
