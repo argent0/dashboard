@@ -465,7 +465,7 @@ fn instances_present(root: &Path, a: &crate::config::ApiConfig, idl: &Idl) -> Re
 
 /// Every API `module` sees in its view: those it generates or consumes,
 /// plus every API they ref, transitively (their generated files name them).
-fn view_apis<'a>(cfg: &'a ArchConfig, bs: &[ApiBindings], module: &str) -> Vec<&'a crate::config::ApiConfig> {
+fn view_apis<'a>(cfg: &'a ArchConfig, idls: &BTreeMap<String, Idl>, module: &str) -> Vec<&'a crate::config::ApiConfig> {
     let mut names: Vec<&str> = cfg
         .apis
         .iter()
@@ -474,8 +474,8 @@ fn view_apis<'a>(cfg: &'a ArchConfig, bs: &[ApiBindings], module: &str) -> Vec<&
         .collect();
     let mut i = 0;
     while i < names.len() {
-        if let Some(b) = bs.iter().find(|b| b.name == names[i]) {
-            for (t, _) in b.idl.refs().into_iter().chain(b.idl.container_refs()) {
+        if let Some(idl) = idls.get(names[i]) {
+            for (t, _) in idl.refs().into_iter().chain(idl.container_refs()) {
                 if let Some(ta) = cfg.apis.iter().find(|x| x.name == t)
                     && !names.contains(&ta.name.as_str())
                 {
@@ -486,6 +486,78 @@ fn view_apis<'a>(cfg: &'a ArchConfig, bs: &[ApiBindings], module: &str) -> Vec<&
         i += 1;
     }
     cfg.apis.iter().filter(|a| names.contains(&a.name.as_str())).collect()
+}
+
+/// The paths a view of `nodes` holds (spec §6.6): each node's paths,
+/// `shared`, and for each module its APIs (`view_apis`) with their paths
+/// and, unless a TS class API, their `impl` files; then `extra`.
+/// Deduplicated, in order. A root contributes its paths only.
+pub fn view_paths(cfg: &ArchConfig, idls: &BTreeMap<String, Idl>, nodes: &[&str], extra: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |p: &String| {
+        if !out.contains(p) {
+            out.push(p.clone());
+        }
+    };
+    for n in nodes {
+        if let Some((_, paths)) = cfg.node(n) {
+            paths.iter().for_each(&mut add);
+        }
+    }
+    cfg.shared.iter().for_each(&mut add);
+    for n in nodes.iter().filter(|n| cfg.modules.iter().any(|m| m.name == **n)) {
+        for a in view_apis(cfg, idls, n) {
+            a.paths.iter().for_each(&mut add);
+            if !idls.get(&a.name).is_some_and(|idl| ts_class_api(cfg, a, idl)) {
+                a.impls.iter().for_each(&mut add);
+            }
+        }
+    }
+    extra.iter().for_each(&mut add);
+    out
+}
+
+/// Builds a view at `dir` (created fresh): copies of `paths` under `root`
+/// (a missing one is skipped), every `.gitignore` of `root` at its place so
+/// build output stays ignored there, and a symlink to each existing
+/// `linked` cache in `root`.
+pub fn build_view(root: &Path, cfg: &ArchConfig, paths: &[String], dir: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let present: Vec<String> = paths.iter().filter(|p| root.join(p).exists()).cloned().collect();
+    let mut files = expand(root, &present)?;
+    files.extend(gitignores(root, root)?);
+    for f in files {
+        let to = dir.join(&f);
+        std::fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::fs::copy(root.join(&f), &to).map_err(|e| format!("{}: {e}", f.display()))?;
+    }
+    // A missing cache is skipped: the suite check's own `cmd` builds it first.
+    for l in &cfg.linked {
+        let Ok(target) = root.join(l).canonicalize() else { continue };
+        let to = dir.join(l.trim_end_matches('/'));
+        std::fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::os::unix::fs::symlink(&target, &to).map_err(|e| format!("linked {l}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Every `.gitignore` under `at` (outside `SKIP_DIRS`), root-relative.
+fn gitignores(root: &Path, at: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    let rd = std::fs::read_dir(at).map_err(|e| format!("{}: {e}", at.display()))?;
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let path = e.path();
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            if !SKIP_DIRS.iter().any(|s| name == *s) {
+                out.extend(gitignores(root, &path)?);
+            }
+        } else if name == ".gitignore" {
+            out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+        }
+    }
+    Ok(out)
 }
 
 /// Writes the expected bindings (`write`), or lists those that differ, and
@@ -641,7 +713,7 @@ pub fn check(root: &Path, loaded: &Loaded, sandbox: &Sandbox, scratch: &Path) ->
         let Some(m) = cfg.modules.iter().find(|m| m.name == name) else { continue };
         if let Some(cmd) = &m.test_cmd {
             rep.order.push(m.name.clone());
-            if let Err(e) = run_view(root, cfg, &bs, m, cmd, sandbox, scratch) {
+            if let Err(e) = run_view(root, cfg, &loaded.idls, m, cmd, sandbox, scratch) {
                 rep.problems.push(format!("module {}: tests in its jail view: {e}", m.name));
             }
         }
@@ -717,41 +789,22 @@ fn lint(
     }
 }
 
-/// Copies only `m`'s files, its APIs' files (with the APIs they ref and
-/// their `impl` instances) and `shared` into a fresh directory under
-/// `scratch`, links each existing `linked` cache back into `root`, and runs
+/// Builds `m`'s view (`view_paths` of `[m]`) under `scratch` and runs
 /// `cmd` there (jailed if the sandbox is on).
 fn run_view(
     root: &Path,
     cfg: &ArchConfig,
-    bs: &[ApiBindings],
+    idls: &BTreeMap<String, Idl>,
     m: &ModuleConfig,
     cmd: &str,
     sandbox: &Sandbox,
     scratch: &Path,
 ) -> Result<(), String> {
     let view = scratch.join(format!("view-{}-{}", m.name, std::process::id()));
-    let _ = std::fs::remove_dir_all(&view);
-    let mut paths = m.paths.clone();
-    paths.extend(cfg.shared.iter().cloned());
-    for a in view_apis(cfg, bs, &m.name) {
-        paths.extend(a.paths.iter().cloned());
-        if !bs.iter().any(|b| b.name == a.name && ts_class_api(cfg, a, &b.idl)) {
-            paths.extend(a.impls.iter().cloned());
-        }
-    }
-    for f in expand(root, &paths)? {
-        let to = view.join(&f);
-        std::fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
-        std::fs::copy(root.join(&f), &to).map_err(|e| format!("{}: {e}", f.display()))?;
-    }
-    // A missing cache is skipped: the suite check's own `cmd` builds it first.
-    for l in &cfg.linked {
-        let Ok(target) = root.join(l).canonicalize() else { continue };
-        let to = view.join(l.trim_end_matches('/'));
-        std::fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
-        std::os::unix::fs::symlink(&target, &to).map_err(|e| format!("linked {l}: {e}"))?;
-    }
+    let paths = view_paths(cfg, idls, &[m.name.as_str()], &[]);
+    // A module's own paths must exist; `build_view` skips missing ones.
+    expand(root, &paths)?;
+    build_view(root, cfg, &paths, &view)?;
     let out = sandbox
         .command(cmd, &view)
         .env("DASHBOARD_MODULE", &m.name)
@@ -879,6 +932,27 @@ mod tests {
         let mut cyc = manifest();
         cyc["api"].as_array_mut().unwrap().push(json!({"name": "ba", "generator": "b", "consumer": "a", "paths": ["api"]}));
         assert!(arch_config_from_json(cyc).unwrap_err().contains("cycle: a -> b -> a"));
+    }
+
+    #[test]
+    fn views_of_node_sets() {
+        let d = fixture();
+        write(d.path(), "a/tests/t.sh", "true");
+        write(d.path(), "bin/main.rs", "fn main() {}");
+        write(d.path(), ".gitignore", "/target/\n");
+        write(d.path(), "a/.gitignore", "*.o\n");
+        let mut m = manifest();
+        m["root"] = json!([{"name": "cli", "lang": "rust", "paths": ["bin"]}]);
+        let l = loaded(&m);
+        assert_eq!(view_paths(&l.cfg, &l.idls, &["a", "b"], &["a/tests".into(), "stories".into()]), ["a", "b", "shared.txt", "api", "a/tests", "stories"]);
+        assert_eq!(view_paths(&l.cfg, &l.idls, &["cli"], &[]), ["bin", "shared.txt"]);
+        let view = tempfile::tempdir().unwrap();
+        let dir = view.path().join("v");
+        build_view(d.path(), &l.cfg, &view_paths(&l.cfg, &l.idls, &["a"], &["stories".into()]), &dir).unwrap();
+        for f in ["a/lib.rs", "a/tests/t.sh", "api/gen/ab.rs", "shared.txt", ".gitignore", "a/.gitignore"] {
+            assert!(dir.join(f).is_file(), "{f}");
+        }
+        assert!(!dir.join("b").exists() && !dir.join("bin").exists() && !dir.join("stories").exists());
     }
 
     #[test]
