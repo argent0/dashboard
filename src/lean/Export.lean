@@ -96,11 +96,12 @@ def opt (s : Option String) : Json := match s with | some s => s | none => Json.
 
 def Module.toJson (m : Module) : Json :=
   Json.mkObj [("name", m.name), ("lang", m.lang.toString), ("paths", strs m.paths),
-    ("max_ast", m.max_ast), ("max_bytes", m.max_bytes), ("test_cmd", opt m.test_cmd), ("lint_cmd", opt m.lint_cmd)]
+    ("max_ast", m.max_ast), ("max_bytes", m.max_bytes), ("test_cmd", opt m.test_cmd), ("lint_cmd", opt m.lint_cmd),
+    ("build_cmd", opt m.build_cmd)]
 
 def Root.toJson (r : Root) : Json :=
   Json.mkObj [("name", r.name), ("lang", r.lang.toString), ("paths", strs r.paths),
-    ("max_ast", r.max_ast), ("max_bytes", r.max_bytes)]
+    ("max_ast", r.max_ast), ("max_bytes", r.max_bytes), ("build_cmd", opt r.build_cmd)]
 
 def Api.toJson (a : Api) : Json :=
   Json.mkObj [("name", a.name), ("generator", a.generator.name), ("consumer", a.consumer.name),

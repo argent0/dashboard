@@ -40,16 +40,19 @@ structure Module where
   max_bytes : Nat := 0
   test_cmd : Option String := none
   lint_cmd : Option String := none
+  build_cmd : Option String := none
   deriving Repr, Inhabited
 
 /-- A composition root: calls modules and forwards their values. Budgeted
-like a module, story-tested only: no `test_cmd`, no view. -/
+like a module, story-tested only: no `test_cmd`, no view; `build_cmd`
+builds it in a full worktree. -/
 structure Root where
   name : String
   lang : Lang
   paths : List String := []
   max_ast : Nat := 0
   max_bytes : Nat := 0
+  build_cmd : Option String := none
   deriving Repr, Inhabited
 
 /-- What may consume an API: a module or a root. -/

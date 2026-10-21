@@ -313,6 +313,21 @@ fn checks_and_the_suite_block_export_with_their_sources() {
 }
 
 #[test]
+fn build_cmd_exports_for_modules_and_roots() {
+    let d = project();
+    let manifest = ab_with_tests()
+        .replace("test_cmd = \"cargo test -p a\"\n", "test_cmd = \"cargo test -p a\"\n  build_cmd = \"cargo build -p a\"\n")
+        + "  build_cmd = \"cargo build -p app\"\n";
+    write_lean_arch(d.path(), &manifest, &[("ab", LEAN_AB_IDL)], &[("Tests", LEAN_AB_TESTS)]);
+    let e = lean::export(&pkg(&d), &Sandbox::off()).expect("export");
+    assert_eq!(e.arch.modules[0].build_cmd.as_deref(), Some("cargo build -p a"));
+    assert_eq!(e.arch.modules[1].build_cmd, None);
+    assert_eq!(e.arch.roots[0].build_cmd.as_deref(), Some("cargo build -p app"));
+    assert_eq!(e.json["arch"]["module"][0]["build_cmd"], "cargo build -p a");
+    assert!(e.json["arch"]["module"][1]["build_cmd"].is_null());
+}
+
+#[test]
 fn impacted_is_the_run_set_of_the_named_modules() {
     let d = project();
     write_lean_arch(d.path(), &ab_with_tests(), &[("ab", LEAN_AB_IDL)], &[("Tests", LEAN_AB_TESTS)]);

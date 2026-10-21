@@ -956,7 +956,8 @@ pub struct ArchConfig {
     #[serde(rename = "module")]
     pub modules: Vec<ModuleConfig>,
     /// Composition roots: call modules and forward their values; budgeted
-    /// like a module, story-tested only (no `test_cmd`, no view).
+    /// like a module, story-tested only (no `test_cmd`, no view); a
+    /// `build_cmd` builds it in a full worktree.
     #[serde(rename = "root")]
     pub roots: Vec<RootConfig>,
     #[serde(rename = "api")]
@@ -971,6 +972,10 @@ pub struct RootConfig {
     pub paths: Vec<String>,
     pub max_ast: u64,
     pub max_bytes: u64,
+    /// Run by `dashboard build` in a full worktree of the worker's
+    /// snapshot (a root links the modules it calls), with
+    /// `DASHBOARD_MODULE` and `DASHBOARD_ROOT` set.
+    pub build_cmd: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -992,6 +997,9 @@ pub struct ModuleConfig {
     /// `{"file", "line", "message"}` findings on stdout; any finding fails
     /// the check. Runs beside the built-in contract checks, not instead.
     pub lint_cmd: Option<String>,
+    /// Run by `dashboard build` in the module's view, with
+    /// `DASHBOARD_MODULE` and `DASHBOARD_ROOT` set: compiles only.
+    pub build_cmd: Option<String>,
 }
 
 /// One API per connected pair: `consumer` consumes `generator`.
