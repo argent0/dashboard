@@ -163,9 +163,7 @@ mod tests {
                     name: n.to_string(),
                     cmd: c.to_string(),
                     runs: *runs,
-                    min_pass: 1,
-                    retry_failed: 0,
-                    retry_on: vec![],
+                    ..Check::default()
                 })
                 .collect(),
             test_paths: vec!["tests/".into()],

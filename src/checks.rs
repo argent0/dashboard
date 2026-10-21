@@ -943,8 +943,7 @@ mod tests {
             cmd: "true".into(),
             runs: 3,
             min_pass: 2,
-            retry_failed: 0,
-            retry_on: vec![],
+            ..Check::default()
         };
         let result = CheckResult {
             name: "unit".into(),
@@ -1020,8 +1019,7 @@ mod tests {
             cmd: "true".into(),
             runs: 1,
             min_pass: 1,
-            retry_failed: 0,
-            retry_on: vec![],
+            ..Check::default()
         };
         let result = CheckResult {
             name: "u".into(),

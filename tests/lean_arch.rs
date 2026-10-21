@@ -31,7 +31,7 @@ fn project() -> tempfile::TempDir {
 #[test]
 fn loads_a_lean_architecture_generates_bindings_and_checks_it() {
     let d = project();
-    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)]);
+    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
     let loaded = arch::load(d.path()).expect("load");
     assert!(loaded.lean && loaded.errors.is_empty(), "{:?}", loaded.errors);
     assert_eq!(loaded.cfg.modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["a", "b"]);
@@ -60,28 +60,28 @@ fn loads_a_lean_architecture_generates_bindings_and_checks_it() {
 fn lean_type_checks_the_manifest_and_the_tool_checks_the_rest() {
     let d = project();
     // An undeclared module, an unknown field, a ref to a type that isn't there.
-    write_lean_arch(d.path(), &LEAN_AB_MANIFEST.replace("api ab : a → b", "api ab : a → nope"), &[("ab", LEAN_AB_IDL)]);
+    write_lean_arch(d.path(), &LEAN_AB_MANIFEST.replace("api ab : a → b", "api ab : a → nope"), &[("ab", LEAN_AB_IDL)], &[]);
     let e = arch::load(d.path()).unwrap_err();
     assert!(e.contains("nope"), "{e}");
-    write_lean_arch(d.path(), &LEAN_AB_MANIFEST.replace("max_ast = 100", "max_apples = 100"), &[("ab", LEAN_AB_IDL)]);
+    write_lean_arch(d.path(), &LEAN_AB_MANIFEST.replace("max_ast = 100", "max_apples = 100"), &[("ab", LEAN_AB_IDL)], &[]);
     assert!(arch::load(d.path()).unwrap_err().contains("max_apples"));
-    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("constructor X : Id", "constructor X : Nope"))]);
+    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("constructor X : Id", "constructor X : Nope"))], &[]);
     assert!(arch::load(d.path()).unwrap_err().contains("Nope"));
     // Lean can't know a type is unused or a string unbounded: the tool does.
     // Every problem at once, not one per run.
     let unused = LEAN_AB_IDL.replace("constructor X : Id", "constructor X").replace("  type Id", "  type Extra : i64\n  type Id");
-    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &unused)]);
+    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &unused)], &[]);
     let e = arch::load(d.path()).unwrap_err();
     assert!(e.contains("Apis/ab.lean: type Extra: declared but never used\n") && e.contains("Apis/ab.lean: type Id: declared but never used"), "{e}");
-    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("string 16", "string"))]);
+    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("string 16", "string"))], &[]);
     let loaded = arch::load(d.path()).unwrap();
     let (problems, _) = report(d.path(), &loaded);
     assert!(problems.iter().any(|p| p.contains("type Id: a string or bytes type needs a max_len")), "{problems:?}");
-    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("string 16", "string 300"))]);
+    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("string 16", "string 300"))], &[]);
     let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
     assert!(problems.iter().any(|p| p.contains("string max_len 300 exceeds the api's max_string_len 256")), "{problems:?}");
     let raised = LEAN_AB_MANIFEST.replace("paths = [\"api\"]", "paths = [\"api\"]\n  max_string_len = 400");
-    write_lean_arch(d.path(), &raised, &[("ab", &LEAN_AB_IDL.replace("string 16", "string 300"))]);
+    write_lean_arch(d.path(), &raised, &[("ab", &LEAN_AB_IDL.replace("string 16", "string 300"))], &[]);
     let (problems, headroom) = report(d.path(), &arch::load(d.path()).unwrap());
     assert!(!problems.iter().any(|p| p.contains("max_string_len")), "{problems:?}");
     assert!(headroom.iter().any(|h| h.contains("string max_len 300/400")), "{headroom:?}");
@@ -113,7 +113,7 @@ fn fns_sums_elements_and_containers_export_with_their_measures() {
     write_file(d.path(), "foldable/seq.rs", "use super::Foldable;\npub struct Seq<A>(Vec<A>);\nimpl<A> Foldable<A> for Seq<A> { fn foldr<B>(&self, mut f: impl FnMut(&A, B) -> B, z: B) -> B { self.0.iter().rev().fold(z, |acc, x| f(x, acc)) } }\n");
     write_file(d.path(), "apis/foldable-db/.keep", "");
     write_file(d.path(), "apis/nutrition-db/.keep", "");
-    write_lean_arch(d.path(), MANIFEST3, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", NUTRITION_DB)]);
+    write_lean_arch(d.path(), MANIFEST3, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", NUTRITION_DB)], &[]);
     let loaded = arch::load(d.path()).expect("load");
     let idl = &loaded.idls["nutrition-db"];
     assert_eq!((idl.fn_count(), idl.inputs(), idl.constructors(), idl.slots()), (3, 3, 4, 3));
@@ -130,17 +130,17 @@ fn fns_sums_elements_and_containers_export_with_their_measures() {
     // A fn folding a container means the generator consumes that class API:
     // here `db` does. Point the class API at `nutrition` instead and it doesn't.
     let m = MANIFEST3.replace("api «foldable-db» : foldable → db", "api «foldable-db» : foldable → nutrition");
-    write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", NUTRITION_DB)]);
+    write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", NUTRITION_DB)], &[]);
     let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
     assert!(problems.iter().any(|p| p.contains("generator db must consume foldable-db")), "{problems:?}");
     // A container only returned is the consumer's to fold: no demand on db.
     let returned = NUTRITION_DB.replace("fn log : Consumptions → Written", "fn log : Name → Written");
-    write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", &returned)]);
+    write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", &returned)], &[]);
     let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
     assert!(!problems.iter().any(|p| p.contains("must consume")), "{problems:?}");
     // Taken inside a sum, it is still an input.
     let in_sum = NUTRITION_DB.replace("fn log : Consumptions → Written", "fn log : Rows → Written");
-    write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", &in_sum)]);
+    write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", &in_sum)], &[]);
     let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
     assert!(problems.iter().any(|p| p.contains("generator db must consume foldable-db")), "{problems:?}");
 }
@@ -252,7 +252,7 @@ fn refinements_and_tokens_are_elaborated_exported_budgeted_and_linted() {
     }
     write_file(r, "apis/nutrition-db/.keep", "");
     write_file(r, "apis/nutrition-web/.keep", "");
-    write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", PROOFS_IDL), ("nutrition-web", PROOFS_WEB)]);
+    write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", PROOFS_IDL), ("nutrition-web", PROOFS_WEB)], &[]);
     let loaded = arch::load(r).expect("load");
     let idl = &loaded.idls["nutrition-db"];
     assert_eq!((idl.rules(), idl.token_count(), idl.constructors(), idl.slots(), idl.inputs()), (9, 3, 8, 2, 11));
@@ -277,21 +277,21 @@ fn refinements_and_tokens_are_elaborated_exported_budgeted_and_linted() {
         ("where v.1 < v.2", "where v < 1", "a product is compared by component"),
         ("i64 × i64 where v.1 < v.2", "i64 × i64 × i64 × i64 × i64 where v.1 < v.2", "two to four components"),
     ] {
-        write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", &PROOFS_IDL.replace(from, to)), ("nutrition-web", PROOFS_WEB)]);
+        write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", &PROOFS_IDL.replace(from, to)), ("nutrition-web", PROOFS_WEB)], &[]);
         let e = arch::load(r).unwrap_err();
         assert!(e.contains(want), "{to}: {e}");
     }
     // A versioned or linear token's failure must be in the signature of
     // every fn taking it: here, and through a re-export.
-    write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", &PROOFS_IDL.replace("| Written : Id | Retired", "| Written : Id")), ("nutrition-web", PROOFS_WEB)]);
+    write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", &PROOFS_IDL.replace("| Written : Id | Retired", "| Written : Id")), ("nutrition-web", PROOFS_WEB)], &[]);
     let e = arch::load(r).unwrap_err();
     assert!(e.contains("fn tick: takes EventTypeRef (versioned), so Written must have a `Retired` constructor"), "{e}");
-    write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", PROOFS_IDL), ("nutrition-web", &PROOFS_WEB.replace("| Shown | Retired", "| Shown"))]);
+    write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", PROOFS_IDL), ("nutrition-web", &PROOFS_WEB.replace("| Shown | Retired", "| Shown"))], &[]);
     let (problems, _) = report(r, &arch::load(r).unwrap());
     assert!(problems.iter().any(|p| p.contains("api nutrition-web: fn render: takes EventTypeRef (nutrition-db.EventTypeRef, versioned), so Shown must have a `Retired` constructor")), "{problems:?}");
     // Budgets, and the mint lint: a consumer minting evidence is caught, the
     // generator is not.
-    write_lean_arch(r, &PROOFS_MANIFEST.replace("max_rules = 9", "max_rules = 8").replace("max_tokens = 3", "max_tokens = 2"), &[("nutrition-db", PROOFS_IDL), ("nutrition-web", PROOFS_WEB)]);
+    write_lean_arch(r, &PROOFS_MANIFEST.replace("max_rules = 9", "max_rules = 8").replace("max_tokens = 3", "max_tokens = 2"), &[("nutrition-db", PROOFS_IDL), ("nutrition-web", PROOFS_WEB)], &[]);
     write_file(r, "nutrition/lib.rs", "fn f() { let _p = ProductRef::mint(1); }\n");
     write_file(r, "db/lib.rs", "fn f() { let _p = ProductRef::mint(1); }\n");
     let (problems, _) = report(r, &arch::load(r).unwrap());
@@ -331,7 +331,7 @@ fn typescript_refs_import_the_target_gen_file() {
     for a in ["test-report", "test-approval", "store-approval"] {
         write_file(r, &format!("apis/{a}/.keep"), "");
     }
-    write_lean_arch(r, REFS_MANIFEST, &[("test-report", REFS_REPORT), ("test-approval", REFS_TEST_APPROVAL), ("store-approval", REFS_STORE_APPROVAL)]);
+    write_lean_arch(r, REFS_MANIFEST, &[("test-report", REFS_REPORT), ("test-approval", REFS_TEST_APPROVAL), ("store-approval", REFS_STORE_APPROVAL)], &[]);
     let loaded = arch::load(r).expect("load");
     let (_, errs) = sync_bindings(r, &loaded, true);
     assert!(errs.is_empty(), "{errs:?}");
@@ -346,4 +346,80 @@ fn typescript_refs_import_the_target_gen_file() {
         .output()
         .unwrap();
     assert!(o.status.success(), "{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+}
+
+/// The manifest of `LEAN_AB_MANIFEST` with a `test_cmd` on `a` and a root
+/// `app`: what the suite tests below cover.
+fn ab_with_tests() -> String {
+    LEAN_AB_MANIFEST.replace("max_ast = 100\n", "max_ast = 100\n  test_cmd = \"cargo test -p a\"\n")
+        + "\nroot app where\n  lang = rust\n  paths = [\"src\"]\n"
+}
+
+fn pkg(d: &tempfile::TempDir) -> std::path::PathBuf {
+    d.path().join("architecture")
+}
+
+#[test]
+fn checks_and_the_suite_block_export_with_their_sources() {
+    let d = project();
+    let worker = lean_task_tests("wcheck", "true", "[a, app]");
+    write_lean_arch(d.path(), &ab_with_tests(), &[("ab", LEAN_AB_IDL)], &[("Tests", LEAN_AB_TESTS), ("Tests/x.worker", &worker)]);
+    let e = lean::export(&pkg(&d), &Sandbox::off()).expect("export");
+    let s = &e.suite;
+    assert_eq!(s.test_paths, ["stories"]);
+    assert_eq!(s.checks.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["ab_story", "arch", "wcheck", "a"]);
+    let story = s.check("ab_story").unwrap();
+    assert_eq!((story.covers.clone(), story.all, story.files.clone()), (vec!["a".to_string(), "b".into()], false, vec!["stories".to_string()]));
+    assert_eq!(story.source.as_deref(), Some("architecture/Tests.lean"));
+    assert!(s.check("arch").unwrap().all);
+    assert_eq!(s.check("wcheck").unwrap().source.as_deref(), Some("architecture/Tests/x.worker.lean"));
+    assert_eq!(s.from_file("architecture/Tests/x.worker.lean").len(), 1);
+    // The implicit module check: `a`'s test_cmd, covering `a`.
+    let a = s.check("a").unwrap();
+    assert_eq!((a.cmd.as_str(), a.covers.clone(), a.source.as_deref()), ("cargo test -p a", vec!["a".to_string()], Some("architecture/Architecture.lean")));
+    assert_eq!(s.files_of(&["ab_story", "arch"]), ["stories"]);
+}
+
+#[test]
+fn impacted_is_the_run_set_of_the_named_modules() {
+    let d = project();
+    write_lean_arch(d.path(), &ab_with_tests(), &[("ab", LEAN_AB_IDL)], &[("Tests", LEAN_AB_TESTS)]);
+    let run = |ms: &[&str]| lean::impacted(&pkg(&d), &Sandbox::off(), &ms.iter().map(|m| m.to_string()).collect::<Vec<_>>());
+    assert_eq!(run(&["a"]).unwrap(), ["a", "ab_story", "arch"]);
+    assert_eq!(run(&["b"]).unwrap(), ["ab_story", "arch"]);
+    assert_eq!(run(&["app"]).unwrap(), ["arch"]);
+    let e = run(&["nope"]).unwrap_err();
+    assert!(e.contains("nope"), "{e}");
+}
+
+#[test]
+fn bad_checks_are_lean_errors() {
+    let d = project();
+    let with = |extra: &str| {
+        write_lean_arch(d.path(), &ab_with_tests(), &[("ab", LEAN_AB_IDL)], &[("Tests", &format!("{LEAN_AB_TESTS}\n{extra}"))]);
+        lean::export(&pkg(&d), &Sandbox::off()).map(|_| ()).unwrap_err()
+    };
+    let e = with(&lean_check("a", "true", "[a]"));
+    assert!(e.contains("already been declared"), "{e}");
+    let e = with(&lean_check("z", "true", "[zzz]"));
+    assert!(e.contains("zzz"), "{e}");
+    let e = with(&lean_check("z", "true", "3"));
+    assert!(e.contains("covers is `all` or a list of modules and roots"), "{e}");
+    let e = with("check z where\n  cmd = \"true\"\n");
+    assert!(e.contains("covers is empty"), "{e}");
+}
+
+#[test]
+fn a_fresh_package_builds_from_the_lake_cache() {
+    let d = project();
+    write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[("Tests", LEAN_AB_TESTS)]);
+    lean::export(&pkg(&d), &Sandbox::off()).expect("export");
+    let cache = lean::lake_cache_dir().unwrap().join("build");
+    assert!(cache.is_dir(), "{}", cache.display());
+    let olean = "lib/lean/Dashboard.olean";
+    let e = project();
+    write_lean_arch(e.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[("Tests", LEAN_AB_TESTS)]);
+    lean::export(&pkg(&e), &Sandbox::off()).expect("export from the cache");
+    let mtime = |p: std::path::PathBuf| std::fs::metadata(&p).and_then(|m| m.modified()).unwrap();
+    assert_eq!(mtime(pkg(&e).join(".lake/build").join(olean)), mtime(cache.join(olean)), "Dashboard.olean was rebuilt, not seeded");
 }

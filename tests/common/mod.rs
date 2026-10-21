@@ -247,12 +247,35 @@ api ab : a → b where\n  paths = [\"api\"]\n";
 pub const LEAN_AB_IDL: &str = "import Architecture\nopen Dashboard\n\nidl ab where\n  type Id : string 16\n  constructor X : Id\n  constructor Y\n";
 
 /// Writes the Lean package `architecture/` under `repo`: the vendored
-/// dashboard library, `Architecture.lean` and one `Apis/<name>.lean` per
-/// API (nothing is committed). Tests using it need `lake` on the host.
-pub fn write_lean_arch(repo: &Path, manifest: &str, apis: &[(&str, &str)]) {
+/// dashboard library, `Architecture.lean`, one `Apis/<name>.lean` per API
+/// and one `<stem>.lean` per suite file (`("Tests", …)`, `("Tests/x", …)`,
+/// `("Tests/x.worker", …)`); nothing is committed. Tests using it need
+/// `lake` on the host.
+pub fn write_lean_arch(repo: &Path, manifest: &str, apis: &[(&str, &str)], tests: &[(&str, &str)]) {
     dashboard::lean::write_vendored(repo).expect("vendor the dashboard library");
     write_file(repo, "architecture/Architecture.lean", manifest);
     for (name, idl) in apis {
         write_file(repo, &format!("architecture/Apis/{name}.lean"), idl);
     }
+    for (stem, text) in tests {
+        write_file(repo, &format!("architecture/{stem}.lean"), text);
+    }
+}
+
+/// A suite for the `a`/`b` architecture: `ab_story` covering both with its
+/// own `stories` files, `arch` covering all, and `test_paths = ["stories"]`.
+pub const LEAN_AB_TESTS: &str = "import Architecture\nopen Dashboard\n\n\
+suite where\n  test_paths = [\"stories\"]\n\n\
+check ab_story where\n  cmd = \"true\"\n  covers = [a, b]\n  files = [\"stories\"]\n\n\
+check arch where\n  cmd = \"true\"\n  covers = all\n";
+
+/// One `check` block: `covers` is `all` or a Lean list like `[a, b]`.
+pub fn lean_check(name: &str, cmd: &str, covers: &str) -> String {
+    format!("check {} where\n  cmd = {cmd:?}\n  covers = {covers}\n", dashboard::lean::ident(name))
+}
+
+/// A per-task suite file (`Tests/<slug>.lean` or `.worker.lean`) holding one
+/// check.
+pub fn lean_task_tests(name: &str, cmd: &str, covers: &str) -> String {
+    format!("import Architecture\nopen Dashboard\n\n{}", lean_check(name, cmd, covers))
 }

@@ -1300,7 +1300,7 @@ fn a_task_agent_may_commit_api_files_but_never_the_manifest() {
     ] {
         let repo = repo_with_task_agents();
         if target.starts_with("architecture/") {
-            write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)]);
+            write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
         } else {
             write_file(
                 repo.path(),

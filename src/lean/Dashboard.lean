@@ -99,6 +99,37 @@ structure Settings where
   deriving Repr, Inhabited
 
 -- ---------------------------------------------------------------------------
+-- The suite (spec §6): checks in `Tests.lean` and `Tests/*.lean`
+-- ---------------------------------------------------------------------------
+
+/-- A suite check. `covers` names the modules and roots it tests: it runs
+in a view of their files and joins the run set of a task on any of them.
+`all` (written `covers = all`) runs it in the whole worktree for every
+task. `files` are its own test files, beyond `test_paths`. -/
+structure Check where
+  name : String
+  cmd : String
+  runs : Nat := 1
+  min_pass : Nat := 1
+  retry_failed : Nat := 0
+  retry_on : List String := []
+  covers : List Node := []
+  all : Bool := false
+  files : List String := []
+  deriving Repr, Inhabited
+
+/-- The `suite where` block of `Tests.lean`. -/
+structure Suite where
+  test_paths : List String := []
+  list_cmd : Option String := none
+  deriving Repr, Inhabited
+
+/-- The run set of a task on `nodes` (spec §6.6): every check covering one
+of them, plus every `covers = all` check. The reference definition. -/
+def impacted (checks : List Check) (nodes : List Node) : List Check :=
+  checks.filter fun c => c.all || c.covers.any fun n => nodes.any (·.name == n.name)
+
+-- ---------------------------------------------------------------------------
 -- The IDL data an `idl` block exports
 -- ---------------------------------------------------------------------------
 
@@ -285,6 +316,38 @@ macro_rules
   | `(api $n:ident : $g:ident → $c:ident where $[$k:ident = $v:term]*) => do
     let s := Lean.Syntax.mkStrLit (identText n)
     `(def $n : Dashboard.Api := { name := $s, generator := $g, consumer := $c, $[$k:ident := $v:term],* })
+
+syntax (name := archCheck) "check " ident " where" manyIndent(group(ident " = " term)) : command
+syntax (name := archSuite) "suite" " where" manyIndent(group(ident " = " term)) : command
+
+/-- `covers = all` sets `all`; `covers = [a, b]` coerces each element to a
+`Node`, so modules and roots mix. A check named like a module is a
+redeclaration. -/
+macro_rules
+  | `(check $n:ident where $[$k:ident = $v:term]*) => do
+    let s := Lean.Syntax.mkStrLit (identText n)
+    let mut ks : Array Lean.Ident := #[]
+    let mut vs : Array (Lean.TSyntax `term) := #[]
+    for key in k, val in v do
+      if key.getId.eraseMacroScopes != `covers then
+        ks := ks.push key
+        vs := vs.push val
+      else if val.raw.isIdent && val.raw.getId.eraseMacroScopes == `all then
+        ks := ks.push (Lean.mkIdent `all)
+        vs := vs.push (← `(true))
+      else
+        match val with
+        | `([$xs,*]) =>
+          let elems ← xs.getElems.mapM fun x => `(($x : Dashboard.Node))
+          ks := ks.push key
+          vs := vs.push (← `([$elems,*]))
+        | _ => Lean.Macro.throwErrorAt val "covers is `all` or a list of modules and roots: covers = [a, b]"
+    `(def $n : Dashboard.Check := { name := $s, $[$ks:ident := $vs],* })
+
+macro_rules
+  | `(suite where $[$k:ident = $v:term]*) => do
+    let id := Lean.mkIdent `suite
+    `(def $id : Dashboard.Suite := { $[$k:ident := $v:term],* })
 
 -- ---------------------------------------------------------------------------
 -- The IDL DSL

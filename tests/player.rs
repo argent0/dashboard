@@ -824,7 +824,7 @@ fn a_budget_raise_needs_a_reason_and_a_small_step_and_is_noted_and_shown() {
 #[test]
 fn main_commit_of_a_lean_architecture_is_exported_cached_and_its_raises_judged() {
     let repo = director_repo();
-    write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)]);
+    write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
     commit(repo.path(), "add the lean architecture");
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());

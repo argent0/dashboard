@@ -352,6 +352,39 @@ pub struct Check {
     /// Empty means every failure is retried (while `retry_failed` lasts).
     #[serde(default)]
     pub retry_on: Vec<String>,
+    /// The modules and roots this check tests (spec §6.6): it runs in a
+    /// view of their files and joins the run set of a task on any of them.
+    #[serde(default)]
+    pub covers: Vec<String>,
+    /// `covers = all`: runs in the whole worktree, in every run set.
+    #[serde(default)]
+    pub all: bool,
+    /// The check's own test files, beyond `test_paths`: in its view, and
+    /// pinned like the check.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// The Lean file that declared it (`architecture/Tests.lean`,
+    /// `architecture/Tests/<slug>.lean`, `…/<slug>.worker.lean`, or
+    /// `architecture/Architecture.lean` for a module's `test_cmd`).
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+impl Default for Check {
+    fn default() -> Check {
+        Check {
+            name: String::new(),
+            cmd: String::new(),
+            runs: 1,
+            min_pass: 1,
+            retry_failed: 0,
+            retry_on: Vec::new(),
+            covers: Vec::new(),
+            all: false,
+            files: Vec::new(),
+            source: None,
+        }
+    }
 }
 
 fn default_runs() -> u32 {
@@ -386,6 +419,14 @@ impl Check {
                 self.name
             ));
         }
+        if self.all && !self.covers.is_empty() {
+            return Err(format!("check {:?}: covers is either all or a list", self.name));
+        }
+        for f in &self.files {
+            if f.is_empty() || f.starts_with('/') || f.split('/').any(|c| c == "..") {
+                return Err(format!("check {:?}: files {f:?} must be a relative path without ..", self.name));
+            }
+        }
         Ok(())
     }
 
@@ -396,6 +437,63 @@ impl Check {
             retry_on: Vec::new(),
             ..self.clone()
         }
+    }
+}
+
+// --------------------------------------------------------------------------
+// The suite (spec §6.2): architecture/Tests.lean and architecture/Tests/
+// --------------------------------------------------------------------------
+
+/// The director's suite file: checks and the `suite where` block.
+pub const TESTS_LEAN: &str = "architecture/Tests.lean";
+
+/// `architecture/Tests/<slug>.lean`: the task agent's (or director's) post.
+pub fn tests_file(slug: &str) -> String {
+    format!("{ARCH_DIR}/Tests/{slug}.lean")
+}
+
+/// `architecture/Tests/<slug>.worker.lean`: the worker's own checks.
+pub fn worker_tests_file(slug: &str) -> String {
+    format!("{ARCH_DIR}/Tests/{slug}.worker.lean")
+}
+
+/// Whether `path` is `Tests.lean` or under `architecture/Tests/`.
+pub fn is_tests_path(path: &str) -> bool {
+    path == TESTS_LEAN || path.starts_with("architecture/Tests/")
+}
+
+/// The project suite, from the Lean export: every declared check plus one
+/// implicit check per module with a `test_cmd`.
+#[derive(Debug, Clone, Default)]
+pub struct Suite {
+    pub checks: Vec<Check>,
+    pub test_paths: Vec<String>,
+    /// Prints the project's test inventory, one test per line (e.g. `cargo
+    /// test -- --list`). Only a `flaky-test-fix` task needs it.
+    pub list_cmd: Option<String>,
+}
+
+impl Suite {
+    pub fn check(&self, name: &str) -> Option<&Check> {
+        self.checks.iter().find(|c| c.name == name)
+    }
+
+    /// The checks declared in one Lean file.
+    pub fn from_file(&self, source: &str) -> Vec<&Check> {
+        self.checks.iter().filter(|c| c.source.as_deref() == Some(source)).collect()
+    }
+
+    /// The `files` of the named checks, deduplicated in order.
+    pub fn files_of(&self, names: &[&str]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for c in self.checks.iter().filter(|c| names.contains(&c.name.as_str())) {
+            for f in &c.files {
+                if !out.contains(f) {
+                    out.push(f.clone());
+                }
+            }
+        }
+        out
     }
 }
 
@@ -557,8 +655,8 @@ impl Evidence {
             cmd: self.cmd.clone(),
             runs: self.runs,
             min_pass: self.min_pass,
-            retry_failed: 0,
-            retry_on: Vec::new(),
+            all: true,
+            ..Check::default()
         }
     }
 
@@ -791,8 +889,8 @@ impl Claim {
             cmd: self.cmd.clone(),
             runs: self.runs,
             min_pass: self.min_pass,
-            retry_failed: 0,
-            retry_on: Vec::new(),
+            all: true,
+            ..Check::default()
         }
     }
 

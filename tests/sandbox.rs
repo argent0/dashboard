@@ -37,9 +37,7 @@ fn check(name: &str, cmd: &str) -> Check {
         name: name.to_string(),
         cmd: cmd.to_string(),
         runs: 1,
-        min_pass: 1,
-        retry_failed: 0,
-        retry_on: vec![],
+        ..Check::default()
     }
 }
 

@@ -111,6 +111,17 @@ def Api.toJson (a : Api) : Json :=
     ("max_string_len", a.max_string_len), ("max_bytes_len", a.max_bytes_len),
     ("max_rules", a.max_rules), ("max_tokens", a.max_tokens)]
 
+/-- `module` is the Lean module that declared the check as a path
+(`Tests`, `Tests/x.worker`): `dashboard` maps it back to the file. -/
+def Check.toJson (c : Check) (src : String) : Json :=
+  Json.mkObj [("name", c.name), ("cmd", c.cmd), ("runs", c.runs), ("min_pass", c.min_pass),
+    ("retry_failed", c.retry_failed), ("retry_on", strs c.retry_on),
+    ("covers", strs (c.covers.map Node.name)), ("all", c.all), ("files", strs c.files),
+    ("module", src)]
+
+def Suite.toJson (s : Suite) : Json :=
+  Json.mkObj [("test_paths", strs s.test_paths), ("list_cmd", opt s.list_cmd)]
+
 /-- A declaration's place: its module (in import order) and source position. -/
 structure Place where
   modIdx : Nat
@@ -146,6 +157,7 @@ opaque evalDeclSafe (α : Type) [Inhabited α] (n : Name) : CoreM α
 
 /-- Every declaration, as the JSON `dashboard` loads. -/
 def exportAll : CoreM Json := do
+  let env ← getEnv
   let settings ← declsOf ``Settings
   let mut errors : Array String := #[]
   let base ← match settings with
@@ -169,15 +181,43 @@ def exportAll : CoreM Json := do
     if idls.any (·.1 == i.apiName) then
       errors := errors.push s!"api {i.apiName}: more than one `idl` block"
     idls := idls.push (i.apiName, i.toJson)
+  let mut checks := #[]
+  for n in ← declsOf ``Check do
+    let src := match env.getModuleIdxFor? n with
+      | some i => (env.header.moduleNames[i.toNat]?.map fun m =>
+          "/".intercalate (m.components.map (·.toString (escape := false)))).getD ""
+      | none => ""
+    checks := checks.push (Check.toJson (← evalDeclSafe Check n) src)
+  let suiteV ← match ← declsOf ``Suite with
+    | #[n] => evalDeclSafe Suite n
+    | #[] => pure {}
+    | ns => do
+      errors := errors.push s!"more than one `suite where` block: {ns}"
+      pure {}
   let arch := Json.mkObj [("max_modules", base.max_modules), ("max_roots", base.max_roots),
     ("shared", strs base.shared), ("linked", strs base.linked), ("source_paths", strs base.source_paths),
     ("module", Json.arr modules), ("root", Json.arr roots), ("api", Json.arr apis)]
   return Json.mkObj [("arch", arch), ("idls", Json.mkObj idls.toList),
+    ("suite", suiteV.toJson), ("checks", Json.arr checks),
     ("errors", Json.arr (errors.map Json.str))]
 
 /-- Writes the export to `path`: what the generated runner calls. -/
 def exportTo (path : String) : CoreM Unit := do
   let j ← exportAll
   IO.FS.writeFile path (j.compress ++ "\n")
+
+/-- Writes the run set of `nodes` as a JSON array of check names: every
+declared check plus each module's implicit `test_cmd` check, through
+`impacted`. -/
+def impactedTo (path : String) (nodes : List Node) : CoreM Unit := do
+  let mut checks : Array Check := #[]
+  for n in ← declsOf ``Module do
+    let m ← evalDeclSafe Module n
+    if let some cmd := m.test_cmd then
+      checks := checks.push { name := m.name, cmd, covers := [m] }
+  for n in ← declsOf ``Check do
+    checks := checks.push (← evalDeclSafe Check n)
+  let names := (impacted checks.toList nodes).map (·.name)
+  IO.FS.writeFile path ((strs names).compress ++ "\n")
 
 end Dashboard

@@ -60,6 +60,7 @@ fn a_rust_class_api_with_a_typescript_consumer_generates_the_instance() {
             ("foldable-sandbox", &FOLDABLE.replace("NAME", "foldable-sandbox")),
             ("client-sandbox", CLIENT_SANDBOX),
         ],
+        &[],
     );
     // No engine/instances/foldable.rs: nothing checks it for these APIs.
     write_file(r, "engine/instances/README", "the Rust instances\n");
@@ -92,7 +93,7 @@ fn a_typescript_api_owning_container_classes_is_still_refused() {
 module client where\n  lang = typescript\n  paths = [\"web/client\"]\n\n\
 module sandbox where\n  lang = typescript\n  paths = [\"web/sandbox\"]\n\n\
 api «client-sandbox» : client → sandbox where\n  paths = [\"apis/client-sandbox\"]\n";
-    write_lean_arch(r, manifest, &[("client-sandbox", &FOLDABLE.replace("NAME", "client-sandbox"))]);
+    write_lean_arch(r, manifest, &[("client-sandbox", &FOLDABLE.replace("NAME", "client-sandbox"))], &[]);
     let loaded = arch::load(r).expect("load");
     let (_, errs) = sync_bindings(r, &loaded, false);
     assert!(errs.iter().any(|e| e.contains("a TypeScript API declares no container classes")), "{errs:?}");

@@ -1194,7 +1194,7 @@ fn finish_touching_an_api_file_or_the_manifest_is_rejected_with_pins() {
     for target in ["api/ab.rs", "architecture.toml", "architecture/Apis/ab.lean", "architecture/Architecture.lean"] {
         let repo = director_repo();
         if target.starts_with("architecture/") {
-            write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)]);
+            write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
         } else {
             write_file(
                 repo.path(),

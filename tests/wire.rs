@@ -192,7 +192,7 @@ fn a_rust_generator_and_a_typescript_consumer_meet_on_the_wire() {
     assert!(dashboard::lean::available(), "needs `lake`");
     let d = tempfile::tempdir().unwrap();
     let r = d.path();
-    write_lean_arch(r, MANIFEST, &[("foldable-db", FOLDABLE_DB), ("db-web", DB_WEB)]);
+    write_lean_arch(r, MANIFEST, &[("foldable-db", FOLDABLE_DB), ("db-web", DB_WEB)], &[]);
     write_file(r, "engine/Cargo.toml", "[package]\nname = \"engine\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde_json = \"1\"\n");
     write_file(r, "engine/src/lib.rs", ENGINE);
     write_file(r, "engine/instances/foldable.rs", SEQ);

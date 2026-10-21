@@ -33,8 +33,7 @@ fn check(name: &str, cmd: &str, runs: u32, min_pass: u32) -> Check {
         cmd: cmd.to_string(),
         runs,
         min_pass,
-        retry_failed: 0,
-        retry_on: vec![],
+        ..Check::default()
     }
 }
 
