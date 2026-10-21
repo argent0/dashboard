@@ -4796,7 +4796,7 @@ impl<S: Sessions> Player<S> {
         let pins_violations = records::check_pins(&self.hub, slug, candidate);
         if !pins_violations.is_empty() {
             let msg = format!(
-                "pins: task/{slug}'s finish claim changed, removed or added pinned files: {}",
+                "pins: task/{slug}'s finish claim changed or removed pinned files: {}",
                 pins_violations.join(", ")
             );
             return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);

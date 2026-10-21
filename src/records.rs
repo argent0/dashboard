@@ -1067,17 +1067,15 @@ pub fn is_test_speedup_at(hub: &Git, commit: &str, slug: &str) -> bool {
 }
 
 /// Every pinned path that `candidate_commit` leaves missing or changed. A
-/// slug with no recorded pins has nothing to violate. New files at
-/// `candidate_commit` that aren't in the pinned set are never violations,
-/// except a new suite file under `architecture/Tests/` on a non-spike task
-/// (the suite is the director's and the task agent's) other than the
-/// worker's own `Tests/<slug>.worker.lean`.
+/// slug with no recorded pins has nothing to violate. A new file is never a
+/// pins violation: whether the worker may add it is its scope's call
+/// (`scope_violations`, spec §8.3).
 pub fn check_pins(hub: &Git, slug: &str, candidate_commit: &str) -> Vec<String> {
     let pinned = match pinned_files(hub, slug) {
         Some(m) => m,
         None => return Vec::new(),
     };
-    let mut violations: Vec<String> = pinned
+    pinned
         .iter()
         .filter_map(
             |(path, expected)| match hub.blob_hash(candidate_commit, path) {
@@ -1085,19 +1083,7 @@ pub fn check_pins(hub: &Git, slug: &str, candidate_commit: &str) -> Vec<String> 
                 _ => Some(path.clone()),
             },
         )
-        .collect();
-    let pins_commit = hub
-        .rev_parse(&format!("refs/dashboard/pins/{slug}"))
-        .unwrap_or_default();
-    if !is_spike_at(hub, &pins_commit, slug) && !is_test_speedup_at(hub, &pins_commit, slug) {
-        let worker_file = config::worker_tests_file(slug);
-        let added = hub
-            .ls_tree_files(candidate_commit, "architecture/Tests/")
-            .into_iter()
-            .filter(|p| !pinned.contains_key(p) && *p != worker_file);
-        violations.extend(added);
-    }
-    violations
+        .collect()
 }
 
 // --------------------------------------------------------------------------

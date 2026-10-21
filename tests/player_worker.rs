@@ -520,7 +520,7 @@ fn finish_modifying_a_pinned_file_is_rejected_with_pins_and_relayed() {
 }
 
 #[test]
-fn finish_adding_a_suite_fragment_is_rejected_with_pins() {
+fn finish_adding_another_suite_file_is_a_scope_strike() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
@@ -537,7 +537,7 @@ fn finish_adding_a_suite_fragment_is_rejected_with_pins() {
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
-    assert_eq!(report.rejected[0].reason, Reason::Pins);
+    assert_eq!(report.rejected[0].reason, Reason::Scope);
     assert!(
         report.rejected[0].message.contains("architecture/Tests/extra.lean"),
         "{}",
