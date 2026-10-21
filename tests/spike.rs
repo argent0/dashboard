@@ -22,7 +22,7 @@ use tempfile::TempDir;
 // Fixtures
 // --------------------------------------------------------------------------
 
-const QUESTION: &str = "question = \"Can we produce feature.txt?\"\nwhy = \"decides the design\"\nanswers = [\"yes\", \"no\"]\n";
+const QUESTION: &str = "question = \"Can we produce src/feature.txt?\"\nwhy = \"decides the design\"\nanswers = [\"yes\", \"no\"]\n";
 
 fn init_hub(repo: &DirectorRepo) -> (TempDir, Home) {
     let home_dir = temp_home();
@@ -107,11 +107,11 @@ fn post_spike_with(
     player.tick().expect("post tick")
 }
 
-/// A baseline claim that holds on the current code: no `feature.txt` yet.
+/// A baseline claim that holds on the current code: no `src/feature.txt` yet.
 fn baseline_file(slug: &str) -> (String, String) {
     (
         format!("tasks/{slug}/baseline/1.toml"),
-        "[[claim]]\nname = \"no-feature-yet\"\ncmd = \"test ! -f feature.txt\"\n".to_string(),
+        "[[claim]]\nname = \"no-feature-yet\"\ncmd = \"test ! -f src/feature.txt\"\n".to_string(),
     )
 }
 
@@ -153,17 +153,17 @@ fn claims_toml(answer: &str, body: &str) -> String {
     format!("answer = \"{answer}\"\n\n{body}")
 }
 
-/// A spike claim that passes only where `feature.txt` exists.
+/// A spike claim that passes only where `src/feature.txt` exists.
 fn spike_claim(name: &str, supports: &str) -> String {
     format!(
-        "[[claim]]\nname = \"{name}\"\nkind = \"spike\"\nsupports = \"{supports}\"\ncmd = \"test -f feature.txt\"\n"
+        "[[claim]]\nname = \"{name}\"\nkind = \"spike\"\nsupports = \"{supports}\"\ncmd = \"test -f src/feature.txt\"\n"
     )
 }
 
 /// The files of a well-formed round-1 finish: the work, findings, claims.
 fn good_finish_files(slug: &str) -> Vec<(String, String)> {
     vec![
-        ("feature.txt".to_string(), "built\n".to_string()),
+        ("src/feature.txt".to_string(), "built\n".to_string()),
         (
             format!("tasks/{slug}/findings/1.md"),
             "It works; recommend X.\n".to_string(),
@@ -286,7 +286,7 @@ fn post_launches_with_a_base_pin_and_a_spike_prompt_and_no_suite_pins() {
     assert!(prompt.contains("find out"), "{prompt}");
     assert!(
         prompt.contains("## The question (round 1)")
-            && prompt.contains("Can we produce feature.txt?"),
+            && prompt.contains("Can we produce src/feature.txt?"),
         "{prompt}"
     );
 }
@@ -304,7 +304,7 @@ fn post_is_rejected_when_a_baseline_claim_fails_on_the_current_code() {
         "probe",
         &[(
             "tasks/probe/baseline/1.toml",
-            "[[claim]]\nname = \"wrong\"\ncmd = \"test -f feature.txt\"\n",
+            "[[claim]]\nname = \"wrong\"\ncmd = \"test -f src/feature.txt\"\n",
         )],
     );
     let msg = one_rejection(&report, Reason::Post);
@@ -402,7 +402,7 @@ fn a_valid_finish_is_tested_and_the_player_records_the_verified_answer() {
     // Claims may report measurements.
     files.push((
         "tasks/probe/claims/measure.sh".to_string(),
-        "test -f feature.txt || exit 1\necho 'METRICS {\"throughput\": 2.1}'\n".to_string(),
+        "test -f src/feature.txt || exit 1\necho 'METRICS {\"throughput\": 2.1}'\n".to_string(),
     ));
     files[2].1 = claims_toml(
         "yes",
@@ -426,7 +426,7 @@ fn a_valid_finish_is_tested_and_the_player_records_the_verified_answer() {
         (note.round, note.answer.as_str(), note.concluded),
         (1, "yes", false)
     );
-    assert_eq!(note.question, "Can we produce feature.txt?");
+    assert_eq!(note.question, "Can we produce src/feature.txt?");
     let claim = &note.claims["has-feature"];
     assert!(claim.passed);
     assert_eq!(claim.metrics, Some(serde_json::json!({"throughput": 2.1})));
@@ -531,7 +531,7 @@ fn finish_is_rejected_when_a_claim_file_is_missing_or_malformed() {
     plan_and_post(&repo, &mut player, "probe");
 
     let files = vec![
-        ("feature.txt".to_string(), "x\n".to_string()),
+        ("src/feature.txt".to_string(), "x\n".to_string()),
         (
             "tasks/probe/findings/1.md".to_string(),
             "done\n".to_string(),
@@ -632,7 +632,7 @@ fn a_baseline_claim_that_fails_on_the_base_is_rejected() {
     plan_and_post(&repo, &mut player, "probe");
 
     let mut files = good_finish_files("probe");
-    let bad = "[[claim]]\nname = \"wrong-baseline\"\nkind = \"baseline\"\ncmd = \"test -f feature.txt\"\n";
+    let bad = "[[claim]]\nname = \"wrong-baseline\"\nkind = \"baseline\"\ncmd = \"test -f src/feature.txt\"\n";
     files[2].1 = claims_toml(
         "yes",
         &format!("{}\n{bad}", spike_claim("has-feature", "yes")),
@@ -776,7 +776,7 @@ fn send_back(
     player.tick().expect("send-back tick")
 }
 
-const QUESTION_2: &str = "question = \"Can we produce feature.txt twice as fast?\"\nanswers = [\"yes\", \"no\"]\nrefines = 1\n";
+const QUESTION_2: &str = "question = \"Can we produce src/feature.txt twice as fast?\"\nanswers = [\"yes\", \"no\"]\nrefines = 1\n";
 
 #[test]
 fn send_back_adds_the_next_question_and_relays_it() {
@@ -893,7 +893,7 @@ fn send_back_rejects_an_out_of_range_refines_and_failing_baseline_claims() {
     assert!(msg.contains("refines = 7"), "{msg}");
 
     // The director's new baseline claim must hold on the *base* code, not on
-    // the worker's branch (where feature.txt now exists).
+    // the worker's branch (where src/feature.txt now exists).
     let report = send_back(
         &repo,
         &mut player,
@@ -901,7 +901,7 @@ fn send_back_rejects_an_out_of_range_refines_and_failing_baseline_claims() {
             ("tasks/probe/questions/2.toml", QUESTION_2),
             (
                 "tasks/probe/baseline/2.toml",
-                "[[claim]]\nname = \"base-has-feature\"\ncmd = \"test -f feature.txt\"\n",
+                "[[claim]]\nname = \"base-has-feature\"\ncmd = \"test -f src/feature.txt\"\n",
             ),
         ],
     );
@@ -924,7 +924,7 @@ fn a_new_baseline_claim_is_checked_against_the_base_not_the_branch() {
     plan_and_post(&repo, &mut player, "probe");
     finish_round_one(&repo, &mut player);
 
-    // Holds on the base (no feature.txt there) though not on the branch.
+    // Holds on the base (no src/feature.txt there) though not on the branch.
     let report = send_back(
         &repo,
         &mut player,
@@ -932,7 +932,7 @@ fn a_new_baseline_claim_is_checked_against_the_base_not_the_branch() {
             ("tasks/probe/questions/2.toml", QUESTION_2),
             (
                 "tasks/probe/baseline/2.toml",
-                "[[claim]]\nname = \"still-none\"\ncmd = \"test ! -f feature.txt\"\n",
+                "[[claim]]\nname = \"still-none\"\ncmd = \"test ! -f src/feature.txt\"\n",
             ),
         ],
     );
@@ -991,7 +991,7 @@ fn round_two_finish_is_judged_on_round_two_files_and_round_one_stays_pinned() {
         .unwrap();
     let files = vec![
         ("tasks/probe/findings/2.md".to_string(), "faster: no\n".to_string()),
-        ("tasks/probe/claims/2.toml".to_string(), "answer = \"no\"\n\n[[claim]]\nname = \"still-built\"\nkind = \"spike\"\nsupports = \"no\"\ncmd = \"test -f feature.txt\"\n".to_string()),
+        ("tasks/probe/claims/2.toml".to_string(), "answer = \"no\"\n\n[[claim]]\nname = \"still-built\"\nkind = \"spike\"\nsupports = \"no\"\ncmd = \"test -f src/feature.txt\"\n".to_string()),
     ];
     let report = finish_with(&repo, &mut player, "probe", &files);
     assert!(report.rejected.is_empty(), "{report}");

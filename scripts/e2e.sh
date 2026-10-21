@@ -256,7 +256,7 @@ FAKE_AGENT_EOF
 # Launched with "Step: post" in its prompt, it copies the post the scenario
 # prepared for its slug ($TA_TEMPLATES/<slug>/) into its worktree, commits it
 # on agent/<slug> and reports `posted`. Then it watches the hub: once the
-# worker's work (<slug>.txt) is on task/<slug>, it reports `accept`.
+# worker's work (<slug>.txt, or <slug>/<slug>.txt) is on task/<slug>, it reports `accept`.
 # --------------------------------------------------------------------------
 
 write_fake_task_agent() {
@@ -295,7 +295,7 @@ end=$(($(date +%s) + 60))
 while [ "$(date +%s)" -lt "$end" ]; do
   git fetch -q origin || true
   tip=$(git rev-parse "origin/task/$slug" 2>/dev/null || echo "")
-  if [ -n "$tip" ] && [ "$tip" != "$reviewed" ] && git cat-file -e "$tip:$slug.txt" 2>/dev/null; then
+  if [ -n "$tip" ] && [ "$tip" != "$reviewed" ] && { git cat-file -e "$tip:$slug.txt" 2>/dev/null || git cat-file -e "$tip:$slug/$slug.txt" 2>/dev/null; }; then
     git merge -q --ff-only "origin/task/$slug" || true
     write_report "review r1" accept
     reviewed=$tip
@@ -346,8 +346,14 @@ EOF
 # with a suite of one check.
 "$BIN" arch gen --root "$DIR_REPO" >/dev/null
 task_tests "$DIR_REPO/architecture/Tests.lean" baseline true
-# One root, `app`, for the tasks to name in `modules`.
-printf '\nroot app where\n  lang = rust\n  paths = ["src"]\n' >>"$DIR_REPO/architecture/Architecture.lean"
+# One root, `app`, for the tasks to name in `modules`: it owns the files
+# the fake workers write (a worker writes only inside its task's modules).
+APP_ROOT='
+root app where
+  lang = rust
+  paths = ["src", "feature.txt", "feature2.txt", "featureb.txt", "gamma.txt", "delta.txt", "shared.txt", "eta.txt", "epsilon.txt"]
+'
+printf '%s' "$APP_ROOT" >>"$DIR_REPO/architecture/Architecture.lean"
 
 # Step 7c's suite check builds this cache in the checkout: ignored build
 # output, which the jail's clean-worktree check allows.
@@ -839,6 +845,13 @@ module zeta where
   max_bytes = 100000
   test_cmd = "[ -z \"$DASHBOARD_MODULE\" ] || { test -L cache && test \"$(cat cache/built)\" = ok && test \"$DASHBOARD_MODULE\" = zeta && test -f zeta/lib.rs; }"
 EOF
+# `arch check` wants every path to exist: the root owns what main has.
+cat >>"$DIR_REPO/architecture/Architecture.lean" <<'EOF'
+
+root app where
+  lang = rust
+  paths = ["feature.txt", "feature2.txt", "gamma.txt", "delta.txt", "shared.txt", "eta.txt", "epsilon.txt"]
+EOF
 git -C "$DIR_REPO" add architecture
 git -C "$DIR_REPO" commit -q -m "architecture: one module, a linked cache"
 hub_has_arch() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:architecture/Architecture.lean 2>/dev/null | grep -q zeta; }
@@ -846,8 +859,8 @@ wait_until "Architecture.lean with zeta on main" hub_has_arch
 
 arch_cmd="mkdir -p cache && echo ok > cache/built && $BIN arch check --root ."
 mkdir -p "$TA_TEMPLATES/zeta/tasks/zeta"
-echo "Create zeta/lib.rs and zeta.txt." >"$TA_TEMPLATES/zeta/tasks/zeta/prompt.md"
-printf '#!/bin/sh\nmkdir -p zeta\necho "pub fn z() {}" > zeta/lib.rs\necho ok > zeta.txt\n' >"$TA_TEMPLATES/zeta/tasks/zeta/agent.sh"
+echo "Create zeta/lib.rs and zeta/zeta.txt." >"$TA_TEMPLATES/zeta/tasks/zeta/prompt.md"
+printf '#!/bin/sh\nmkdir -p zeta\necho "pub fn z() {}" > zeta/lib.rs\necho ok > zeta/zeta.txt\n' >"$TA_TEMPLATES/zeta/tasks/zeta/agent.sh"
 task_tests "$TA_TEMPLATES/zeta/architecture/Tests/zeta.lean" zeta-arch "$arch_cmd"
 
 git -C "$DIR_REPO" checkout -q -b task/zeta main

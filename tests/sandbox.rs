@@ -207,7 +207,7 @@ fn an_impure_task_check_cannot_stand_in_for_a_failing_one_at_post() {
     assert!(report.rejected.is_empty(), "{report}");
 
     // Fails (exit 1), but only after dirtying its worktree.
-    let cmd = "touch scratch.txt; test -f feature.txt";
+    let cmd = "touch scratch.txt; test -f src/feature.txt";
     write_file(repo.path(), "tasks/a/prompt.md", "do it\n");
     write_file(
         repo.path(),
@@ -363,7 +363,7 @@ fn a_task_check_failing_only_against_the_jail_cannot_be_posted() {
     player.tick().unwrap();
 
     // It "fails", but only because $HOME is read-only in the jail.
-    let cmd = "echo seen > \"$HOME/.dashboard-test-state\" && test -f feature.txt";
+    let cmd = "echo seen > \"$HOME/.dashboard-test-state\" && test -f src/feature.txt";
     write_file(repo.path(), "tasks/a/prompt.md", "do it\n");
     write_file(
         repo.path(),
@@ -429,7 +429,7 @@ fn a_held_launch_is_reported_once_per_tip() {
 
     // A post that went in before the player could tell its task check is
     // impure (say, under an older player): put straight into the hub.
-    let cmd = "touch scratch.txt; test -f feature.txt";
+    let cmd = "touch scratch.txt; test -f src/feature.txt";
     write_file(repo.path(), "tasks/a/prompt.md", "do it\n");
     write_file(
         repo.path(),

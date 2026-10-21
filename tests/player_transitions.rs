@@ -76,7 +76,7 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task
 }
 
 /// Posts `slug` (already planned and `ready`) with a task check
-/// `test -f feature.txt` (fails until a "worker" creates that file) and
+/// `test -f src/feature.txt` (fails until a "worker" creates that file) and
 /// the matching check in `architecture/Tests/<slug>.lean`. Ticks and asserts the post was
 /// imported.
 fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
@@ -90,13 +90,13 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n"
         ),
     );
     write_file(
         repo.path(),
         &*tests_file(&slug),
-        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n")),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
@@ -109,11 +109,11 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
 }
 
 /// Simulates the worker finishing `slug`: pushes a commit adding
-/// `feature.txt` straight onto the hub's task branch and records it as a
+/// `src/feature.txt` straight onto the hub's task branch and records it as a
 /// validated finish claim (step 6 isn't implemented yet — see the module
 /// doc comment).
 fn finish(home: &Home, hub: &Git, slug: &str) -> String {
-    let sha = worker_commit(&home.hub(), slug, "feature.txt", "done\n", "finish work");
+    let sha = worker_commit(&home.hub(), slug, "src/feature.txt", "done\n", "finish work");
     records::record_import(hub, &sha, Actor::Worker, Transition::Finish, Some(slug))
         .expect("record finish import");
     sha
@@ -210,16 +210,16 @@ fn post_rejected_when_the_task_check_already_passes() {
     write_file(
         repo.path(),
         "tasks/eager/task.toml",
-        "title = \"Eager\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"eager-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"Eager\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"eager-check\"\ncmd = \"test -f src/feature.txt\"\n",
     );
     write_file(
         repo.path(),
         &*tests_file("eager"),
-        &*task_suite_lean("[[check]]\nname = \"eager-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"eager-check\"\ncmd = \"test -f src/feature.txt\"\n"),
     );
     // The director's mistake: the file already exists, so the check already
     // passes at post — it must fail (spec §3.1).
-    write_file(repo.path(), "feature.txt", "oops, already done\n");
+    write_file(repo.path(), "src/feature.txt", "oops, already done\n");
     commit(repo.path(), "post: eager (check already passes)");
 
     let report = player.tick().expect("tick should succeed");
@@ -254,12 +254,12 @@ fn post_rejected_when_dependencies_are_not_accepted() {
     write_file(
         repo.path(),
         "tasks/b/task.toml",
-        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f src/feature.txt\"\n",
     );
     write_file(
         repo.path(),
         &*tests_file("b"),
-        &*task_suite_lean("[[check]]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"b-check\"\ncmd = \"test -f src/feature.txt\"\n"),
     );
     commit(repo.path(), "post: b (a not accepted yet)");
 
@@ -299,7 +299,7 @@ fn post_rejected_when_the_suite_fragment_is_missing() {
     write_file(
         repo.path(),
         "tasks/notests/task.toml",
-        "title = \"No tests entry\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"notests-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"No tests entry\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"notests-check\"\ncmd = \"test -f src/feature.txt\"\n",
     );
     // architecture/Tests/notests.lean deliberately not added.
     commit(repo.path(), "post: notests (forgot its Tests file)");
@@ -336,13 +336,13 @@ fn post_rejected_when_the_task_check_goes_in_tests_lean() {
     write_file(
         repo.path(),
         "tasks/shared/task.toml",
-        "title = \"Shared\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"shared-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"Shared\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"shared-check\"\ncmd = \"test -f src/feature.txt\"\n",
     );
     // The old shape: appended to the file every parallel post would edit.
     write_file(
         repo.path(),
         TESTS_LEAN,
-        &*suite_lean("[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"shared-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*suite_lean("[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"shared-check\"\ncmd = \"test -f src/feature.txt\"\n"),
     );
     commit(repo.path(), "post: shared (check in Tests.lean)");
 
@@ -375,12 +375,12 @@ fn post_rejected_when_a_check_name_is_declared_twice() {
     write_file(
         repo.path(),
         "tasks/dup/task.toml",
-        "title = \"Dup\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"unit\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"Dup\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"unit\"\ncmd = \"test -f src/feature.txt\"\n",
     );
     write_file(
         repo.path(),
         &*tests_file("dup"),
-        &*task_suite_lean("[[check]]\nname = \"unit\"\ncmd = \"test -f feature.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"unit\"\ncmd = \"test -f src/feature.txt\"\n"),
     );
     commit(repo.path(), "post: dup (reuses Tests.lean's check name)");
 
@@ -424,12 +424,12 @@ fn post_rejected_when_a_dependency_is_accepted_but_not_yet_merged_into_the_branc
     write_file(
         repo.path(),
         "tasks/b/task.toml",
-        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f src/feature.txt\"\n",
     );
     write_file(
         repo.path(),
         &*tests_file("b"),
-        &*task_suite_lean("[[check]]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"b-check\"\ncmd = \"test -f src/feature.txt\"\n"),
     );
     commit(repo.path(), "post: b (branch never merged a's acceptance)");
 
@@ -462,12 +462,12 @@ fn send_back_happy_path() {
     write_file(
         repo.path(),
         &*tests_file("x"),
-        &*task_suite_lean("[[check]]\nname = \"x-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"x-check\"\ncmd = \"test -f src/feature.txt && test -f src/feature2.txt\"\n"),
     );
     write_file(
         repo.path(),
         "tasks/x/reviews/r1.md",
-        "Please also add feature2.txt\n",
+        "Please also add src/feature2.txt\n",
     );
     commit(repo.path(), "send-back: x r1");
 
@@ -481,7 +481,7 @@ fn send_back_happy_path() {
     assert_eq!(sent[0].0, "x");
     assert!(sent[0].1.contains("Review round 1"), "{}", sent[0].1);
     assert!(
-        sent[0].1.contains("Please also add feature2.txt"),
+        sent[0].1.contains("Please also add src/feature2.txt"),
         "{}",
         sent[0].1
     );
@@ -536,7 +536,7 @@ fn send_back_rejected_with_the_wrong_round_number() {
     write_file(
         repo.path(),
         &*tests_file("z"),
-        &*task_suite_lean("[[check]]\nname = \"z-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"z-check\"\ncmd = \"test -f src/feature.txt && test -f src/feature2.txt\"\n"),
     );
     write_file(repo.path(), "tasks/z/reviews/r2.md", "skipping ahead\n");
     commit(repo.path(), "send-back: z r2 (wrong round)");
@@ -565,7 +565,7 @@ fn send_back_rejected_when_touching_a_non_test_path() {
     write_file(
         repo.path(),
         &*tests_file("w"),
-        &*task_suite_lean("[[check]]\nname = \"w-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"w-check\"\ncmd = \"test -f src/feature.txt && test -f src/feature2.txt\"\n"),
     );
     write_file(
         repo.path(),
@@ -608,12 +608,12 @@ fn send_back_exceeding_max_review_rounds_escalates_instead_of_importing() {
     write_file(
         repo.path(),
         &*tests_file("v"),
-        &*task_suite_lean("[[check]]\nname = \"v-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"v-check\"\ncmd = \"test -f src/feature.txt && test -f src/feature2.txt\"\n"),
     );
     write_file(
         repo.path(),
         "tasks/v/reviews/r1.md",
-        "add feature2.txt too\n",
+        "add src/feature2.txt too\n",
     );
     commit(repo.path(), "send-back: v r1");
     let report = player.tick().expect("tick should succeed");
@@ -624,7 +624,7 @@ fn send_back_exceeding_max_review_rounds_escalates_instead_of_importing() {
     let finish2 = worker_commit(
         &home.hub(),
         "v",
-        "feature2.txt",
+        "src/feature2.txt",
         "done\n",
         "finish work round 2",
     );

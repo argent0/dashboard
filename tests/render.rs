@@ -56,7 +56,7 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
     );
 }
 
-/// Posts `slug` with a task check that fails until `feature.txt` exists, and
+/// Posts `slug` with a task check that fails until `src/feature.txt` exists, and
 /// ticks (which also launches the worker, via `NullSessions`).
 fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
     checkout_branch(repo.path(), &format!("task/{slug}"));
@@ -69,13 +69,13 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug} title\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
+            "title = \"{slug} title\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n"
         ),
     );
     write_file(
         repo.path(),
         &*tests_file(&slug),
-        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n")),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
@@ -95,7 +95,7 @@ fn finish(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
         .expect("set user.email");
     git.run(&["config", "commit.gpgsign", "false"])
         .expect("disable gpgsign");
-    write_file(&dir, "feature.txt", "done\n");
+    write_file(&dir, "src/feature.txt", "done\n");
     commit(&dir, "finish work");
     let report = player.tick().expect("finish tick should succeed");
     assert_eq!(report.imported.len(), 1, "{report}");

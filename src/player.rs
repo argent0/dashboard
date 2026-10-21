@@ -4705,7 +4705,7 @@ impl<S: Sessions> Player<S> {
         let pins_violations = records::check_pins(&self.hub, slug, candidate);
         if !pins_violations.is_empty() {
             let msg = format!(
-                "pins: task/{slug}'s finish claim changed or removed pinned files (or added a suite file under architecture/Tests/): {}",
+                "pins: task/{slug}'s finish claim changed, removed or added pinned files: {}",
                 pins_violations.join(", ")
             );
             return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
@@ -4713,6 +4713,17 @@ impl<S: Sessions> Player<S> {
 
         if records::is_spike_at(&self.hub, hub_tip, slug) {
             return self.finish_spike(slug, hub_tip, candidate, report);
+        }
+
+        if records::task_config_at(&self.hub, hub_tip, slug).is_some_and(|c| c.kind == TaskKind::Task) {
+            let out = records::scope_violations(&self.hub, slug, hub_tip, candidate, Some(self.runner.exporter()));
+            if !out.is_empty() {
+                let msg = format!(
+                    "scope: task/{slug}'s finish claim writes outside its modules: {} (run `dashboard scope`)",
+                    out.join(", ")
+                );
+                return self.reject_and_relay(slug, candidate, Reason::Scope, msg, report);
+            }
         }
 
         if let Some(stray) = self.flaky_scope_violations(slug, hub_tip, candidate) {

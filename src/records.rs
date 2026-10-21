@@ -912,10 +912,17 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     // is its to change): the player's scope check (`test_speedup_scope`)
     // fences it in instead.
     let speedup = is_test_speedup_at(hub, &commit, slug);
+    let worker_file = config::worker_tests_file(slug);
     if !is_spike_at(hub, &commit, slug) && !speedup {
         if let Ok(suite) = suite_at(hub, &commit, None) {
             for test_path in &suite.test_paths {
                 add_pinned_path(hub, &commit, test_path, &mut map);
+            }
+            // Every check's own files, but those of the worker's checks.
+            for c in suite.checks.iter().filter(|c| c.source.as_deref() != Some(worker_file.as_str())) {
+                for f in &c.files {
+                    add_pinned_path(hub, &commit, f, &mut map);
+                }
             }
         }
     }
@@ -930,6 +937,8 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
         if speedup {
             map.retain(|p, _| !config::is_tests_path(p));
         }
+        // The worker's own checks are its to write (spec §8.3).
+        map.remove(&worker_file);
         if let Some(arch) = arch_at(hub, &commit) {
             for api in arch.api_paths() {
                 add_pinned_path(hub, &commit, &api, &mut map);
@@ -1060,8 +1069,9 @@ pub fn is_test_speedup_at(hub: &Git, commit: &str, slug: &str) -> bool {
 /// Every pinned path that `candidate_commit` leaves missing or changed. A
 /// slug with no recorded pins has nothing to violate. New files at
 /// `candidate_commit` that aren't in the pinned set are never violations,
-/// except a new suite file under `architecture/Tests/` on a non-spike task:
-/// the suite is the director's and the task agent's.
+/// except a new suite file under `architecture/Tests/` on a non-spike task
+/// (the suite is the director's and the task agent's) other than the
+/// worker's own `Tests/<slug>.worker.lean`.
 pub fn check_pins(hub: &Git, slug: &str, candidate_commit: &str) -> Vec<String> {
     let pinned = match pinned_files(hub, slug) {
         Some(m) => m,
@@ -1080,13 +1090,95 @@ pub fn check_pins(hub: &Git, slug: &str, candidate_commit: &str) -> Vec<String> 
         .rev_parse(&format!("refs/dashboard/pins/{slug}"))
         .unwrap_or_default();
     if !is_spike_at(hub, &pins_commit, slug) && !is_test_speedup_at(hub, &pins_commit, slug) {
+        let worker_file = config::worker_tests_file(slug);
         let added = hub
             .ls_tree_files(candidate_commit, "architecture/Tests/")
             .into_iter()
-            .filter(|p| !pinned.contains_key(p));
+            .filter(|p| !pinned.contains_key(p) && *p != worker_file);
         violations.extend(added);
     }
     violations
+}
+
+// --------------------------------------------------------------------------
+// Worker scope (spec §8.3)
+// --------------------------------------------------------------------------
+
+/// What a task's worker may write and what judges it, read at `tip`.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    pub modules: Vec<String>,
+    /// Paths (files and directory prefixes) the worker may write: each
+    /// module's and root's paths, `shared`, its worker file and the `files`
+    /// of the checks that file declares.
+    pub paths: Vec<String>,
+    pub worker_file: String,
+    /// The task's run set (check names).
+    pub run_set: Vec<String>,
+}
+
+/// The scope of `slug`'s worker at `tip`.
+pub fn scope_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::lean::Exporter>) -> Result<Scope, String> {
+    let cfg = task_config_at(hub, tip, slug).ok_or_else(|| format!("tasks/{slug}/task.toml missing or invalid at {tip}"))?;
+    let e = exported_at(hub, tip, exporter)?.ok_or_else(|| format!("no {} at {tip}", config::ARCH_LEAN_MANIFEST))?;
+    let worker_file = config::worker_tests_file(slug);
+    let mut paths: Vec<String> = Vec::new();
+    for m in &cfg.modules {
+        if let Some((_, ps)) = e.arch.node(m) {
+            paths.extend(ps.iter().cloned());
+        }
+    }
+    paths.extend(e.arch.shared.iter().cloned());
+    paths.push(worker_file.clone());
+    for c in e.suite.from_file(&worker_file) {
+        paths.extend(c.files.iter().cloned());
+    }
+    paths.dedup();
+    let run_set = if cfg.modules.is_empty() {
+        e.suite.checks.iter().map(|c| c.name.clone()).collect()
+    } else {
+        impacted_at(hub, tip, &cfg.modules, exporter)?
+    };
+    Ok(Scope { modules: cfg.modules, paths, worker_file, run_set })
+}
+
+/// What `candidate` (a worker's finish on `slug`) does beyond its scope at
+/// `tip`: a check of its worker file that covers `all` or a node outside
+/// `modules`, then every changed path outside the scope (widened by the
+/// `files` of the candidate's own worker checks). Empty: within scope.
+pub fn scope_violations(
+    hub: &Git,
+    slug: &str,
+    tip: &str,
+    candidate: &str,
+    exporter: Option<&crate::lean::Exporter>,
+) -> Vec<String> {
+    let scope = match scope_at(hub, slug, tip, exporter) {
+        Ok(s) => s,
+        Err(e) => return vec![e],
+    };
+    let cand = match suite_at(hub, candidate, exporter) {
+        Ok(s) => s,
+        Err(e) => return vec![e],
+    };
+    let mut out = Vec::new();
+    let mut paths = scope.paths.clone();
+    for c in cand.from_file(&scope.worker_file) {
+        if c.all {
+            out.push(format!("check {} covers all, outside modules", c.name));
+        }
+        for n in c.covers.iter().filter(|n| !scope.modules.contains(n)) {
+            out.push(format!("check {} covers {n}, outside modules", c.name));
+        }
+        paths.extend(c.files.iter().cloned());
+    }
+    out.extend(
+        hub.diff_names(tip, candidate)
+            .into_iter()
+            .map(|(_, p)| p)
+            .filter(|p| !config::path_under_test_paths(p, &paths)),
+    );
+    out
 }
 
 // --------------------------------------------------------------------------

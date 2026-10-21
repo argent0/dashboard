@@ -78,7 +78,7 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task
 }
 
 /// Posts `slug` (already planned and `ready`) with a task check
-/// `test -f feature.txt` (fails until the "worker" creates that file) and
+/// `test -f src/feature.txt` (fails until the "worker" creates that file) and
 /// the matching check in `architecture/Tests/<slug>.lean`. Ticks (which also launches the worker,
 /// per step 6) and returns the report so callers can inspect `launched`/
 /// `errors` too.
@@ -93,13 +93,13 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n"
         ),
     );
     write_file(
         repo.path(),
         &*tests_file(&slug),
-        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n")),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
@@ -299,12 +299,12 @@ fn launch_skipped_with_an_error_when_the_clone_dir_already_exists() {
     write_file(
         repo.path(),
         "tasks/leftover/task.toml",
-        "title = \"Leftover\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"leftover-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"Leftover\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"leftover-check\"\ncmd = \"test -f src/feature.txt\"\n",
     );
     write_file(
         repo.path(),
         &*tests_file("leftover"),
-        &*task_suite_lean("[[check]]\nname = \"leftover-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"leftover-check\"\ncmd = \"test -f src/feature.txt\"\n"),
     );
     commit(repo.path(), "post: leftover");
 
@@ -346,7 +346,7 @@ fn finish_happy_path_is_tested_with_a_note_sent() {
     let mut player = open_player(&home);
 
     plan_and_post(&repo, &mut player, "x");
-    commit_in_clone(&repo, "x", "feature.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "x", "src/feature.txt", "done\n", "finish work");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.imported.len(), 1, "{report}");
@@ -400,7 +400,7 @@ fn messages_come_from_prompts_kdl_on_main() {
     assert_eq!(report.imported.len(), 1, "{report}");
 
     plan_and_post(&repo, &mut player, "x");
-    commit_in_clone(&repo, "x", "feature.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "x", "src/feature.txt", "done\n", "finish work");
     player.tick().expect("tick should succeed");
     let sent = &player.sessions().sent;
     assert!(
@@ -429,7 +429,7 @@ fn accept_removes_the_worker_worktree() {
         "worktree should exist right after launch"
     );
 
-    commit_in_clone(&repo, "x", "feature.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "x", "src/feature.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
     assert_eq!(task_status(&hub, "x"), Status::Tested);
 
@@ -557,7 +557,7 @@ fn finish_with_a_failing_suite_is_rejected_then_a_fix_on_top_passes() {
     commit_in_clone(
         &repo,
         "z",
-        "unrelated.txt",
+        "src/unrelated.txt",
         "still working\n",
         "not done yet",
     );
@@ -574,37 +574,13 @@ fn finish_with_a_failing_suite_is_rejected_then_a_fix_on_top_passes() {
     assert_ne!(task_status(&hub, "z"), Status::Tested);
 
     // The cumulative diff from the hub tip includes both commits: adding
-    // feature.txt now makes it pass even though the first commit alone did
+    // src/feature.txt now makes it pass even though the first commit alone did
     // not (spec's "each is a finish claim, validated cumulatively").
-    commit_in_clone(&repo, "z", "feature.txt", "done\n", "actually finish it");
+    commit_in_clone(&repo, "z", "src/feature.txt", "done\n", "actually finish it");
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.imported.len(), 1, "{report}");
     assert_eq!(report.imported[0].2, Transition::Finish);
     assert_eq!(task_status(&hub, "z"), Status::Tested);
-}
-
-#[test]
-fn worker_adding_a_new_test_file_is_allowed() {
-    let repo = director_repo();
-    let (_home_dir, home) = init_hub(&repo);
-    let hub = Git::new(home.hub());
-    let mut player = open_player(&home);
-
-    plan_and_post(&repo, &mut player, "w");
-    commit_multi_in_clone(
-        &repo,
-        "w",
-        &[
-            ("feature.txt", "done\n"),
-            ("tests/extra_test.txt", "some new test scaffolding\n"),
-        ],
-        "finish, plus a new test file",
-    );
-
-    let report = player.tick().expect("tick should succeed");
-    assert_eq!(report.imported.len(), 1, "{report}");
-    assert_eq!(report.imported[0].2, Transition::Finish);
-    assert_eq!(task_status(&hub, "w"), Status::Tested);
 }
 
 #[test]
@@ -658,7 +634,7 @@ fn worker_commit_built_on_a_stale_pre_send_back_tip_is_diverged_history() {
     let mut player = open_player(&home);
 
     plan_and_post(&repo, &mut player, "d");
-    commit_in_clone(&repo, "d", "feature.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "d", "src/feature.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
     assert_eq!(task_status(&hub, "d"), Status::Tested);
 
@@ -666,12 +642,12 @@ fn worker_commit_built_on_a_stale_pre_send_back_tip_is_diverged_history() {
     write_file(
         repo.path(),
         &*tests_file("d"),
-        &*task_suite_lean("[[check]]\nname = \"d-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"d-check\"\ncmd = \"test -f src/feature.txt && test -f src/feature2.txt\"\n"),
     );
     write_file(
         repo.path(),
         "tasks/d/reviews/r1.md",
-        "add feature2.txt too\n",
+        "add src/feature2.txt too\n",
     );
     commit(repo.path(), "send-back: d r1");
     let report = player.tick().expect("send-back tick should succeed");
@@ -684,7 +660,7 @@ fn worker_commit_built_on_a_stale_pre_send_back_tip_is_diverged_history() {
     commit_in_clone(
         &repo,
         "d",
-        "feature2.txt",
+        "src/feature2.txt",
         "done too\n",
         "add feature2 without pulling first",
     );
@@ -751,7 +727,7 @@ fn two_suite_strikes_escalate_and_the_second_rejection_is_not_relayed() {
     commit_in_clone(
         &repo,
         "s",
-        "attempt1.txt",
+        "src/attempt1.txt",
         "no feature yet\n",
         "attempt 1 (suite still fails)",
     );
@@ -770,7 +746,7 @@ fn two_suite_strikes_escalate_and_the_second_rejection_is_not_relayed() {
     commit_in_clone(
         &repo,
         "s",
-        "attempt2.txt",
+        "src/attempt2.txt",
         "still no feature\n",
         "attempt 2 (suite still fails)",
     );
@@ -802,7 +778,7 @@ fn full_loop_post_finish_send_back_fix_finish_accept() {
     let mut player = open_player(&home);
 
     plan_and_post(&repo, &mut player, "full");
-    commit_in_clone(&repo, "full", "feature.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "full", "src/feature.txt", "done\n", "finish work");
     let report = player.tick().expect("finish tick should succeed");
     assert_eq!(report.imported[0].2, Transition::Finish);
     assert_eq!(task_status(&hub, "full"), Status::Tested);
@@ -811,12 +787,12 @@ fn full_loop_post_finish_send_back_fix_finish_accept() {
     write_file(
         repo.path(),
         &*tests_file("full"),
-        &*task_suite_lean("[[check]]\nname = \"full-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"full-check\"\ncmd = \"test -f src/feature.txt && test -f src/feature2.txt\"\n"),
     );
     write_file(
         repo.path(),
         "tasks/full/reviews/r1.md",
-        "please also add feature2.txt\n",
+        "please also add src/feature2.txt\n",
     );
     commit(repo.path(), "send-back: full r1");
     let report = player.tick().expect("send-back tick should succeed");
@@ -843,7 +819,7 @@ fn full_loop_post_finish_send_back_fix_finish_accept() {
     commit_in_clone(
         &repo,
         "full",
-        "feature2.txt",
+        "src/feature2.txt",
         "done too\n",
         "address the review",
     );
@@ -1089,7 +1065,7 @@ fn reset_refuses_every_other_escalation_and_a_task_not_escalated() {
     // Strikes at their limit outrank even a relaunch-limit record.
     plan_and_post(&repo, &mut player, "s");
     for n in 1..=2 {
-        commit_in_clone(&repo, "s", &format!("a{n}.txt"), "no\n", "suite fails");
+        commit_in_clone(&repo, "s", &format!("src/a{n}.txt"), "no\n", "suite fails");
         player.tick().expect("tick");
     }
     assert_eq!(task_status(&hub, "s"), Status::Escalated);
@@ -1119,7 +1095,7 @@ fn progress_on_the_task_branch_starts_the_relaunch_count_over() {
     assert_eq!(relaunches(&hub, "p"), 2);
 
     // The worker's finish is progress.
-    commit_in_clone(&repo, "p", "feature.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "p", "src/feature.txt", "done\n", "finish work");
     player.tick().expect("finish tick");
     assert_eq!(task_status(&hub, "p"), Status::Tested);
     assert_eq!(relaunches(&hub, "p"), 0);
@@ -1129,9 +1105,9 @@ fn progress_on_the_task_branch_starts_the_relaunch_count_over() {
     write_file(
         repo.path(),
         &*tests_file("p"),
-        &*task_suite_lean("[[check]]\nname = \"p-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"p-check\"\ncmd = \"test -f src/feature.txt && test -f src/feature2.txt\"\n"),
     );
-    write_file(repo.path(), "tasks/p/reviews/r1.md", "add feature2.txt\n");
+    write_file(repo.path(), "tasks/p/reviews/r1.md", "add src/feature2.txt\n");
     commit(repo.path(), "send-back: p r1");
     player.tick().expect("send-back tick");
     assert_eq!(task_status(&hub, "p"), Status::InRevision);
@@ -1205,5 +1181,109 @@ fn finish_touching_an_api_file_or_the_manifest_is_rejected_with_pins() {
         let report = player.tick().expect("tick should succeed");
         assert_eq!(report.rejected.len(), 1, "{target}: {report}");
         assert_eq!(report.rejected[0].reason, Reason::Pins, "{target}");
+    }
+}
+
+// --------------------------------------------------------------------------
+// Worker scope (spec §8.3)
+// --------------------------------------------------------------------------
+
+/// Main's suite on the `a`/`b` architecture: `unit` (all) and `story`
+/// covering both, with its own file `stories/s.sh`.
+const AB_SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+check unit where\n  cmd = \"true\"\n  covers = all\n\n\
+check story where\n  cmd = \"sh stories/s.sh\"\n  covers = [a, b]\n  files = [\"stories/s.sh\"]\n";
+
+/// A hub on the `a`/`b` architecture with `slug` planned on `modules =
+/// ["a"]` and posted (task check `test -f a/feature.txt`, covering `a`).
+fn scoped(slug: &str) -> (DirectorRepo, TempDir, Home, Player<NullSessions>) {
+    let repo = director_repo();
+    write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[("Tests", AB_SUITE)]);
+    for (f, t) in [("a/lib.rs", "pub fn f() {}\n"), ("b/lib.rs", "pub fn g() {}\n"), ("api/.keep", ""), ("stories/s.sh", "true\n")] {
+        write_file(repo.path(), f, t);
+    }
+    commit(repo.path(), "modules a and b");
+    let (home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    let plan_toml = format!("title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"a\"]\n");
+    plan(&repo, &mut player, slug, &plan_toml);
+    checkout_branch(repo.path(), &format!("task/{slug}"));
+    write_file(repo.path(), &format!("tasks/{slug}/prompt.md"), "do the thing\n");
+    write_file(
+        repo.path(),
+        &format!("tasks/{slug}/task.toml"),
+        &format!("{plan_toml}\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f a/feature.txt\"\n"),
+    );
+    write_file(repo.path(), &tests_file(slug), &lean_task_tests(&format!("{slug}-check"), "test -f a/feature.txt", "[a]"));
+    commit(repo.path(), &format!("post: {slug}"));
+    let report = player.tick().expect("post tick");
+    assert_eq!(report.launched, vec![slug.to_string()], "{report}");
+    (repo, home_dir, home, player)
+}
+
+fn worker_file(slug: &str) -> String {
+    format!("architecture/Tests/{slug}.worker.lean")
+}
+
+#[test]
+fn a_finish_outside_its_modules_is_a_scope_strike() {
+    let (repo, _home_dir, home, mut player) = scoped("sc");
+    let hub = Git::new(home.hub());
+    commit_multi_in_clone(&repo, "sc", &[("a/feature.txt", "x\n"), ("b/lib.rs", "pub fn g2() {}\n")], "finish, and b too");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Scope);
+    assert!(report.rejected[0].message.contains("b/lib.rs") && report.rejected[0].message.contains("dashboard scope"), "{report}");
+    let st = state::derive(&hub, &|_| false).unwrap();
+    let text = dashboard::render::render(&st, &[], false, 100);
+    assert!(text.contains("scope 1/2"), "{text}");
+    // A second strike escalates.
+    commit_in_clone(&repo, "sc", "b/more.rs", "\n", "b again");
+    player.tick().expect("tick");
+    assert_eq!(task_status(&hub, "sc"), Status::Escalated);
+}
+
+/// `slug`'s finish with its own check `wk_own` (covering `covers`, with
+/// its file `a/tests/t.sh`) in its worker file.
+fn finish_with_own_check(repo: &DirectorRepo, slug: &str, covers: &str) {
+    let own = format!("{}  files = [\"a/tests/t.sh\"]\n", lean_task_tests("wk_own", "sh a/tests/t.sh", covers));
+    commit_multi_in_clone(
+        repo,
+        slug,
+        &[("a/feature.txt", "x\n"), ("a/tests/t.sh", "test -f a/feature.txt\n"), (&worker_file(slug), &own)],
+        "finish with my own check",
+    );
+}
+
+#[test]
+fn the_worker_adds_its_own_checks_within_its_modules() {
+    // Covering another module, or all: scope.
+    for covers in ["[b]", "all"] {
+        let (repo, _home_dir, _home, mut player) = scoped("wk");
+        finish_with_own_check(&repo, "wk", covers);
+        let report = player.tick().expect("tick");
+        assert_eq!(report.rejected.len(), 1, "{covers}: {report}");
+        assert_eq!(report.rejected[0].reason, Reason::Scope, "{covers}");
+        assert!(report.rejected[0].message.contains("outside modules"), "{report}");
+    }
+    // Within `a`, with its own file: the check joins the suite and passes.
+    let (repo, _home_dir, home, mut player) = scoped("wk");
+    let hub = Git::new(home.hub());
+    finish_with_own_check(&repo, "wk", "[a]");
+    let report = player.tick().expect("tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(task_status(&hub, "wk"), Status::Tested);
+    let tip = hub.rev_parse("refs/heads/task/wk").unwrap();
+    assert!(dashboard::checks::cached(&hub, &tip).iter().any(|r| r.name == "wk_own" && r.pass));
+}
+
+#[test]
+fn the_post_and_pinned_check_files_stay_pinned() {
+    for (path, what) in [("architecture/Tests/pn.lean", "the post"), ("stories/s.sh", "a pinned check's files")] {
+        let (repo, _home_dir, _home, mut player) = scoped("pn");
+        commit_multi_in_clone(&repo, "pn", &[("a/feature.txt", "x\n"), (path, "-- changed\n")], "finish");
+        let report = player.tick().expect("tick");
+        assert_eq!(report.rejected.len(), 1, "{what}: {report}");
+        assert_eq!(report.rejected[0].reason, Reason::Pins, "{what}: {report}");
     }
 }

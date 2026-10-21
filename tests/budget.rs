@@ -16,7 +16,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 /// A director repo whose suite has a `slow` check that sleeps 3s once a
-/// worker adds `slow.flag`, under the given `[budget]`.
+/// worker adds `src/slow.flag`, under the given `[budget]`.
 fn budget_repo(budget: &str) -> DirectorRepo {
     let repo = director_repo();
     let roadmap = std::fs::read_to_string(repo.path().join("roadmap.toml")).unwrap();
@@ -28,7 +28,7 @@ fn budget_repo(budget: &str) -> DirectorRepo {
     write_file(
         repo.path(),
         TESTS_LEAN,
-        &*suite_lean("[[check]]\nname = \"slow\"\ncmd = \"if test -f slow.flag; then sleep 3; fi\"\n"),
+        &*suite_lean("[[check]]\nname = \"slow\"\ncmd = \"if test -f src/slow.flag; then sleep 3; fi\"\n"),
     );
     commit(repo.path(), "budget");
     repo
@@ -38,7 +38,7 @@ fn finish_slow(repo: &DirectorRepo, slug: &str) {
     commit_multi_in_clone(
         repo,
         slug,
-        &[("feature.txt", "done\n"), ("slow.flag", "1\n")],
+        &[("src/feature.txt", "done\n"), ("src/slow.flag", "1\n")],
         "finish",
     );
 }
@@ -91,7 +91,7 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task
 }
 
 /// Posts `slug` (already planned and `ready`) with a task check
-/// `test -f feature.txt` (fails until the "worker" creates that file) and
+/// `test -f src/feature.txt` (fails until the "worker" creates that file) and
 /// the matching check in `architecture/Tests/<slug>.lean`. Ticks (which also launches the worker,
 /// per step 6) and returns the report so callers can inspect `launched`/
 /// `errors` too.
@@ -106,13 +106,13 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n"
         ),
     );
     write_file(
         repo.path(),
         &*tests_file(&slug),
-        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n")),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");

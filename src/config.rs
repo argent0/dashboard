@@ -142,6 +142,8 @@ pub struct StrikeLimits {
     pub evidence: u32,
     /// A suite that timed out or exceeded `[budget] suite_fail`.
     pub budget: u32,
+    /// A worker's finish writing outside its task's modules (spec §8.3).
+    pub scope: u32,
 }
 
 impl Default for StrikeLimits {
@@ -159,6 +161,7 @@ impl Default for StrikeLimits {
             claims: 2,
             evidence: 1,
             budget: 2,
+            scope: 2,
         }
     }
 }
@@ -178,6 +181,7 @@ impl StrikeLimits {
             Reason::Claims => self.claims,
             Reason::Evidence => self.evidence,
             Reason::Budget => self.budget,
+            Reason::Scope => self.scope,
         }
     }
 }
@@ -270,10 +274,13 @@ pub enum Reason {
     /// The suite ran past its `[budget]`: a check timed out, or the total
     /// exceeded `suite_fail`.
     Budget,
+    /// A worker's finish writes outside its scope (`dashboard scope`), or
+    /// declares a check covering more than its task's modules.
+    Scope,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 12] = [
+    pub const ALL: [Reason; 13] = [
         Reason::History,
         Reason::Ownership,
         Reason::Pins,
@@ -286,6 +293,7 @@ impl Reason {
         Reason::Claims,
         Reason::Evidence,
         Reason::Budget,
+        Reason::Scope,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -302,6 +310,7 @@ impl Reason {
             Reason::Claims => "claims",
             Reason::Evidence => "evidence",
             Reason::Budget => "budget",
+            Reason::Scope => "scope",
         }
     }
 }
@@ -323,6 +332,7 @@ impl FromStr for Reason {
             "claims" => Ok(Reason::Claims),
             "evidence" => Ok(Reason::Evidence),
             "budget" => Ok(Reason::Budget),
+            "scope" => Ok(Reason::Scope),
             other => Err(format!("unknown rejection reason: {other:?}")),
         }
     }

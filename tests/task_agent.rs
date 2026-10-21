@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 const PLAN: &str = "title = \"s\"\nphase = \"p1\"\nmodules = [\"app\"]\nbrief = \"mind the widget cache\"\n";
-const CHECK: &str = "\n[check]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n";
+const CHECK: &str = "\n[check]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\n";
 
 // --------------------------------------------------------------------------
 // Fixture helpers
@@ -122,12 +122,12 @@ fn agent_post(repo: &DirectorRepo) -> String {
         &[
             (
                 "tasks/s/prompt.md",
-                "make feature.txt; tests you add must be pure\n",
+                "make src/feature.txt; tests you add must be pure\n",
             ),
             ("tasks/s/task.toml", &format!("{PLAN}{CHECK}")),
             (
                 &*tests_file("s"),
-                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n"),
+                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\n"),
             ),
         ],
         "post: s",
@@ -143,7 +143,7 @@ fn plan_post_finish(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
     assert_eq!(report.launched, vec!["s".to_string()], "{report}");
     let dir = paths::worker_clone(&repo.director_path(), "s");
     ensure_identity(&dir);
-    write_file(&dir, "feature.txt", "done\n");
+    write_file(&dir, "src/feature.txt", "done\n");
     commit(&dir, "finish work");
     let report = player.tick().expect("finish tick should succeed");
     assert!(
@@ -285,7 +285,7 @@ fn a_director_post_is_ownership_when_task_agents_are_on() {
     write_file(
         repo.path(),
         &*tests_file("s"),
-        &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\n"),
     );
     commit(repo.path(), "post: s");
     let report = player.tick().expect("tick");
@@ -390,7 +390,7 @@ fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
             ),
             (
                 &*tests_file("s"),
-                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n"),
+                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\n"),
             ),
         ],
         "post with a new title",
@@ -477,11 +477,11 @@ fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
     agent_commit(
         &repo,
         &[
-            ("tasks/s/prompt.md", "make feature.txt\n"),
+            ("tasks/s/prompt.md", "make src/feature.txt\n"),
             ("tasks/s/task.toml", &format!("{PLAN}{CHECK}")),
             (
                 &*tests_file("s"),
-                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n"),
+                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\n"),
             ),
         ],
         "post: s",
@@ -545,10 +545,10 @@ fn the_task_agents_send_back_is_imported_and_relayed_to_the_worker() {
     let sha = agent_commit(
         &repo,
         &[
-            ("tasks/s/reviews/r1.md", "also feature2.txt\n"),
+            ("tasks/s/reviews/r1.md", "also src/feature2.txt\n"),
             (
                 &*tests_file("s"),
-                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
+                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt && test -f src/feature2.txt\"\n"),
             ),
         ],
         "send back: s r1",
@@ -566,7 +566,7 @@ fn the_task_agents_send_back_is_imported_and_relayed_to_the_worker() {
             .sessions()
             .sent
             .iter()
-            .any(|(k, m)| k == "s" && m.contains("also feature2.txt")),
+            .any(|(k, m)| k == "s" && m.contains("also src/feature2.txt")),
         "the worker gets the review"
     );
 }
@@ -580,7 +580,7 @@ fn a_report_becomes_a_note_and_an_agent_report_event() {
     plan_post_finish(&repo, &mut player);
 
     let file = report_file(&repo);
-    std::fs::write(&file, "slug: s\nstep: review r1\ncommit: none\ncheck: feature.txt exists\nverdict: accept\nwhy: it does it.\nconcerns: none\n").unwrap();
+    std::fs::write(&file, "slug: s\nstep: review r1\ncommit: none\ncheck: src/feature.txt exists\nverdict: accept\nwhy: it does it.\nconcerns: none\n").unwrap();
     let report = player.tick().expect("tick");
     assert_eq!(report.agent_reports.len(), 1, "{report}");
     assert_eq!(report.agent_reports[0].1.verdict, "accept");
@@ -935,7 +935,7 @@ fn plan_post_contest(repo: &DirectorRepo, player: &mut Player<NullSessions>) -> 
             "-m",
             "contest: s-check",
             "-m",
-            "feature.txt can't exist in a pure test",
+            "src/feature.txt can't exist in a pure test",
         ])
         .unwrap();
     player.tick().expect("contest tick")
@@ -983,7 +983,7 @@ fn a_contest_goes_to_the_task_agent_and_its_reply_back_to_the_worker() {
         &repo,
         &[(
             "tasks/s/contests/c1.md",
-            "fair: check feature.txt is created by the build\n",
+            "fair: check src/feature.txt is created by the build\n",
         )],
         "reply: s c1",
     );
@@ -1032,12 +1032,12 @@ fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalat
     director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", PLAN, "plan: s");
     player.tick().expect("plan tick");
     checkout_branch(repo.path(), "task/s");
-    write_file(repo.path(), "tasks/s/prompt.md", "make feature.txt\n");
+    write_file(repo.path(), "tasks/s/prompt.md", "make src/feature.txt\n");
     write_file(repo.path(), "tasks/s/task.toml", &format!("{PLAN}{CHECK}"));
     write_file(
         repo.path(),
         &*tests_file("s"),
-        &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\n"),
     );
     commit(repo.path(), "post: s");
     player.tick().expect("post tick");
@@ -1059,7 +1059,7 @@ fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalat
     write_file(
         repo.path(),
         &*tests_file("s"),
-        &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\nruns = 1\n"),
+        &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\nruns = 1\n"),
     );
     commit(repo.path(), "a reply without a reply file");
     let report = player.tick().expect("tick");
@@ -1073,7 +1073,7 @@ fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalat
     write_file(
         repo.path(),
         "tasks/s/contests/c1.md",
-        "the test stands: create feature.txt\n",
+        "the test stands: create src/feature.txt\n",
     );
     commit(repo.path(), "reply: s c1");
     let report = player.tick().expect("tick");
@@ -1281,7 +1281,7 @@ fn a_worker_push_while_contested_is_ignored_not_struck() {
     let tip = hub.rev_parse("refs/heads/task/s").unwrap();
 
     let dir = paths::worker_clone(&repo.director_path(), "s");
-    write_file(&dir, "feature.txt", "done anyway\n");
+    write_file(&dir, "src/feature.txt", "done anyway\n");
     commit(&dir, "finish while contested");
     let report = player.tick().expect("tick");
     assert!(report.rejected.is_empty(), "{report}");

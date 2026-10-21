@@ -107,7 +107,7 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task
 }
 
 /// Posts `slug` (already planned and `ready`) with a task check
-/// `test -f feature.txt` (fails until the "worker" creates that file) and
+/// `test -f src/feature.txt` (fails until the "worker" creates that file) and
 /// the matching check in `architecture/Tests/<slug>.lean`. Ticks (which also launches the worker,
 /// per step 6) and returns the report so callers can inspect `launched`/
 /// `errors` too.
@@ -122,13 +122,13 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n"
         ),
     );
     write_file(
         repo.path(),
         &*tests_file(&slug),
-        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n")),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
@@ -283,7 +283,7 @@ fn an_unrelated_finish_is_held_and_released_once_main_is_back_under_budget() {
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
     plan_and_post(&repo, &mut player, "u");
-    commit_multi_in_clone(&repo, "u", &[("feature.txt", "x\n")], "finish");
+    commit_multi_in_clone(&repo, "u", &[("src/feature.txt", "x\n")], "finish");
 
     let report = player.tick().unwrap();
     assert!(report.rejected.is_empty(), "{report}");
@@ -307,10 +307,10 @@ fn an_unrelated_finish_is_held_and_released_once_main_is_back_under_budget() {
 
 #[test]
 fn a_total_over_suite_fail_holds_a_finish_unless_a_check_got_slower() {
-    // `slow` takes 3s on main, 5s once `slow.flag` exists.
+    // `slow` takes 3s on main, 5s once `src/slow.flag` exists.
     let repo = suite_repo(
         "suite_fail = 2",
-        "if test -f slow.flag; then sleep 5; else sleep 3; fi",
+        "if test -f src/slow.flag; then sleep 5; else sleep 3; fi",
         "true",
     );
     let (_h, home) = init_hub(&repo);
@@ -318,7 +318,7 @@ fn a_total_over_suite_fail_holds_a_finish_unless_a_check_got_slower() {
     let mut player = open_player(&home);
     plan_and_post(&repo, &mut player, "t");
     plan_and_post(&repo, &mut player, "u");
-    commit_multi_in_clone(&repo, "t", &[("feature.txt", "x\n")], "finish");
+    commit_multi_in_clone(&repo, "t", &[("src/feature.txt", "x\n")], "finish");
     let report = player.tick().unwrap();
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(report.held.len(), 1, "{report}");
@@ -328,7 +328,7 @@ fn a_total_over_suite_fail_holds_a_finish_unless_a_check_got_slower() {
     commit_multi_in_clone(
         &repo,
         "u",
-        &[("feature.txt", "x\n"), ("slow.flag", "1\n")],
+        &[("src/feature.txt", "x\n"), ("src/slow.flag", "1\n")],
         "finish",
     );
     let report = player.tick().unwrap();
@@ -472,7 +472,7 @@ fn the_whole_flow_main_over_budget_to_held_work_released() {
     assert_eq!(event_count(&ctx.home, EventKind::MainOverBudget), 1);
     // An unrelated task's finish is held meanwhile.
     plan_and_post(&ctx.repo, &mut ctx.player, "u");
-    commit_multi_in_clone(&ctx.repo, "u", &[("feature.txt", "x\n")], "finish");
+    commit_multi_in_clone(&ctx.repo, "u", &[("src/feature.txt", "x\n")], "finish");
     let report = ctx.player.tick().unwrap();
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(report.held.len(), 1, "{report}");

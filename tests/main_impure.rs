@@ -59,7 +59,7 @@ fn event_kinds(home: &Home) -> Vec<EventKind> {
     events::read_all(home).into_iter().map(|e| e.kind).collect()
 }
 
-/// plan + post `a` (task check `test -f feature.txt`), launching its worker.
+/// plan + post `a` (task check `test -f src/feature.txt`), launching its worker.
 fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
     director_commit_on_branch(
         repo.path(),
@@ -74,12 +74,12 @@ fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
     write_file(
         repo.path(),
         "tasks/a/task.toml",
-        "title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"a-check\"\ncmd = \"test -f feature.txt\"\n",
+        "title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"a-check\"\ncmd = \"test -f src/feature.txt\"\n",
     );
     write_file(
         repo.path(),
         &*tests_file("a"),
-        &*task_suite_lean("[[check]]\nname = \"a-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*task_suite_lean("[[check]]\nname = \"a-check\"\ncmd = \"test -f src/feature.txt\"\n"),
     );
     commit(repo.path(), "post: a");
     let report = player.tick().unwrap();
@@ -159,8 +159,8 @@ fn a_finish_failing_only_on_mains_impure_check_is_held_then_released() {
 
     // The finish is right, but `env` dirties the worktree here as on main.
     let worker = worker_git(&repo);
-    write_file(&worker.dir, "feature.txt", "done\n");
-    worker.run(&["add", "feature.txt"]).unwrap();
+    write_file(&worker.dir, "src/feature.txt", "done\n");
+    worker.run(&["add", "src/feature.txt"]).unwrap();
     worker.run(&["commit", "-q", "-m", "finish"]).unwrap();
     let finish = worker.rev_parse("HEAD").unwrap();
 
@@ -230,7 +230,7 @@ fn a_finish_failing_on_anything_else_is_still_struck() {
     let (repo, _home_dir, _home, mut player) = setup();
     plan_and_post(&repo, &mut player);
 
-    // No feature.txt: the task check fails for real, alongside `env`.
+    // No src/feature.txt: the task check fails for real, alongside `env`.
     let worker = worker_git(&repo);
     write_file(&worker.dir, "other.txt", "not it\n");
     worker.run(&["add", "other.txt"]).unwrap();

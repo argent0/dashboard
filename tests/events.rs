@@ -76,7 +76,7 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task
 /// any work happened), and ticks (which also launches the worker, per step
 /// 6).
 fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
-    let feature = format!("feature-{slug}.txt");
+    let feature = format!("src/feature-{slug}.txt");
     checkout_branch(repo.path(), &format!("task/{slug}"));
     write_file(
         repo.path(),
@@ -191,7 +191,7 @@ fn player_tick_emits_the_full_set_of_director_relevant_events() {
         "title = \"Depender\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"dep\"]\n",
     );
     post(&repo, &mut player, "dep");
-    commit_in_clone(&repo, "dep", "feature-dep.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "dep", "src/feature-dep.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
     assert_eq!(task_status(&hub, "dep"), Status::Tested);
     let tested = events_for(&home, "dep", EventKind::Tested);
@@ -295,7 +295,7 @@ fn no_reemission_after_reconstructing_the_player() {
 
     plan(&repo, &mut player, "x", "title = \"X\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     post(&repo, &mut player, "x");
-    commit_in_clone(&repo, "x", "feature-x.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "x", "src/feature-x.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
     assert_eq!(task_status(&hub, "x"), Status::Tested);
     assert_eq!(events_for(&home, "x", EventKind::Tested).len(), 1);
@@ -342,7 +342,7 @@ fn first_run_with_no_state_file_emits_nothing_for_preexisting_statuses() {
     commit_in_clone(
         &repo,
         "already",
-        "feature-already.txt",
+        "src/feature-already.txt",
         "done\n",
         "finish work",
     );
@@ -414,7 +414,7 @@ fn killing_a_session_via_accept_does_not_emit_session_died() {
 
     plan(&repo, &mut player, "ok", "title = \"Ok\"\nphase = \"p1\"\nmodules = [\"app\"]\n");
     post(&repo, &mut player, "ok");
-    commit_in_clone(&repo, "ok", "feature-ok.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "ok", "src/feature-ok.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
 
     director_pull_task_branch(repo.path(), "ok");
@@ -538,7 +538,7 @@ fn a_worker_stopped_while_it_owes_a_finish_is_reported_idle_once_per_stop() {
 
     // A relay (here, a failing finish's rejection) re-arms it: the agent
     // resumes, and its next stop is a new one.
-    commit_in_clone(&repo, "idl", "other.txt", "x\n", "finish: not really");
+    commit_in_clone(&repo, "idl", "src/other.txt", "x\n", "finish: not really");
     player.tick().expect("rejection tick");
     assert!(player.sessions().sent.iter().any(|(k, _)| k == "idl"));
     assert!(!marker.exists(), "a relay clears the stop");
@@ -549,7 +549,7 @@ fn a_worker_stopped_while_it_owes_a_finish_is_reported_idle_once_per_stop() {
     assert!(idle[1].message.contains("API error"), "{}", idle[1].message);
 
     // Stopping after a finish is waiting for review: nothing to report.
-    commit_in_clone(&repo, "idl", "feature-idl.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "idl", "src/feature-idl.txt", "done\n", "finish work");
     player.tick().expect("finish tick");
     assert_eq!(task_status(&hub, "idl"), Status::Tested);
     worker_stops(&repo, "idl", "stop 102 3");
@@ -620,7 +620,7 @@ fn a_worker_whose_screen_goes_stale_while_it_owes_a_finish_is_reported_idle_once
     assert_eq!(idle().len(), 2);
 
     // So does a relay, even onto an identical screen.
-    commit_in_clone(&repo, "stl", "other.txt", "x\n", "finish: not really");
+    commit_in_clone(&repo, "stl", "src/other.txt", "x\n", "finish: not really");
     player.tick().expect("rejection tick");
     player.set_clock(7799);
     player.tick().expect("tick");
@@ -630,7 +630,7 @@ fn a_worker_whose_screen_goes_stale_while_it_owes_a_finish_is_reported_idle_once
     assert_eq!(idle().len(), 3);
 
     // Finished, it's waiting for review: a still screen is no news.
-    commit_in_clone(&repo, "stl", "feature-stl.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "stl", "src/feature-stl.txt", "done\n", "finish work");
     player.tick().expect("finish tick");
     assert_eq!(task_status(&hub, "stl"), Status::Tested);
     player.set_clock(20_000);
@@ -929,7 +929,7 @@ fn idle_events_carry_the_screen_tail() {
     assert_eq!(tail, format!("  …\n{}", want.join("\n")));
 
     // The stale-pane path, on a screen that changed since.
-    commit_in_clone(&repo, "scr", "other.txt", "x\n", "finish: not really");
+    commit_in_clone(&repo, "scr", "src/other.txt", "x\n", "finish: not really");
     player.tick().expect("rejection tick");
     show(
         &mut player,
@@ -1048,7 +1048,7 @@ fn a_dead_session_nobody_watches_is_still_reaped() {
         "title = \"Fin\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     post(&repo, &mut player, "fin");
-    commit_in_clone(&repo, "fin", "feature-fin.txt", "done\n", "finish work");
+    commit_in_clone(&repo, "fin", "src/feature-fin.txt", "done\n", "finish work");
     player.tick().expect("finish tick");
     assert_eq!(task_status(&hub, "fin"), Status::Tested);
 
