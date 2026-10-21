@@ -65,7 +65,14 @@ pub fn snapshot(worktree: &Git) -> Result<String, String> {
     let env = [("GIT_INDEX_FILE", index_str)];
     let built = (|| {
         worktree.run_with_env(&["read-tree", "HEAD"], &env)?;
-        worktree.run_with_env(&["add", "-A"], &env)?;
+        // In a sparse tree (spec §21) an untracked file outside the patterns
+        // is skipped and makes `add -A` exit 1 after staging the rest: the
+        // snapshot is the tree as the worker's next commit would hold it.
+        if let Err(e) = worktree.run_with_env(&["-c", "advice.updateSparsePath=false", "add", "-A"], &env) {
+            if !e.stderr.contains("outside of your sparse-checkout definition") {
+                return Err(e);
+            }
+        }
         let tree = worktree.run_with_env(&["write-tree"], &env)?;
         worktree.run_with_env(
             &[
