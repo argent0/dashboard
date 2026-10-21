@@ -5,9 +5,11 @@
 // --test`, so the generated law tests run against the real instances.
 
 use dashboard::arch::{Loaded, check, sync_bindings};
-use dashboard::config::arch_config_from_str;
+use dashboard::config::arch_config_from_json;
+use dashboard::idl::Idl;
 use dashboard::sandbox::Sandbox;
-use std::path::Path;
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
 fn write(root: &Path, rel: &str, body: &str) {
     let p = root.join(rel);
@@ -19,30 +21,56 @@ fn test_cmd(module: &str) -> String {
     format!("rustc --edition 2024 --test -A warnings engine/{module}/lib.rs -o view.test && ./view.test -q")
 }
 
-fn manifest() -> String {
-    let mut m = String::new();
-    for module in ["foldable", "functor", "traversable", "monoid", "db", "nutrition"] {
-        m.push_str(&format!(
-            "[[module]]\nname = \"{module}\"\nlang = \"rust\"\npaths = [\"engine/{module}\"]\ntest_cmd = \"{}\"\n\n",
-            test_cmd(module)
-        ));
-    }
-    for (class, impl_file) in [
+fn manifest() -> Value {
+    let modules: Vec<Value> = ["foldable", "functor", "traversable", "monoid", "db", "nutrition"]
+        .iter()
+        .map(|m| json!({"name": m, "lang": "rust", "paths": [format!("engine/{m}")], "test_cmd": test_cmd(m)}))
+        .collect();
+    let mut apis: Vec<Value> = [
         ("foldable", "seq.rs"),
         ("functor", "seq_functor.rs"),
         ("traversable", "seq_traversable.rs"),
         ("monoid", "seq_monoid.rs"),
-    ] {
-        m.push_str(&format!(
-            "[[api]]\nname = \"{class}-nutrition\"\ngenerator = \"{class}\"\nconsumer = \"nutrition\"\n\
-             paths = [\"engine/api/{class}-nutrition\"]\nimpl = [\"engine/{class}/{impl_file}\"]\n\n"
-        ));
+    ]
+    .iter()
+    .map(|(class, impl_file)| {
+        json!({"name": format!("{class}-nutrition"), "generator": class, "consumer": "nutrition",
+               "paths": [format!("engine/api/{class}-nutrition")], "impl": [format!("engine/{class}/{impl_file}")]})
+    })
+    .collect();
+    apis.push(json!({"name": "db-nutrition", "generator": "db", "consumer": "nutrition",
+                     "paths": ["engine/api/db-nutrition"], "max_elements": 2, "max_fields": 4}));
+    json!({"module": modules, "api": apis})
+}
+
+/// Every API's IDL, as the Lean export holds it.
+fn idls() -> Vec<Value> {
+    let mut out = vec![json!({"api": "foldable-nutrition", "containers": [{"name": "Seq", "kind": {"generic": ["Foldable"]}}]})];
+    for class in ["Functor", "Traversable", "Monoid"] {
+        out.push(json!({"api": format!("{}-nutrition", class.to_lowercase()),
+                        "instances": [{"class": class, "api": "foldable-nutrition", "container": "Seq"}]}));
     }
-    m.push_str(
-        "[[api]]\nname = \"db-nutrition\"\ngenerator = \"db\"\nconsumer = \"nutrition\"\n\
-         paths = [\"engine/api/db-nutrition\"]\nmax_elements = 2\nmax_fields = 4\n",
-    );
-    m
+    let string = json!({"repr": "string", "max_len": 64});
+    out.push(json!({
+        "api": "db-nutrition",
+        "elements": [{"name": "Row", "variants": [
+            {"name": "Consumption", "fields": [{"repr": "f64"}, string]},
+            {"name": "Product", "fields": [{"repr": "i64"}, string]}]}],
+        "containers": [{"name": "Rows", "kind": {"of": ["Row", "foldable-nutrition", "Seq"]}}],
+        "types": [{"name": "Reason", "kind": {"repr": "string"}, "max_len": 64}],
+        "ctors": [{"name": "Success", "args": ["Rows"]}, {"name": "Failure", "args": ["Reason"]}]
+    }));
+    out
+}
+
+fn loaded(manifest: Value) -> Loaded {
+    let mut l = Loaded { cfg: arch_config_from_json(manifest).unwrap(), ..Default::default() };
+    for v in idls() {
+        let idl = Idl::from_export(serde_json::from_value(v).unwrap()).unwrap();
+        l.api_dirs.insert(idl.api.clone(), PathBuf::from(format!("engine/api/{}", idl.api)));
+        l.idls.insert(idl.api.clone(), idl);
+    }
+    l
 }
 
 /// `#[path]` mounts of the generated bindings a module's crate uses.
@@ -160,22 +188,6 @@ fn folds_over_rows() {
 fn fixture() -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
     let r = d.path();
-    write(r, "engine/api/foldable-nutrition/foldable-nutrition.api.kdl", "api \"foldable-nutrition\"\ncontainer \"Seq\" classes=\"Foldable\"\n");
-    for class in ["Functor", "Traversable", "Monoid"] {
-        let l = class.to_lowercase();
-        write(
-            r,
-            &format!("engine/api/{l}-nutrition/{l}-nutrition.api.kdl"),
-            &format!("api \"{l}-nutrition\"\ninstance \"{class}\" for=\"foldable-nutrition.Seq\"\n"),
-        );
-    }
-    write(
-        r,
-        "engine/api/db-nutrition/db-nutrition.api.kdl",
-        "api \"db-nutrition\"\nelement \"Row\" {\n    variant \"Consumption\" \"f64\" \"string\"\n    variant \"Product\" \"i64\" \"string\"\n}\n\
-         container \"Rows\" of=\"Row\" ref=\"foldable-nutrition.Seq\"\ntype \"Reason\" repr=\"string\"\n\
-         constructor \"Success\" \"Rows\"\nconstructor \"Failure\" \"Reason\"\n",
-    );
     write(r, "engine/foldable/seq.rs", SEQ);
     write(r, "engine/foldable/lib.rs", &mounts(&["foldable-nutrition"]));
     write(r, "engine/functor/seq_functor.rs", FUNCTOR);
@@ -196,16 +208,14 @@ fn fixture() -> tempfile::TempDir {
     let all = ["foldable-nutrition", "functor-nutrition", "traversable-nutrition", "monoid-nutrition", "db-nutrition"];
     write(r, "engine/nutrition/lib.rs", &format!("{}\nmod consumer;\n", mounts(&all)));
     write(r, "engine/nutrition/consumer.rs", CONSUMER);
-    let cfg = Loaded::from_toml(r, arch_config_from_str(&manifest()).unwrap());
-    let (_, errs) = sync_bindings(r, &cfg, true);
+    let (_, errs) = sync_bindings(r, &loaded(manifest()), true);
     assert!(errs.is_empty(), "{errs:?}");
     d
 }
 
 fn problems(root: &Path) -> String {
-    let cfg = Loaded::from_toml(root, arch_config_from_str(&manifest()).unwrap());
     let scratch = tempfile::tempdir().unwrap();
-    let rep = check(root, &cfg, &Sandbox::off(), scratch.path());
+    let rep = check(root, &loaded(manifest()), &Sandbox::off(), scratch.path());
     rep.problems.join("\n")
 }
 
@@ -268,14 +278,16 @@ fn the_consumer_cannot_reach_into_the_container_and_must_be_total() {
 #[test]
 fn element_budgets_and_bad_impls() {
     let d = fixture();
-    let m = manifest().replace("max_elements = 2\nmax_fields = 4", "max_elements = 1\nmax_fields = 2");
-    let cfg = Loaded::from_toml(d.path(), arch_config_from_str(&m).unwrap());
+    let mut m = manifest();
+    m["api"][4]["max_elements"] = json!(1);
+    m["api"][4]["max_fields"] = json!(2);
     let scratch = tempfile::tempdir().unwrap();
-    let rep = check(d.path(), &cfg, &Sandbox::off(), scratch.path());
+    let rep = check(d.path(), &loaded(m), &Sandbox::off(), scratch.path());
     let all = rep.problems.join("\n");
     assert!(all.contains("api db-nutrition: element variants 2 exceeds budget 1"), "{all}");
     assert!(all.contains("element fields 4 exceeds budget 2"), "{all}");
     assert!(rep.headroom.iter().any(|h| h.contains("element variants 2/1, fields 4/2")), "{:?}", rep.headroom);
-    let m = manifest().replace("impl = [\"engine/functor/seq_functor.rs\"]", "impl = [\"engine/foldable/seq.rs\"]");
-    assert!(arch_config_from_str(&m).unwrap_err().contains("not under generator module functor's paths"));
+    let mut m = manifest();
+    m["api"][1]["impl"] = json!(["engine/foldable/seq.rs"]);
+    assert!(arch_config_from_json(m).unwrap_err().contains("not under generator module functor's paths"));
 }

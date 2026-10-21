@@ -1,7 +1,6 @@
 // `dashboard arch check` (architect-v3.md): language-blind architecture
 // checks run as an ordinary suite check. Loads the architecture from a
-// checkout (`architecture.toml` plus `*.api.kdl` files, or the Lean package
-// under `architecture/`: `load`) and verifies the modules and roots budgets,
+// checkout's Lean package under `architecture/` (`load`) and verifies the modules and roots budgets,
 // each module's and root's byte and AST budgets, that no file belongs to two
 // of them, that every file under `source_paths` is owned, and (with a
 // `test_cmd`) that a module's tests pass when only its own files, its APIs'
@@ -45,45 +44,13 @@ pub struct Loaded {
     pub api_dirs: BTreeMap<String, PathBuf>,
     /// Problems reading an API's IDL (reported by `bindings`).
     pub errors: Vec<String>,
-    /// The architecture is the Lean package (`architecture/`), not TOML + KDL.
-    pub lean: bool,
 }
 
 impl Loaded {
-    /// A TOML manifest with its `*.api.kdl` files, one per API under its paths.
-    pub fn from_toml(root: &Path, cfg: ArchConfig) -> Loaded {
-        let mut out = Loaded { cfg, ..Default::default() };
-        for a in &out.cfg.apis {
-            let files = match expand(root, &a.paths) {
-                Ok(f) => f,
-                Err(e) => {
-                    out.errors.push(format!("api {}: {e}", a.name));
-                    continue;
-                }
-            };
-            let kdl: Vec<&PathBuf> = files.iter().filter(|f| f.to_string_lossy().ends_with(".api.kdl")).collect();
-            let [path] = kdl.as_slice() else {
-                out.errors.push(format!("api {}: expected exactly one *.api.kdl in its paths, found {}", a.name, kdl.len()));
-                continue;
-            };
-            match std::fs::read_to_string(root.join(path)).map_err(|e| e.to_string()).and_then(|t| Idl::parse(&t)) {
-                Ok(idl) if idl.api != a.name => {
-                    out.errors.push(format!("api {}: {} declares api {:?}", a.name, path.display(), idl.api))
-                }
-                Ok(idl) => {
-                    out.api_dirs.insert(a.name.clone(), path.parent().unwrap_or(Path::new("")).to_path_buf());
-                    out.idls.insert(a.name.clone(), idl);
-                }
-                Err(e) => out.errors.extend(e.lines().map(|l| format!("api {}: {}: {l}", a.name, path.display()))),
-            }
-        }
-        out
-    }
-
     /// A Lean export: bindings go under an API's first path (a directory,
     /// or its parent).
     pub fn from_export(root: &Path, e: lean::Exported) -> Loaded {
-        let mut out = Loaded { cfg: e.arch, idls: e.idls, lean: true, ..Default::default() };
+        let mut out = Loaded { cfg: e.arch, idls: e.idls, ..Default::default() };
         for a in &out.cfg.apis {
             let Some(first) = a.paths.first() else { continue };
             let p = PathBuf::from(first.trim_end_matches('/'));
@@ -94,28 +61,14 @@ impl Loaded {
     }
 }
 
-/// Loads the architecture of the checkout at `root`: the Lean package when
-/// `architecture/Architecture.lean` exists, else `architecture.toml`. Both
-/// is an error (a project has one architecture), as is neither.
+/// Loads the architecture of the checkout at `root`: the export of its Lean
+/// package `architecture/`, whose `Architecture.lean` must exist.
 pub fn load(root: &Path) -> Result<Loaded, String> {
-    let toml = root.join(config::ARCH_FILE).is_file();
-    match (toml, lean::present(root)) {
-        (true, true) => Err(format!(
-            "both {} and {} exist: a project has one architecture; remove the TOML and the *.api.kdl files once migrated",
-            config::ARCH_FILE,
-            config::ARCH_LEAN_MANIFEST
-        )),
-        (false, false) => Err(format!("no {} and no {}", config::ARCH_FILE, config::ARCH_LEAN_MANIFEST)),
-        (true, false) => {
-            let text = std::fs::read_to_string(root.join(config::ARCH_FILE)).map_err(|e| format!("{}: {e}", config::ARCH_FILE))?;
-            let cfg = config::arch_config_from_str(&text).map_err(|e| format!("{}: {e}", config::ARCH_FILE))?;
-            Ok(Loaded::from_toml(root, cfg))
-        }
-        (false, true) => {
-            let e = lean::export(&root.join(lean::DIR), &Sandbox::off())?;
-            Ok(Loaded::from_export(root, e))
-        }
+    if !lean::present(root) {
+        return Err(format!("no {}", config::ARCH_LEAN_MANIFEST));
     }
+    let e = lean::export(&root.join(lean::DIR), &Sandbox::off())?;
+    Ok(Loaded::from_export(root, e))
 }
 
 /// Every file under `paths` (files or directories, relative to `root`),
@@ -252,18 +205,16 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
         if a.max_tokens > 0 && idl.token_count() > a.max_tokens {
             errs.push(format!("{who}: tokens {} exceeds budget {}", idl.token_count(), a.max_tokens));
         }
-        if loaded.lean {
-            // No tunnels (architect-v3.md): every string and bytes is bounded,
-            // and no bound exceeds the API's cap.
-            errs.extend(idl.unbounded().into_iter().map(|e| format!("{who}: {e}")));
-            let (s, b) = idl.longest();
-            let cap = string_cap(a);
-            if s > cap {
-                errs.push(format!("{who}: a string max_len {s} exceeds the api's max_string_len {cap} (a raise: commit if it is no tunnel)"));
-            }
-            if a.max_bytes_len > 0 && b > a.max_bytes_len {
-                errs.push(format!("{who}: a bytes max_len {b} exceeds the api's max_bytes_len {}", a.max_bytes_len));
-            }
+        // No tunnels (architect-v3.md): every string and bytes is bounded,
+        // and no bound exceeds the API's cap.
+        errs.extend(idl.unbounded().into_iter().map(|e| format!("{who}: {e}")));
+        let (s, b) = idl.longest();
+        let cap = string_cap(a);
+        if s > cap {
+            errs.push(format!("{who}: a string max_len {s} exceeds the api's max_string_len {cap} (a raise: commit if it is no tunnel)"));
+        }
+        if a.max_bytes_len > 0 && b > a.max_bytes_len {
+            errs.push(format!("{who}: a bytes max_len {b} exceeds the api's max_bytes_len {}", a.max_bytes_len));
         }
         // The callee folds an input container, so the generator must consume
         // the class API for its Seq (architect-v3.md, §1). A container only
@@ -539,20 +490,18 @@ fn view_apis<'a>(cfg: &'a ArchConfig, bs: &[ApiBindings], module: &str) -> Vec<&
 
 /// Writes the expected bindings (`write`), or lists those that differ, and
 /// returns the paths it wrote or found stale beside any errors (bindings
-/// that could be rendered are still synced when others could not). For a
-/// Lean architecture the vendored library files are synced the same way.
+/// that could be rendered are still synced when others could not). The
+/// vendored library files of the Lean package are synced the same way.
 pub fn sync_bindings(root: &Path, loaded: &Loaded, write: bool) -> (Vec<String>, Vec<String>) {
     let (bs, mut errs) = bindings(root, loaded);
     let mut stale = Vec::new();
-    if loaded.lean {
-        if write {
-            match lean::write_vendored(root) {
-                Ok(w) => stale.extend(w),
-                Err(e) => errs.push(e),
-            }
-        } else {
-            stale.extend(lean::drift(root));
+    if write {
+        match lean::write_vendored(root) {
+            Ok(w) => stale.extend(w),
+            Err(e) => errs.push(e),
         }
+    } else {
+        stale.extend(lean::drift(root));
     }
     for b in bs {
         for (path, content) in b.files {
@@ -673,18 +622,16 @@ pub fn check(root: &Path, loaded: &Loaded, sandbox: &Sandbox, scratch: &Path) ->
             let f = if a.max_fields > 0 { format!("/{}", a.max_fields) } else { String::new() };
             line.push_str(&format!(", element variants {}{e}, fields {}{f}", b.idl.element_variants(), b.idl.element_fields()));
         }
-        if loaded.lean {
-            let (s, by) = b.idl.longest();
-            line.push_str(&format!(", string max_len {s}/{}", string_cap(a)));
-            if a.max_bytes_len > 0 || by > 0 {
-                let cap = if a.max_bytes_len > 0 { format!("/{}", a.max_bytes_len) } else { String::new() };
-                line.push_str(&format!(", bytes max_len {by}{cap}"));
-            }
-            for (what, used, max) in [("rules", b.idl.rules(), a.max_rules), ("tokens", b.idl.token_count(), a.max_tokens)] {
-                if used > 0 || max > 0 {
-                    let cap = if max > 0 { format!("/{max}") } else { String::new() };
-                    line.push_str(&format!(", {what} {used}{cap}"));
-                }
+        let (s, by) = b.idl.longest();
+        line.push_str(&format!(", string max_len {s}/{}", string_cap(a)));
+        if a.max_bytes_len > 0 || by > 0 {
+            let cap = if a.max_bytes_len > 0 { format!("/{}", a.max_bytes_len) } else { String::new() };
+            line.push_str(&format!(", bytes max_len {by}{cap}"));
+        }
+        for (what, used, max) in [("rules", b.idl.rules(), a.max_rules), ("tokens", b.idl.token_count(), a.max_tokens)] {
+            if used > 0 || max > 0 {
+                let cap = if max > 0 { format!("/{max}") } else { String::new() };
+                line.push_str(&format!(", {what} {used}{cap}"));
             }
         }
         rep.headroom.push(line);
@@ -825,7 +772,9 @@ fn run_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::arch_config_from_str;
+    use crate::config::arch_config_from_json;
+    use crate::idl::idl_from_json;
+    use serde_json::{Value, json};
 
     #[test]
     fn relative_climbs_to_the_common_dir() {
@@ -841,53 +790,48 @@ mod tests {
         std::fs::write(p, body).unwrap();
     }
 
-    const MANIFEST: &str = r#"
-        max_modules = 2
-        shared = ["shared.txt"]
-        [[module]]
-        name = "a"
-        lang = "rust"
-        paths = ["a"]
-        max_ast = 1000
-        max_bytes = 1000
-        test_cmd = "test ! -e b/lib.rs"
-        [[module]]
-        name = "b"
-        lang = "rust"
-        paths = ["b"]
-        test_cmd = "test -e api/ab.api.kdl"
-        [[api]]
-        name = "ab"
-        generator = "a"
-        consumer = "b"
-        paths = ["api"]
-    "#;
+    fn manifest() -> Value {
+        json!({
+            "max_modules": 2,
+            "shared": ["shared.txt"],
+            "module": [
+                {"name": "a", "lang": "rust", "paths": ["a"], "max_ast": 1000, "max_bytes": 1000, "test_cmd": "test ! -e b/lib.rs"},
+                {"name": "b", "lang": "rust", "paths": ["b"], "test_cmd": "test -e api/gen/ab.rs"}
+            ],
+            "api": [{"name": "ab", "generator": "a", "consumer": "b", "paths": ["api"]}]
+        })
+    }
 
-    const IDL: &str = "api \"ab\"\ntype \"Id\" repr=\"string\"\nconstructor \"X\" \"Id\"\nconstructor \"Y\"\n";
+    const IDL: &str = r#"{"api":"ab","types":[{"name":"Id","kind":{"repr":"string"},"max_len":64}],
+        "ctors":[{"name":"X","args":["Id"]},{"name":"Y"}]}"#;
 
-    fn loaded(root: &Path, manifest: &str) -> Loaded {
-        Loaded::from_toml(root, arch_config_from_str(manifest).unwrap())
+    fn loaded(manifest: &Value) -> Loaded {
+        Loaded {
+            cfg: arch_config_from_json(manifest.clone()).unwrap(),
+            idls: [("ab".to_string(), idl_from_json(IDL).unwrap())].into(),
+            api_dirs: [("ab".to_string(), PathBuf::from("api"))].into(),
+            ..Default::default()
+        }
     }
 
     fn fixture() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "a/lib.rs", "pub fn f() -> u32 { 1 }");
         write(d.path(), "b/lib.rs", "pub fn g() {}");
-        write(d.path(), "api/ab.api.kdl", IDL);
-        sync_bindings(d.path(), &loaded(d.path(), MANIFEST), true);
+        sync_bindings(d.path(), &loaded(&manifest()), true);
         write(d.path(), "shared.txt", "");
         d
     }
 
-    fn run(d: &Path, manifest: &str) -> Report {
+    fn run(d: &Path, manifest: &Value) -> Report {
         let scratch = tempfile::tempdir().unwrap();
-        check(d, &loaded(d, manifest), &Sandbox::off(), scratch.path())
+        check(d, &loaded(manifest), &Sandbox::off(), scratch.path())
     }
 
     #[test]
     fn passes_and_reports_headroom() {
         let d = fixture();
-        let rep = run(d.path(), MANIFEST);
+        let rep = run(d.path(), &manifest());
         assert!(rep.pass(), "{:?}", rep.problems);
         assert!(rep.headroom[0].starts_with("module a: ast "), "{:?}", rep.headroom);
         // Generators before consumers.
@@ -895,20 +839,17 @@ mod tests {
     }
 
     #[test]
-    fn load_reads_toml_and_refuses_both_sources() {
-        let d = fixture();
-        assert!(load(d.path()).unwrap_err().contains("no architecture.toml"));
-        write(d.path(), "architecture.toml", MANIFEST);
-        let l = load(d.path()).unwrap();
-        assert!(!l.lean && l.idls.contains_key("ab") && l.errors.is_empty(), "{:?}", l.errors);
-        write(d.path(), "architecture/Architecture.lean", "");
-        assert!(load(d.path()).unwrap_err().contains("one architecture"));
+    fn load_needs_the_lean_package() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(load(d.path()).unwrap_err().contains("no architecture/Architecture.lean"));
     }
 
     #[test]
     fn budgets_and_overlap_fail() {
         let d = fixture();
-        let m = MANIFEST.replace("max_modules = 2", "max_modules = 1").replace("max_bytes = 1000", "max_bytes = 5");
+        let mut m = manifest();
+        m["max_modules"] = json!(1);
+        m["module"][0]["max_bytes"] = json!(5);
         let rep = run(d.path(), &m);
         let all = rep.problems.join("\n");
         assert!(all.contains("total modules budget 1"), "{all}");
@@ -920,10 +861,10 @@ mod tests {
         let d = fixture();
         write(d.path(), "bin/main.rs", "fn main() {}");
         write(d.path(), "stray/x.rs", "fn x() {}");
-        let m = format!(
-            "source_paths = [\"a\", \"b\", \"bin\", \"stray\", \"api\"]\nmax_roots = 1\n{MANIFEST}\n\
-             [[root]]\nname = \"cli\"\nlang = \"rust\"\npaths = [\"bin\"]\nmax_bytes = 5\n"
-        );
+        let mut m = manifest();
+        m["source_paths"] = json!(["a", "b", "bin", "stray", "api"]);
+        m["max_roots"] = json!(1);
+        m["root"] = json!([{"name": "cli", "lang": "rust", "paths": ["bin"], "max_bytes": 5}]);
         let rep = run(d.path(), &m);
         let all = rep.problems.join("\n");
         assert!(all.contains("stray/x.rs: owned by nobody"), "{all}");
@@ -931,17 +872,20 @@ mod tests {
         assert!(!all.contains("bin/main.rs: owned"), "{all}");
         assert!(rep.headroom.iter().any(|h| h.starts_with("root cli: ast")), "{:?}", rep.headroom);
         // A root consumes an API like a module, and keeps the DAG honest.
-        let m2 = m.replace("consumer = \"b\"", "consumer = \"cli\"");
+        let mut m2 = m.clone();
+        m2["api"][0]["consumer"] = json!("cli");
         let rep = run(d.path(), &m2);
         assert!(!rep.problems.iter().any(|p| p.contains("unknown")), "{:?}", rep.problems);
-        let cyc = format!("{MANIFEST}\n[[api]]\nname = \"ba\"\ngenerator = \"b\"\nconsumer = \"a\"\npaths = [\"api\"]\n");
-        assert!(arch_config_from_str(&cyc).unwrap_err().contains("cycle: a -> b -> a"));
+        let mut cyc = manifest();
+        cyc["api"].as_array_mut().unwrap().push(json!({"name": "ba", "generator": "b", "consumer": "a", "paths": ["api"]}));
+        assert!(arch_config_from_json(cyc).unwrap_err().contains("cycle: a -> b -> a"));
     }
 
     #[test]
     fn view_hides_other_modules() {
         let d = fixture();
-        let m = MANIFEST.replace("test ! -e b/lib.rs", "test -e b/lib.rs");
+        let mut m = manifest();
+        m["module"][0]["test_cmd"] = json!("test -e b/lib.rs");
         let rep = run(d.path(), &m);
         assert!(rep.problems.iter().any(|p| p.contains("module a: tests in its jail view")));
     }
@@ -949,17 +893,20 @@ mod tests {
     #[test]
     fn api_budgets_drift_and_languages() {
         let d = fixture();
-        let m = MANIFEST.replace("paths = [\"api\"]", "paths = [\"api\"]\n        max_constructors = 1\n        max_types = 1");
+        let mut m = manifest();
+        m["api"][0]["max_constructors"] = json!(1);
+        m["api"][0]["max_types"] = json!(1);
         let all = run(d.path(), &m).problems.join("\n");
         assert!(all.contains("constructors 2 exceeds budget 1"), "{all}");
         assert!(!all.contains("T slots"), "{all}");
         // Hand-editing a binding is drift.
         write(d.path(), "api/gen/ab.rs", "pub enum Ab {}");
-        let all = run(d.path(), MANIFEST).problems.join("\n");
+        let all = run(d.path(), &manifest()).problems.join("\n");
         assert!(all.contains("api/gen/ab.rs: generated binding"), "{all}");
         // A pair crossing languages gets a binding per language, with wire code.
-        let m = MANIFEST.replace("name = \"b\"\n        lang = \"rust\"", "name = \"b\"\n        lang = \"kotlin\"");
-        let (bs, errs) = bindings(d.path(), &loaded(d.path(), &m));
+        let mut m = manifest();
+        m["module"][1]["lang"] = json!("kotlin");
+        let (bs, errs) = bindings(d.path(), &loaded(&m));
         assert!(errs.is_empty(), "{errs:?}");
         let names: Vec<String> = bs[0].files.iter().map(|(p, _)| p.display().to_string()).collect();
         assert_eq!(names, ["api/gen/ab.rs", "api/gen/Ab.kt"]);
@@ -970,17 +917,16 @@ mod tests {
     fn consumer_wildcards_and_lint_cmd_fail() {
         let d = fixture();
         write(d.path(), "b/lib.rs", "fn g(x: Ab) { match x { Ab::X(_) => 1, _ => 2 }; }");
-        let m = MANIFEST.replace(
-            "test_cmd = \"test -e api/ab.api.kdl\"",
-            "lint_cmd = \"echo '[{\\\"file\\\":\\\"b/lib.rs\\\",\\\"line\\\":3,\\\"message\\\":\\\"custom\\\"}]'\"",
-        );
+        let mut m = manifest();
+        m["module"][1].as_object_mut().unwrap().remove("test_cmd");
+        m["module"][1]["lint_cmd"] = json!(r#"echo '[{"file":"b/lib.rs","line":3,"message":"custom"}]'"#);
         let all = run(d.path(), &m).problems.join("\n");
         assert!(all.contains("b/lib.rs:1: wildcard arm in a match over Ab"), "{all}");
         assert!(all.contains("b/lib.rs:3: custom"), "{all}");
         // The generator side may match however it likes.
         write(d.path(), "b/lib.rs", "pub fn g() {}");
         write(d.path(), "a/lib.rs", "fn f(x: Ab) { match x { Ab::X(_) => 1, _ => 2 }; }");
-        let all = run(d.path(), MANIFEST).problems.join("\n");
+        let all = run(d.path(), &manifest()).problems.join("\n");
         assert!(!all.contains("wildcard"), "{all}");
     }
 
@@ -988,9 +934,9 @@ mod tests {
     fn views_link_caches_and_get_module_env() {
         let d = fixture();
         write(d.path(), "cache/x.txt", "");
-        let m = MANIFEST
-            .replace("shared = [\"shared.txt\"]", "shared = [\"shared.txt\"]\n        linked = [\"cache\", \"absent\"]")
-            .replace("test ! -e b/lib.rs", "test -L cache && test -e cache/x.txt && test ! -e absent && test \\\"$DASHBOARD_MODULE\\\" = a");
+        let mut m = manifest();
+        m["linked"] = json!(["cache", "absent"]);
+        m["module"][0]["test_cmd"] = json!(r#"test -L cache && test -e cache/x.txt && test ! -e absent && test "$DASHBOARD_MODULE" = a"#);
         let rep = run(d.path(), &m);
         assert!(rep.pass(), "{:?}", rep.problems);
         // Links are never copied into a budget.
@@ -999,13 +945,18 @@ mod tests {
 
     #[test]
     fn rejects_bad_manifests() {
+        let with_linked = |linked: &str| {
+            let mut m = manifest();
+            m.as_object_mut().unwrap().remove("shared");
+            m["linked"] = json!([linked]);
+            arch_config_from_json(m).unwrap_err()
+        };
         for (linked, err) in [("a", "overlaps"), ("a/sub", "overlaps"), (".", "relative"), ("../x", "relative"), ("/abs", "relative")] {
-            let m = MANIFEST.replace("shared = [\"shared.txt\"]", &format!("linked = [{linked:?}]"));
-            assert!(arch_config_from_str(&m).unwrap_err().contains(err), "{linked}");
+            assert!(with_linked(linked).contains(err), "{linked}");
         }
-        let m = MANIFEST.replace("shared = [\"shared.txt\"]", "linked = [\"\"]");
-        assert!(arch_config_from_str(&m).unwrap_err().contains("relative"));
-        let dup = format!("{MANIFEST}\n[[api]]\nname=\"x\"\ngenerator=\"a\"\nconsumer=\"b\"\npaths=[\"api\"]");
-        assert!(arch_config_from_str(&dup).unwrap_err().contains("one API per connected pair"));
+        assert!(with_linked("").contains("relative"));
+        let mut dup = manifest();
+        dup["api"].as_array_mut().unwrap().push(json!({"name": "x", "generator": "a", "consumer": "b", "paths": ["api"]}));
+        assert!(arch_config_from_json(dup).unwrap_err().contains("one API per connected pair"));
     }
 }

@@ -1,14 +1,11 @@
 // The Lean architecture (handover §0): a project's `architecture/` package
-// is exported through `lake` and loaded like the TOML + KDL one; `dashboard
-// arch migrate` converts the latter into it. These tests run the real Lean
+// is exported through `lake` and loaded. These tests run the real Lean
 // toolchain (`lake` must be on the host, as on the player's).
 
 mod common;
 
 use common::*;
 use dashboard::arch::{self, Loaded, check, sync_bindings};
-use dashboard::config::arch_config_from_str;
-use dashboard::idl::Idl;
 use dashboard::lean;
 use dashboard::sandbox::Sandbox;
 use std::path::Path;
@@ -33,7 +30,7 @@ fn loads_a_lean_architecture_generates_bindings_and_checks_it() {
     let d = project();
     write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
     let loaded = arch::load(d.path()).expect("load");
-    assert!(loaded.lean && loaded.errors.is_empty(), "{:?}", loaded.errors);
+    assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
     assert_eq!(loaded.cfg.modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["a", "b"]);
     assert_eq!(loaded.cfg.modules[0].max_ast, 100);
     let ab = &loaded.idls["ab"];
@@ -143,71 +140,6 @@ fn fns_sums_elements_and_containers_export_with_their_measures() {
     write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", &in_sum)], &[]);
     let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
     assert!(problems.iter().any(|p| p.contains("generator db must consume foldable-db")), "{problems:?}");
-}
-
-const TOML3: &str = "max_modules = 4\n\
-[[module]]\nname = \"foldable\"\nlang = \"rust\"\npaths = [\"foldable\"]\n\
-[[module]]\nname = \"monoid\"\nlang = \"rust\"\npaths = [\"monoid\"]\n\
-[[module]]\nname = \"db\"\nlang = \"rust\"\npaths = [\"db\"]\nmax_bytes = 5000\n\
-[[module]]\nname = \"nutrition\"\nlang = \"rust\"\npaths = [\"nutrition\"]\ntest_cmd = \"true\"\n\
-[[api]]\nname = \"foldable-nutrition\"\ngenerator = \"foldable\"\nconsumer = \"nutrition\"\npaths = [\"apis/foldable-nutrition\"]\nimpl = [\"foldable/seq.rs\"]\n\
-[[api]]\nname = \"monoid-nutrition\"\ngenerator = \"monoid\"\nconsumer = \"nutrition\"\npaths = [\"apis/monoid-nutrition\"]\nimpl = [\"monoid/seq.rs\"]\n\
-[[api]]\nname = \"db-nutrition\"\ngenerator = \"db\"\nconsumer = \"nutrition\"\npaths = [\"apis/db-nutrition\"]\nmax_elements = 4\nmax_fields = 9\n";
-
-const KDLS: [(&str, &str); 3] = [
-    ("foldable-nutrition", "api \"foldable-nutrition\"\ncontainer \"Seq\" classes=\"Foldable\"\n"),
-    ("monoid-nutrition", "api \"monoid-nutrition\"\ninstance \"Monoid\" for=\"foldable-nutrition.Seq\"\n"),
-    (
-        "db-nutrition",
-        "api \"db-nutrition\"\nelement \"Row\" {\n    variant \"Meal\" \"f64\" \"string\"\n    variant \"Note\" \"string\"\n}\n\
-         container \"Rows\" of=\"Row\" ref=\"foldable-nutrition.Seq\"\ntype \"Reason\" repr=\"string\" display=#true\ntype \"Id\" repr=\"i64\"\n\
-         constructor \"Success\" \"Rows\"\nconstructor \"Failure\" \"Reason\" \"Id\"\nconstructor \"Nothing\"\n",
-    ),
-];
-
-#[test]
-fn migrate_round_trips_the_toml_and_kdl_architecture() {
-    let d = project();
-    for m in ["foldable", "monoid", "db", "nutrition"] {
-        write_file(d.path(), &format!("{m}/lib.rs"), "");
-    }
-    // `store` is a DSL keyword: migrate writes it `«store»`.
-    let toml = TOML3.replace("name = \"db\"", "name = \"store\"").replace("generator = \"db\"", "generator = \"store\"");
-    write_file(d.path(), "architecture.toml", &toml);
-    for (name, kdl) in KDLS {
-        write_file(d.path(), &format!("apis/{name}/{name}.api.kdl"), kdl);
-    }
-    let before = arch::load(d.path()).expect("toml load");
-    assert!(!before.lean && before.errors.is_empty(), "{:?}", before.errors);
-    let wrote = lean::migrate(d.path(), &before.cfg, &before.idls).expect("migrate");
-    let manifest = std::fs::read_to_string(d.path().join("architecture/Architecture.lean")).unwrap();
-    assert!(manifest.contains("module «store» where") && manifest.contains(": «store» → nutrition"), "{manifest}");
-    assert!(wrote.contains(&"architecture/Architecture.lean".to_string()) && wrote.contains(&"architecture/Apis/db-nutrition.lean".to_string()), "{wrote:?}");
-    assert!(arch::load(d.path()).unwrap_err().contains("one architecture"));
-    std::fs::remove_file(d.path().join("architecture.toml")).unwrap();
-    for (name, _) in KDLS {
-        std::fs::remove_file(d.path().join(format!("apis/{name}/{name}.api.kdl"))).unwrap();
-    }
-    let after = arch::load(d.path()).expect("lean load");
-    assert!(after.lean);
-    for (name, _) in KDLS {
-        assert_eq!(after.idls[name], before.idls[name], "{name}");
-    }
-    let names = |c: &dashboard::config::ArchConfig| c.modules.iter().map(|m| (m.name.clone(), m.max_bytes, m.test_cmd.clone())).collect::<Vec<_>>();
-    assert_eq!(names(&after.cfg), names(&before.cfg));
-    let apis = |c: &dashboard::config::ArchConfig| {
-        c.apis.iter().map(|a| (a.name.clone(), a.generator.clone(), a.consumer.clone(), a.paths.clone(), a.impls.clone(), a.max_elements, a.max_fields)).collect::<Vec<_>>()
-    };
-    assert_eq!(apis(&after.cfg), apis(&before.cfg));
-    assert_eq!(after.cfg.max_modules, 4);
-    // The TOML printers are the inverse of the parsers on this fixture too.
-    assert_eq!(arch_config_from_str(&toml).unwrap().lean(), before.cfg.lean());
-    assert_eq!(Idl::parse(KDLS[2].1).unwrap().lean(), before.idls["db-nutrition"].lean());
-    // The migrated IDL carries no bounds: the check says so until the
-    // director adds them.
-    let (problems, _) = report(d.path(), &after);
-    assert!(problems.iter().any(|p| p.contains("api db-nutrition: type Reason: a string or bytes type needs a max_len")), "{problems:?}");
-    assert!(problems.iter().any(|p| p.contains("element Row: variant Meal: field 1 needs a max_len")), "{problems:?}");
 }
 
 const PROOFS_MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\

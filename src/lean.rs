@@ -385,7 +385,7 @@ pub fn impacted(pkg: &Path, sandbox: &Sandbox, modules: &[String]) -> Result<Vec
 }
 
 /// Parses an export document (`{"arch": ..., "idls": {...}, "errors": [...]}`),
-/// validating the manifest and every IDL as the TOML/KDL loaders do.
+/// validating the manifest and every IDL.
 pub fn parse(text: &str) -> Result<Exported, String> {
     let json: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("export: {e}"))?;
     if let Some(errs) = json.get("errors").and_then(|e| e.as_array())
@@ -549,27 +549,6 @@ impl Exporter {
 /// `lake` is on this host (needed to load a Lean architecture at all).
 pub fn available() -> bool {
     Command::new(lake()).arg("--version").output().is_ok_and(|o| o.status.success())
-}
-
-/// Writes the Lean package for a TOML manifest and its KDL IDLs (`dashboard
-/// arch migrate`): the vendored library, `Architecture.lean` and one
-/// `Apis/<name>.lean` per API. Returns the files written. Comments in the
-/// TOML and KDL are not carried over.
-pub fn migrate(root: &Path, cfg: &ArchConfig, idls: &BTreeMap<String, Idl>) -> Result<Vec<String>, String> {
-    let mut wrote = write_vendored(root)?;
-    let mut put = |rel: String, text: String| -> Result<(), String> {
-        let path = root.join(&rel);
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-        std::fs::write(&path, text).map_err(|e| format!("{rel}: {e}"))?;
-        wrote.push(rel);
-        Ok(())
-    };
-    put(config::ARCH_LEAN_MANIFEST.to_string(), cfg.lean())?;
-    for a in &cfg.apis {
-        let Some(idl) = idls.get(&a.name) else { continue };
-        put(api_file(&a.name), idl.lean())?;
-    }
-    Ok(wrote)
 }
 
 #[cfg(test)]

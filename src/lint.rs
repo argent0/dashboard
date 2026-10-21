@@ -223,8 +223,9 @@ pub fn mint_calls(src: &str, tokens: &[&str]) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::idl::idl_from_json;
 
-    const IDL: &str = "api \"ab\"\ntype \"Id\" repr=\"string\"\nconstructor \"Created\" \"Id\"\nconstructor \"Tick\"\n";
+    const IDL: &str = r#"{"api":"ab","types":[{"name":"Id","kind":{"repr":"string"}}],"ctors":[{"name":"Created","args":["Id"]},{"name":"Tick"}]}"#;
 
     #[test]
     fn serialized_structure_at_the_boundary_is_a_tunnel() {
@@ -241,7 +242,7 @@ mod tests {
     }
 
     fn run(lang: &str, l: Language, src: &str) -> Vec<Finding> {
-        wildcard_arms(lang, l, src.as_bytes(), &Idl::parse(IDL).unwrap())
+        wildcard_arms(lang, l, src.as_bytes(), &idl_from_json(IDL).unwrap())
     }
 
     #[test]
@@ -273,9 +274,9 @@ mod tests {
 
     #[test]
     fn element_algebras_must_be_total() {
-        let idl = Idl::parse(
-            "api \"db\"\nelement \"Row\" {\n variant \"Meal\" \"f64\"\n variant \"Note\" \"string\"\n}\n\
-             container \"Rows\" of=\"Row\" ref=\"f.Seq\"\nconstructor \"Ok\" \"Rows\"\n",
+        let idl = idl_from_json(
+            r#"{"api":"db","elements":[{"name":"Row","variants":[{"name":"Meal","fields":[{"repr":"f64"}]},{"name":"Note","fields":[{"repr":"string"}]}]}],
+                "containers":[{"name":"Rows","kind":{"of":["Row","f","Seq"]}}],"ctors":[{"name":"Ok","args":["Rows"]}]}"#,
         )
         .unwrap();
         let rs: Language = tree_sitter_rust::LANGUAGE.into();

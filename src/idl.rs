@@ -1,13 +1,14 @@
-// The API IDL (architect-v3.md): one `<name>.api.kdl` per API, the source of
-// truth for a flat sum of products. Bindings are generated from it into
-// pinned files, so the opacity of every `T` holds by construction.
+// The API IDL (architect-v3.md): one `idl` block per API in the Lean package
+// (`architecture/Apis/<name>.lean`), exported to JSON by `lean::export` and
+// deserialized here, the source of truth for a flat sum of products.
+// Bindings are generated from it into pinned files, so the opacity of every
+// `T` holds by construction.
 //
-//   api "ab"
-//   type "UserId"  repr="string"     // string | bytes | i64 | f64 | bool
-//   type "Parent"  ref="xy.Event"    // a type declared by API xy
-//   type "Name"    repr="string" display=#true
-//   constructor "Created" "UserId" "Payload"
-//   constructor "Tick"
+//   idl ab where
+//     type UserId : string 64 display   -- string n | bytes n | i64 | f64 | bool
+//     type Parent : ref xy.Event        -- a type declared by API xy
+//     constructor Created : UserId → Payload
+//     constructor Tick
 //
 // Elements and containers (architect-v3.md, "Elements and containers"): an
 // `element` is a readable flat sum of products over raw reprs, reachable
@@ -16,22 +17,22 @@
 // module) declares it generic, with its classes; another class module adds
 // an `instance`; a data API instantiates it with its element:
 //
-//   container "Seq" classes="Foldable"               // foldable-x: Seq a
-//   instance "Functor" for="foldable-x.Seq"          // functor-x
-//   element "Row" { variant "Consumption" "f64" "string"; }
-//   container "Rows" of="Row" ref="foldable-x.Seq"   // db-x: Seq Row
+//   container Seq : Foldable                    -- «foldable-x»: Seq a
+//   instance Functor for «foldable-x».Seq       -- «functor-x»
+//   element Row
+//     | Consumption : f64 → string 10
+//   container Rows := «foldable-x».Seq Row      -- «db-x»: Seq Row
 //
 // The instance is hand-written (the API's `impl` files); the class traits
 // and the law tests it must pass are generated.
 //
 // Proofs supplied by the caller (architect-v3.md): a `where` refinement on a
-// type (`type Grams : f64 where 0 < v ∧ v ≤ 20000`, Lean only) becomes the
+// type (`type Grams : f64 where 0 < v ∧ v ≤ 20000`) becomes the
 // smart constructor's check in every language; a `token` is a T only the
 // API's generator mints (`versioned stale=Ctor` carries a version and
 // `linear spent=Ctor` is single-use; each forces its failure constructor
 // into the sum of every fn taking it).
 
-use kdl::{KdlDocument, KdlNode, KdlValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,19 +44,6 @@ pub enum Repr {
     I64,
     F64,
     Bool,
-}
-
-impl Repr {
-    fn parse(s: &str) -> Option<Repr> {
-        Some(match s {
-            "string" => Repr::String,
-            "bytes" => Repr::Bytes,
-            "i64" => Repr::I64,
-            "f64" => Repr::F64,
-            "bool" => Repr::Bool,
-            _ => return None,
-        })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,12 +155,12 @@ pub struct TypeDecl {
     pub kind: Kind,
     pub display: bool,
     /// The most characters (string) or bytes a value may hold; 0: no bound
-    /// was declared (the Lean IDL requires one).
+    /// was declared (the check requires one).
     pub max_len: u64,
     /// The callee stores this T without reading it: a forwarding adapter
     /// (`ToSql` in Rust) is generated.
     pub store: bool,
-    /// The `where` refinement (Lean only), beside the `max_len` bound.
+    /// The `where` refinement, beside the `max_len` bound.
     pub pred: Option<Pred>,
 }
 
@@ -218,16 +206,6 @@ pub enum Class {
 }
 
 impl Class {
-    fn parse(s: &str) -> Option<Class> {
-        Some(match s {
-            "Foldable" => Class::Foldable,
-            "Functor" => Class::Functor,
-            "Traversable" => Class::Traversable,
-            "Monoid" => Class::Monoid,
-            _ => return None,
-        })
-    }
-
     pub fn name(self) -> &'static str {
         match self {
             Class::Foldable => "Foldable",
@@ -312,154 +290,10 @@ fn ident_ok(s: &str) -> bool {
         && c.all(|c| c.is_ascii_alphanumeric())
 }
 
-fn string_args(node: &KdlNode) -> Result<Vec<String>, String> {
-    node.entries()
-        .iter()
-        .filter(|e| e.name().is_none())
-        .map(|e| {
-            e.value()
-                .as_string()
-                .map(str::to_string)
-                .ok_or_else(|| format!("{}: arguments must be strings", node.name().value()))
-        })
-        .collect()
-}
-
-/// `api.Type` -> `(api, Type)`.
-fn api_type(s: &str) -> Option<(String, String)> {
-    match s.split_once('.') {
-        Some((a, t)) if !a.is_empty() && ident_ok(t) => Some((a.to_string(), t.to_string())),
-        _ => None,
-    }
-}
-
-fn prop<'a>(node: &'a KdlNode, key: &str) -> Option<&'a KdlValue> {
-    node.entries().iter().find(|e| e.name().map(|n| n.value()) == Some(key)).map(|e| e.value())
-}
-
 impl Idl {
-    pub fn parse(text: &str) -> Result<Idl, String> {
-        let doc: KdlDocument = text.parse().map_err(|e: kdl::KdlError| e.to_string())?;
-        let (mut api, mut types, mut ctors) = (None, Vec::new(), Vec::new());
-        let (mut elements, mut containers, mut instances) = (Vec::new(), Vec::new(), Vec::new());
-        for node in doc.nodes() {
-            let args = string_args(node)?;
-            match node.name().value() {
-                "api" => match args.as_slice() {
-                    [n] if api.is_none() => api = Some(n.clone()),
-                    _ => return Err("api: exactly one `api \"name\"` line".to_string()),
-                },
-                "type" => {
-                    let [name] = args.as_slice() else {
-                        return Err("type: expected one name".to_string());
-                    };
-                    let repr = prop(node, "repr").and_then(KdlValue::as_string);
-                    let rf = prop(node, "ref").and_then(KdlValue::as_string);
-                    let kind = match (repr, rf) {
-                        (Some(r), None) => Kind::Repr(
-                            Repr::parse(r).ok_or_else(|| format!("type {name}: unknown repr {r:?}"))?,
-                        ),
-                        (None, Some(r)) => match api_type(r) {
-                            Some((a, t)) => Kind::Ref(a, t),
-                            None => return Err(format!("type {name}: ref {r:?} must be api.Type")),
-                        },
-                        _ => return Err(format!("type {name}: exactly one of repr= or ref=")),
-                    };
-                    let display = match prop(node, "display") {
-                        None => false,
-                        Some(v) => v.as_bool().ok_or(format!("type {name}: display must be #true or #false"))?,
-                    };
-                    if display && matches!(kind, Kind::Ref(..)) {
-                        return Err(format!("type {name}: display is only for repr types"));
-                    }
-                    types.push(TypeDecl { name: name.clone(), kind, display, max_len: 0, store: false, pred: None });
-                }
-                "constructor" => {
-                    let Some((name, rest)) = args.split_first() else {
-                        return Err("constructor: expected a name".to_string());
-                    };
-                    ctors.push(Ctor { name: name.clone(), args: rest.to_vec() });
-                }
-                "element" => {
-                    let [name] = args.as_slice() else {
-                        return Err("element: expected one name".to_string());
-                    };
-                    let mut variants = Vec::new();
-                    for v in node.children().map(|d| d.nodes()).unwrap_or_default() {
-                        let vargs = string_args(v)?;
-                        let (Some((vname, fields)), "variant") = (vargs.split_first(), v.name().value()) else {
-                            return Err(format!("element {name}: expected `variant \"Name\" \"repr\"...` lines"));
-                        };
-                        let fields = fields
-                            .iter()
-                            .map(|f| {
-                                Repr::parse(f)
-                                    .map(|repr| Field { repr, max_len: 0 })
-                                    .ok_or_else(|| format!("element {name}: variant {vname}: unknown repr {f:?}"))
-                            })
-                            .collect::<Result<_, _>>()?;
-                        variants.push(Variant { name: vname.clone(), fields });
-                    }
-                    elements.push(Element { name: name.clone(), variants });
-                }
-                "container" => {
-                    let [name] = args.as_slice() else {
-                        return Err("container: expected one name".to_string());
-                    };
-                    let get = |k: &str| prop(node, k).and_then(KdlValue::as_string);
-                    let kind = match (get("classes"), get("of"), get("ref")) {
-                        (Some(cs), None, None) => ContainerKind::Generic(
-                            cs.split(',')
-                                .map(|c| Class::parse(c.trim()).ok_or_else(|| format!("container {name}: unknown class {c:?}")))
-                                .collect::<Result<_, _>>()?,
-                        ),
-                        (None, Some(of), Some(r)) => {
-                            let (a, t) = api_type(r).ok_or_else(|| format!("container {name}: ref {r:?} must be api.Type"))?;
-                            ContainerKind::Of(of.to_string(), a, t)
-                        }
-                        _ => {
-                            return Err(format!(
-                                "container {name}: either classes= (a generic this api owns) or of= and ref= (another api's generic over an element)"
-                            ))
-                        }
-                    };
-                    containers.push(Container { name: name.clone(), kind });
-                }
-                "instance" => {
-                    let [class] = args.as_slice() else {
-                        return Err("instance: expected one class".to_string());
-                    };
-                    let class = Class::parse(class).ok_or_else(|| format!("instance: unknown class {class:?}"))?;
-                    let (api, container) = prop(node, "for")
-                        .and_then(KdlValue::as_string)
-                        .and_then(api_type)
-                        .ok_or_else(|| format!("instance {}: for= must be api.Container", class.name()))?;
-                    instances.push(Instance { class, api, container });
-                }
-                other => return Err(format!("unknown node {other:?}")),
-            }
-        }
-        let idl = Idl {
-            api: api.ok_or("missing `api \"name\"`")?,
-            types,
-            tokens: Vec::new(),
-            ctors,
-            elements,
-            containers,
-            instances,
-            sums: Vec::new(),
-            fns: Vec::new(),
-        };
-        let errs = idl.validate();
-        if !errs.is_empty() {
-            return Err(errs.join("\n"));
-        }
-        Ok(idl)
-    }
-
-    /// An IDL the Lean exporter produced (`lean::export`): the same checks
-    /// the KDL parser runs, since Lean type-checks only part of them.
-    /// Every problem is listed, one per line.
+    /// An IDL the Lean exporter produced (`lean::export`), validated here
+    /// since Lean type-checks only part of it. Every problem is listed, one
+    /// per line.
     pub fn from_export(idl: Idl) -> Result<Idl, String> {
         let errs = idl.validate();
         if !errs.is_empty() {
@@ -2525,127 +2359,10 @@ const MONOID_LAWS: &str = "
     }
 ";
 
-fn lean_ident(name: &str) -> String {
-    crate::lean::ident(name)
-}
-
-fn lean_idents(names: &[String]) -> Vec<String> {
-    names.iter().map(|n| lean_ident(n)).collect()
-}
-
-fn lean_prim(repr: Repr, max_len: u64) -> String {
-    match (repr, max_len) {
-        (Repr::String, 0) => "string".to_string(),
-        (Repr::String, n) => format!("string {n}"),
-        (Repr::Bytes, 0) => "bytes".to_string(),
-        (Repr::Bytes, n) => format!("bytes {n}"),
-        (Repr::I64, _) => "i64".to_string(),
-        (Repr::F64, _) => "f64".to_string(),
-        (Repr::Bool, _) => "bool".to_string(),
-    }
-}
-
-fn lean_ctor(c: &Ctor) -> String {
-    if c.args.is_empty() {
-        format!("  | {}\n", lean_ident(&c.name))
-    } else {
-        format!("  | {} : {}\n", lean_ident(&c.name), lean_idents(&c.args).join(" → "))
-    }
-}
-
-impl Idl {
-    /// The IDL as `architecture/Apis/<api>.lean` (`dashboard arch migrate`),
-    /// in the Lean DSL: the same declarations in the same order. Refs to
-    /// other APIs become imports of their files.
-    pub fn lean(&self) -> String {
-        let mut imports: Vec<&str> = self.refs().into_iter().map(|(a, _)| a).collect();
-        imports.extend(self.container_refs().into_iter().map(|(a, _)| a));
-        imports.sort();
-        imports.dedup();
-        let mut o = String::from("import Architecture\n");
-        for a in imports {
-            o.push_str(&format!("import Apis.«{a}»\n"));
-        }
-        o.push_str(&format!("open Dashboard\n\nidl {} where\n", lean_ident(&self.api)));
-        for t in &self.types {
-            match &t.kind {
-                Kind::Repr(r) => o.push_str(&format!("  type {} : {}", lean_ident(&t.name), lean_prim(*r, t.max_len))),
-                Kind::Tuple(fs) => o.push_str(&format!(
-                    "  type {} : {}",
-                    lean_ident(&t.name),
-                    fs.iter().map(|f| lean_prim(f.repr, f.max_len)).collect::<Vec<_>>().join(" × ")
-                )),
-                Kind::Ref(a, ty) => {
-                    o.push_str(&format!("  type {} : ref {}.{}\n", lean_ident(&t.name), lean_ident(a), lean_ident(ty)));
-                    continue;
-                }
-            }
-            if t.display {
-                o.push_str(" display");
-            }
-            if t.store {
-                o.push_str(" store");
-            }
-            if let Some(p) = &t.pred {
-                o.push_str(&format!(" where {}", p.render()));
-            }
-            o.push('\n');
-        }
-        for k in &self.tokens {
-            let kind = match &k.kind {
-                TokenKind::Permanent => "permanent".to_string(),
-                TokenKind::Versioned(c) => format!("versioned stale={}", lean_ident(c)),
-                TokenKind::Linear(c) => format!("linear spent={}", lean_ident(c)),
-            };
-            o.push_str(&format!("  token {} : {} {kind}", lean_ident(&k.name), lean_prim(k.repr, k.max_len)));
-            if k.store {
-                o.push_str(" store");
-            }
-            o.push('\n');
-        }
-        for e in &self.elements {
-            o.push_str(&format!("  element {}\n", lean_ident(&e.name)));
-            for v in &e.variants {
-                if v.fields.is_empty() {
-                    o.push_str(&format!("    | {}\n", lean_ident(&v.name)));
-                } else {
-                    let fs: Vec<String> = v.fields.iter().map(|f| lean_prim(f.repr, f.max_len)).collect();
-                    o.push_str(&format!("    | {} : {}\n", lean_ident(&v.name), fs.join(" → ")));
-                }
-            }
-        }
-        for c in &self.containers {
-            match &c.kind {
-                ContainerKind::Generic(cs) => {
-                    let names: Vec<&str> = cs.iter().map(|c| c.name()).collect();
-                    o.push_str(&format!("  container {} : {}\n", lean_ident(&c.name), names.join(", ")));
-                }
-                ContainerKind::Of(of, a, t) => o.push_str(&format!("  container {} := {}.{} {}\n", lean_ident(&c.name), lean_ident(a), lean_ident(t), lean_ident(of))),
-            }
-        }
-        for i in &self.instances {
-            o.push_str(&format!("  instance {} for {}.{}\n", i.class.name(), lean_ident(&i.api), lean_ident(&i.container)));
-        }
-        for s in &self.sums {
-            o.push_str(&format!("  sum {}\n", lean_ident(&s.name)));
-            for c in &s.ctors {
-                o.push_str(&format!("  {}", lean_ctor(c)));
-            }
-        }
-        for f in &self.fns {
-            let mut sig = lean_idents(&f.inputs);
-            sig.push(lean_ident(&f.returns));
-            o.push_str(&format!("  fn {} : {}\n", lean_ident(&f.name), sig.join(" → ")));
-        }
-        for c in &self.ctors {
-            if c.args.is_empty() {
-                o.push_str(&format!("  constructor {}\n", lean_ident(&c.name)));
-            } else {
-                o.push_str(&format!("  constructor {} : {}\n", lean_ident(&c.name), lean_idents(&c.args).join(" → ")));
-            }
-        }
-        o
-    }
+/// An IDL from its export JSON, validated like `lean::export`'s (unit tests).
+#[cfg(test)]
+pub(crate) fn idl_from_json(json: &str) -> Result<Idl, String> {
+    Idl::from_export(serde_json::from_str(json).map_err(|e| e.to_string())?)
 }
 
 /// `api.user_events` for API `user-events`.
@@ -2668,18 +2385,13 @@ pub fn pascal(api: &str) -> String {
 mod tests {
     use super::*;
 
-    const AB: &str = r#"
-        api "ab"
-        type "UserId" repr="string" display=#true
-        type "Payload" repr="bytes"
-        constructor "Created" "UserId" "Payload"
-        constructor "Deleted" "UserId"
-        constructor "Tick"
-    "#;
+    const AB: &str = r#"{"api":"ab",
+        "types":[{"name":"UserId","kind":{"repr":"string"},"display":true},{"name":"Payload","kind":{"repr":"bytes"}}],
+        "ctors":[{"name":"Created","args":["UserId","Payload"]},{"name":"Deleted","args":["UserId"]},{"name":"Tick"}]}"#;
 
     #[test]
     fn parses_and_measures() {
-        let idl = Idl::parse(AB).unwrap();
+        let idl = idl_from_json(AB).unwrap();
         assert_eq!((idl.constructors(), idl.slots()), (3, 3));
         assert!(idl.type_decl("UserId").unwrap().display);
     }
@@ -2687,20 +2399,22 @@ mod tests {
     #[test]
     fn rejects_bad_idl() {
         for (bad, want) in [
-            ("api \"a\"\nconstructor \"X\" \"Nope\"", "unknown type"),
-            ("api \"a\"\ntype \"T\" repr=\"string\"\nconstructor \"X\"", "never used"),
-            ("api \"a\"\ntype \"T\" repr=\"float\"\nconstructor \"X\" \"T\"", "unknown repr"),
-            ("api \"a\"\ntype \"T\" ref=\"nodot\"\nconstructor \"X\" \"T\"", "api.Type"),
-            ("api \"a\"", "no constructors"),
+            (r#"{"api":"a","ctors":[{"name":"X","args":["Nope"]}]}"#, "unknown type"),
+            (r#"{"api":"a","types":[{"name":"T","kind":{"repr":"string"}}],"ctors":[{"name":"X"}]}"#, "never used"),
+            (r#"{"api":"a"}"#, "no constructors"),
         ] {
-            let e = Idl::parse(bad).unwrap_err();
+            let e = idl_from_json(bad).unwrap_err();
             assert!(e.contains(want), "{bad}: {e}");
         }
     }
 
     #[test]
     fn lists_every_problem_at_once() {
-        let e = Idl::parse("api \"a\"\ntype \"T\" repr=\"string\"\ntype \"U\" repr=\"i64\"\nconstructor \"X\" \"Nope\"\nconstructor \"x\"").unwrap_err();
+        let e = idl_from_json(
+            r#"{"api":"a","types":[{"name":"T","kind":{"repr":"string"}},{"name":"U","kind":{"repr":"i64"}}],
+                "ctors":[{"name":"X","args":["Nope"]},{"name":"x"}]}"#,
+        )
+        .unwrap_err();
         let lines: Vec<&str> = e.lines().collect();
         assert_eq!(
             lines,
@@ -2713,31 +2427,25 @@ mod tests {
         );
     }
 
-    const DB: &str = r#"
-        api "db"
-        element "Row" {
-            variant "Meal" "f64" "string"
-            variant "Note" "string"
-        }
-        container "Rows" of="Row" ref="foldable.Seq"
-        type "Reason" repr="string"
-        constructor "Success" "Rows"
-        constructor "Failure" "Reason"
-    "#;
+    const DB: &str = r#"{"api":"db",
+        "elements":[{"name":"Row","variants":[{"name":"Meal","fields":[{"repr":"f64"},{"repr":"string"}]},{"name":"Note","fields":[{"repr":"string"}]}]}],
+        "containers":[{"name":"Rows","kind":{"of":["Row","foldable","Seq"]}}],
+        "types":[{"name":"Reason","kind":{"repr":"string"}}],
+        "ctors":[{"name":"Success","args":["Rows"]},{"name":"Failure","args":["Reason"]}]}"#;
 
     #[test]
     fn parses_elements_containers_and_instances() {
-        let idl = Idl::parse(DB).unwrap();
+        let idl = idl_from_json(DB).unwrap();
         assert_eq!((idl.constructors(), idl.slots()), (2, 2));
         assert_eq!((idl.element_variants(), idl.element_fields()), (2, 3));
         assert_eq!(idl.container_refs(), [("foldable", "Seq")]);
         assert!(idl.classes().is_empty());
         let sums: Vec<String> = idl.sums().into_iter().map(|s| s.0).collect();
         assert_eq!(sums, ["Db", "Row"]);
-        let owner = Idl::parse("api \"foldable\"\ncontainer \"Seq\" classes=\"Foldable, Monoid\"").unwrap();
+        let owner = idl_from_json(r#"{"api":"foldable","containers":[{"name":"Seq","kind":{"generic":["Foldable","Monoid"]}}]}"#).unwrap();
         assert_eq!(owner.classes(), [(Class::Foldable, "Seq"), (Class::Monoid, "Seq")]);
         assert!(owner.owns_generic("Seq"));
-        let inst = Idl::parse("api \"m\"\ninstance \"Monoid\" for=\"foldable.Seq\"").unwrap();
+        let inst = idl_from_json(r#"{"api":"m","instances":[{"class":"Monoid","api":"foldable","container":"Seq"}]}"#).unwrap();
         assert_eq!(inst.classes(), [(Class::Monoid, "Seq")]);
         let rs = inst.rust(false, &["../../m/seq.rs".to_string()]);
         assert!(rs.contains("use super::foldable::{Foldable, Seq};"), "{rs}");
@@ -2748,28 +2456,27 @@ mod tests {
 
     #[test]
     fn rejects_bad_containers() {
-        let el = "element \"Row\" { variant \"A\" \"i64\"; }\n";
+        let el = r#""elements":[{"name":"Row","variants":[{"name":"A","fields":[{"repr":"i64"}]}]}]"#;
+        let rs = r#""containers":[{"name":"Rs","kind":{"of":["Row","f","Seq"]}}]"#;
+        let seq = |classes: &str| format!(r#""containers":[{{"name":"Seq","kind":{{"generic":[{classes}]}}}}]"#);
+        let inst = |class: &str, api: &str| format!(r#"{{"class":"{class}","api":"{api}","container":"Seq"}}"#);
         for (bad, want) in [
-            (format!("{el}constructor \"X\" \"Row\""), "no container holds it"),
-            (format!("{el}container \"Rs\" of=\"Row\" ref=\"f.Seq\"\nconstructor \"X\" \"Row\" \"Rs\""), "reachable only through a container"),
-            ("element \"Row\" { variant \"A\" \"Nope\"; }".to_string(), "unknown repr"),
-            ("container \"Seq\" classes=\"Functor\"".to_string(), "must include Foldable"),
-            ("container \"Seq\" classes=\"Foldable,Monad\"".to_string(), "unknown class"),
-            ("container \"Seq\" classes=\"Foldable\"\nconstructor \"X\" \"Seq\"".to_string(), "is generic"),
-            ("container \"Rs\" of=\"Row\"".to_string(), "either classes="),
-            (format!("{el}container \"Rs\" of=\"Row\" ref=\"f.Seq\"\nconstructor \"X\""), "never used"),
-            ("instance \"Foldable\" for=\"f.Seq\"".to_string(), "Foldable is declared by"),
-            ("instance \"Functor\" for=\"f.Seq\"\ninstance \"Monoid\" for=\"g.Seq\"".to_string(), "of one api"),
-            ("instance \"Functor\" for=\"Seq\"".to_string(), "api.Container"),
+            (format!(r#"{el},"ctors":[{{"name":"X","args":["Row"]}}]"#), "no container holds it"),
+            (format!(r#"{el},{rs},"ctors":[{{"name":"X","args":["Row","Rs"]}}]"#), "reachable only through a container"),
+            (seq(r#""Functor""#), "must include Foldable"),
+            (format!(r#"{},"ctors":[{{"name":"X","args":["Seq"]}}]"#, seq(r#""Foldable""#)), "is generic"),
+            (format!(r#"{el},{rs},"ctors":[{{"name":"X"}}]"#), "never used"),
+            (format!(r#""instances":[{}]"#, inst("Foldable", "f")), "Foldable is declared by"),
+            (format!(r#""instances":[{},{}]"#, inst("Functor", "f"), inst("Monoid", "g")), "of one api"),
         ] {
-            let e = Idl::parse(&format!("api \"a\"\n{bad}")).unwrap_err();
+            let e = idl_from_json(&format!(r#"{{"api":"a",{bad}}}"#)).unwrap_err();
             assert!(e.contains(want), "{bad}: {e}");
         }
     }
 
     #[test]
     fn typescript_is_opaque_and_wire_is_optional() {
-        let idl = Idl::parse(AB).unwrap();
+        let idl = idl_from_json(AB).unwrap();
         let plain = idl.typescript(false, &BTreeMap::new(), &BTreeMap::new());
         assert!(plain.contains("export class UserId {\n  readonly #v: string;"));
         assert!(plain.contains("kind: \"Created\"; a0: UserId; a1: Payload"));
@@ -2779,7 +2486,7 @@ mod tests {
 
     #[test]
     fn kotlin_is_opaque_and_wire_is_optional() {
-        let idl = Idl::parse(AB).unwrap();
+        let idl = idl_from_json(AB).unwrap();
         let plain = idl.kotlin(false);
         assert!(plain.contains("package api.ab"));
         assert!(plain.contains("class UserId(private val v: String)"));
@@ -2872,10 +2579,6 @@ mod tests {
         assert!(kt.contains("class Span(private val v1: Long, private val v2: Long) {\n    init { if (!((v1 < v2))) throw Violation(\"Span\""), "{kt}");
         assert!(kt.contains("(v in listOf(\"g\", \"ml\"))") && kt.contains("((0.0 < v) && (v <= 20000.0))"), "{kt}");
         assert!(kt.contains("class ProductRef private constructor(private val v: Long)") && kt.contains("fun mint(v: Long, version: Long): EventTypeRef"), "{kt}");
-        let lean = idl.lean();
-        assert!(lean.contains("  type Grams : f64 where 0 < v ∧ v ≤ 20000\n"), "{lean}");
-        assert!(lean.contains("  type Span : i64 × i64 where v.1 < v.2\n") && lean.contains("  type Id : i64 display store\n"), "{lean}");
-        assert!(lean.contains("  token ProductRef : i64 permanent store\n  token EventTypeRef : i64 versioned stale=Retired store\n  token Funds : i64 linear spent=Spent\n"), "{lean}");
         // Validation.
         let bad = |from: &str, to: &str| Idl::from_export(serde_json::from_str(&PROOFS.replace(from, to)).unwrap()).unwrap_err();
         assert!(bad(r#"{"name":"Retired"},"#, "").contains("fn tick: takes EventTypeRef (versioned), so Written must have a `Retired` constructor"));
@@ -2888,7 +2591,7 @@ mod tests {
 
     #[test]
     fn rust_is_opaque_and_wire_is_optional() {
-        let idl = Idl::parse(AB).unwrap();
+        let idl = idl_from_json(AB).unwrap();
         let plain = idl.rust(false, &[]);
         assert!(plain.contains("pub struct UserId(String);"));
         assert!(plain.contains("pub enum Ab {\n    Created(UserId, Payload),"));

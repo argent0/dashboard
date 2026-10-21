@@ -835,12 +835,4 @@ fn main_commit_of_a_lean_architecture_is_exported_cached_and_its_raises_judged()
     assert_eq!(report.rejected[0].reason, Reason::Ownership);
     assert!(report.rejected[0].message.contains("nope"), "{}", report.rejected[0].message);
     assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(good.as_str()));
-
-    // Two architectures is one too many.
-    repo.git().run(&["reset", "--hard", &good]).unwrap();
-    write_file(repo.path(), "architecture.toml", "max_modules = 1\n");
-    commit(repo.path(), "add a toml too");
-    let report = player.tick().expect("tick");
-    assert_eq!(report.rejected.len(), 1, "{report}");
-    assert!(report.rejected[0].message.contains("one architecture"), "{}", report.rejected[0].message);
 }

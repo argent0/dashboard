@@ -923,11 +923,11 @@ pub(crate) fn check_lock_files(lock_files: &[String], test_paths: &[String]) -> 
 }
 
 // --------------------------------------------------------------------------
-// architecture.toml (architect-v3.md)
+// The architecture manifest (architect-v3.md)
 // --------------------------------------------------------------------------
 
-/// `architecture.toml` on `main`: the modules, the API between each connected
-/// pair, and every budget. Pinned like `test_paths`. A budget of 0 is off.
+/// `architecture/Architecture.lean` on `main`, as exported: the modules, the
+/// API between each connected pair, and every budget. Pinned like `test_paths`. A budget of 0 is off.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ArchConfig {
@@ -1018,17 +1018,15 @@ pub struct ApiConfig {
     pub impls: Vec<String>,
 }
 
-/// The TOML manifest's file name on `main`.
-pub const ARCH_FILE: &str = "architecture.toml";
 /// The Lean architecture package on `main` (a directory; `lean::DIR`).
 pub const ARCH_DIR: &str = "architecture";
 /// The file whose presence says a project's architecture is Lean.
 pub const ARCH_LEAN_MANIFEST: &str = "architecture/Architecture.lean";
 
-/// Whether `path` is the TOML manifest or inside the Lean package: either way
-/// the director's, pinned against workers.
+/// Whether `path` is inside the Lean package: the director's, pinned against
+/// workers.
 pub fn is_arch_path(path: &str) -> bool {
-    path == ARCH_FILE || path == ARCH_DIR || path.starts_with("architecture/")
+    path == ARCH_DIR || path.starts_with("architecture/")
 }
 
 /// Whether `path` is an API's Lean IDL (`architecture/Apis/<name>.lean`): the
@@ -1233,129 +1231,11 @@ impl ArchConfig {
     }
 }
 
-pub fn arch_config_from_str(s: &str) -> Result<ArchConfig, String> {
-    let cfg: ArchConfig = toml::from_str(s).map_err(|e| e.to_string())?;
-    cfg.validate()?;
-    Ok(cfg)
-}
-
-/// The `arch` object of a Lean export (`lean::export`), validated like the TOML.
+/// The `arch` object of a Lean export (`lean::export`), validated.
 pub fn arch_config_from_json(v: serde_json::Value) -> Result<ArchConfig, String> {
     let cfg: ArchConfig = serde_json::from_value(v).map_err(|e| e.to_string())?;
     cfg.validate()?;
     Ok(cfg)
-}
-
-fn lean_ident(name: &str) -> String {
-    crate::lean::ident(name)
-}
-
-fn lean_strs(xs: &[String]) -> String {
-    let items: Vec<String> = xs.iter().map(|s| format!("{s:?}")).collect();
-    format!("[{}]", items.join(", "))
-}
-
-impl ArchConfig {
-    /// The manifest as `architecture/Architecture.lean` (`dashboard arch
-    /// migrate`): the same fields, one block per module, root and API.
-    pub fn lean(&self) -> String {
-        let mut o = String::from(
-            "-- The architecture manifest (architect-v3.md): modules, roots, APIs and
-             -- budgets, in the dashboard's Lean DSL (architecture/Dashboard.lean).
-             -- Director-owned and pinned; each API's IDL is Apis/<name>.lean.
-             import Dashboard
-open Dashboard
-
-architecture where
-",
-        );
-        o.push_str(&format!("  max_modules = {}
-", self.max_modules));
-        if self.max_roots > 0 {
-            o.push_str(&format!("  max_roots = {}
-", self.max_roots));
-        }
-        o.push_str(&format!("  shared = {}
-", lean_strs(&self.shared)));
-        o.push_str(&format!("  linked = {}
-", lean_strs(&self.linked)));
-        if !self.source_paths.is_empty() {
-            o.push_str(&format!("  source_paths = {}
-", lean_strs(&self.source_paths)));
-        }
-        for m in &self.modules {
-            o.push_str(&format!("
-module {} where
-  lang = {}
-  paths = {}
-", lean_ident(&m.name), m.lang, lean_strs(&m.paths)));
-            if m.max_bytes > 0 {
-                o.push_str(&format!("  max_bytes = {}
-", m.max_bytes));
-            }
-            if m.max_ast > 0 {
-                o.push_str(&format!("  max_ast = {}
-", m.max_ast));
-            }
-            if let Some(c) = &m.test_cmd {
-                o.push_str(&format!("  test_cmd = {c:?}
-"));
-            }
-            if let Some(c) = &m.lint_cmd {
-                o.push_str(&format!("  lint_cmd = {c:?}
-"));
-            }
-        }
-        for r in &self.roots {
-            o.push_str(&format!("
-root {} where
-  lang = {}
-  paths = {}
-", lean_ident(&r.name), r.lang, lean_strs(&r.paths)));
-            if r.max_bytes > 0 {
-                o.push_str(&format!("  max_bytes = {}
-", r.max_bytes));
-            }
-            if r.max_ast > 0 {
-                o.push_str(&format!("  max_ast = {}
-", r.max_ast));
-            }
-        }
-        for a in &self.apis {
-            o.push_str(&format!(
-                "
-api {} : {} → {} where
-  paths = {}
-",
-                lean_ident(&a.name),
-                lean_ident(&a.generator),
-                lean_ident(&a.consumer),
-                lean_strs(&a.paths)
-            ));
-            if !a.impls.is_empty() {
-                o.push_str(&format!("  impl = {}
-", lean_strs(&a.impls)));
-            }
-            for (k, v) in [
-                ("max_constructors", a.max_constructors),
-                ("max_types", a.max_types),
-                ("max_elements", a.max_elements),
-                ("max_fields", a.max_fields),
-                ("max_fns", a.max_fns),
-                ("max_inputs", a.max_inputs),
-                ("max_string_len", a.max_string_len),
-                ("max_bytes_len", a.max_bytes_len),
-                ("max_rules", a.max_rules),
-                ("max_tokens", a.max_tokens),
-            ] {
-                if v > 0 {
-                    o.push_str(&format!("  {k} = {v}
-"));
-                }
-            }
-        }
-        o
-    }
 }
 
 pub fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> {

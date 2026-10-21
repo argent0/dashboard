@@ -1,6 +1,6 @@
 // Budget raises (architect-v3.md, "Budget increase path"): a director commit
-// on `main` that increases a budget in the architecture (`architecture.toml`,
-// or the Lean package under `architecture/`). It must change nothing but
+// on `main` that increases a budget in the architecture (the Lean package
+// under `architecture/`). It must change nothing but
 // budget fields (and no other file), carry a `raise: <reason>` (or
 // `raise(<slug>): <reason>`, naming the task that hit the budget), and stay
 // within the step cap. Lowering, turning a budget on, and any edit that
@@ -29,29 +29,17 @@ pub struct Raise {
 }
 
 /// An architecture as the raise judge sees it: the parsed manifest and the
-/// document it came from (the TOML as JSON, or the Lean export), for the
-/// "only budgets changed" comparison.
+/// Lean export it came from, for the "only budgets changed" comparison.
 #[derive(Debug, Clone)]
 pub struct Source {
     pub cfg: ArchConfig,
     pub doc: Value,
-    /// Lean: the commit's files must all be under `architecture/`; TOML:
-    /// only `architecture.toml`.
-    pub lean: bool,
 }
 
 impl Source {
-    /// From `architecture.toml` text.
-    pub fn from_toml(text: &str) -> Result<Source, String> {
-        let cfg = config::arch_config_from_str(text)?;
-        let table: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
-        let doc = serde_json::to_value(table).map_err(|e| e.to_string())?;
-        Ok(Source { cfg, doc, lean: false })
-    }
-
     /// From a Lean export.
     pub fn from_export(e: &crate::lean::Exported) -> Source {
-        Source { cfg: e.arch.clone(), doc: e.json.clone(), lean: true }
+        Source { cfg: e.arch.clone(), doc: e.json.clone() }
     }
 }
 
@@ -122,14 +110,10 @@ pub fn raised(old: &ArchConfig, new: &ArchConfig) -> Vec<(String, u64, u64)> {
 }
 
 /// `doc` with every budget field removed, to compare what else changed.
-/// Works on a TOML table as JSON and on a Lean export (`{"arch": ...}`).
+/// Works on a Lean export (`{"arch": ...}`).
 fn without_budgets(doc: &Value) -> Value {
     let mut v = doc.clone();
-    let arch = match v.get_mut("arch") {
-        Some(a) => a,
-        None => &mut v,
-    };
-    if let Some(obj) = arch.as_object_mut() {
+    if let Some(obj) = v.get_mut("arch").and_then(Value::as_object_mut) {
         obj.remove("max_modules");
         obj.remove("max_roots");
         for (key, fields) in [("module", &MODULE_BUDGETS[..]), ("root", &MODULE_BUDGETS[..]), ("api", &API_BUDGETS[..])] {
@@ -187,9 +171,8 @@ pub fn judge(
             names.join(", ")
         )
     })?;
-    let what = if new.lean { config::ARCH_DIR.to_string() + "/" } else { config::ARCH_FILE.to_string() };
-    let allowed = |f: &str| if new.lean { f.starts_with("architecture/") } else { f == config::ARCH_FILE };
-    if let Some(other) = files.iter().find(|f| !allowed(f)) {
+    let what = config::ARCH_DIR.to_string() + "/";
+    if let Some(other) = files.iter().find(|f| !f.starts_with("architecture/")) {
         return Err(format!("ownership: a budget raise changes only {what}, not {other:?}"));
     }
     if without_budgets(&old.doc) != without_budgets(&new.doc) {
@@ -215,16 +198,39 @@ pub fn judge(
 mod tests {
     use super::*;
 
-    const OLD: &str = "max_modules = 4\n[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\nmax_ast = 100\nmax_bytes = 1000\n[[module]]\nname = \"b\"\nlang = \"rust\"\npaths = [\"b\"]\n[[api]]\nname = \"ab\"\ngenerator = \"a\"\nconsumer = \"b\"\npaths = [\"api\"]\nmax_constructors = 3\n";
-    const ARCH: &[&str] = &["architecture.toml"];
+    use serde_json::json;
+
+    fn old() -> Value {
+        json!({
+            "max_modules": 4,
+            "module": [
+                {"name": "a", "lang": "rust", "paths": ["a"], "max_ast": 100, "max_bytes": 1000},
+                {"name": "b", "lang": "rust", "paths": ["b"]}
+            ],
+            "api": [{"name": "ab", "generator": "a", "consumer": "b", "paths": ["api"], "max_constructors": 3}]
+        })
+    }
+    const ARCH: &[&str] = &["architecture/Architecture.lean"];
 
     fn files(f: &[&str]) -> Vec<String> {
         f.iter().map(|s| s.to_string()).collect()
     }
 
-    fn go(new: &str, subject: &str, f: &[&str]) -> Result<Vec<Raise>, String> {
-        let old = Source::from_toml(OLD).unwrap();
-        judge(Some(&old), &Source::from_toml(new).unwrap(), subject, "", &files(f), 7)
+    fn source(arch: &Value) -> Source {
+        let idls = json!({"ab": {"api": "ab", "ctors": [{"name": "X"}]}});
+        let text = json!({"arch": arch, "idls": idls, "errors": []}).to_string();
+        Source::from_export(&crate::lean::parse(&text).unwrap())
+    }
+
+    fn go(new: &Value, subject: &str, f: &[&str]) -> Result<Vec<Raise>, String> {
+        judge(Some(&source(&old())), &source(new), subject, "", &files(f), 7)
+    }
+
+    /// `old()` with `edit` applied.
+    fn with(edit: impl FnOnce(&mut Value)) -> Value {
+        let mut v = old();
+        edit(&mut v);
+        v
     }
 
     #[test]
@@ -234,29 +240,31 @@ mod tests {
 
     #[test]
     fn lowering_turning_on_and_non_budget_edits_need_nothing() {
-        assert_eq!(go(&OLD.replace("= 100", "= 50"), "tighten", ARCH).unwrap(), vec![]);
+        assert_eq!(go(&with(|v| v["module"][0]["max_ast"] = json!(50)), "tighten", ARCH).unwrap(), vec![]);
         // b's max_ast was off (0): turning it on is not a raise.
-        let on = OLD.replace("paths = [\"b\"]\n", "paths = [\"b\"]\nmax_ast = 9\n");
-        assert_eq!(go(&on, "budget b", ARCH).unwrap(), vec![]);
-        let other = OLD.replace("paths = [\"a\"]", "paths = [\"a\", \"a2\"]");
-        assert_eq!(go(&other, "more files", &["architecture.toml", "a2/x.rs"]).unwrap(), vec![]);
+        assert_eq!(go(&with(|v| v["module"][1]["max_ast"] = json!(9)), "budget b", ARCH).unwrap(), vec![]);
+        let other = with(|v| v["module"][0]["paths"] = json!(["a", "a2"]));
+        assert_eq!(go(&other, "more files", &["architecture/Architecture.lean", "a2/x.rs"]).unwrap(), vec![]);
     }
 
     #[test]
     fn a_raise_needs_a_reason_the_manifest_alone_and_a_small_step() {
-        let up = OLD.replace("max_ast = 100", "max_ast = 120");
+        let up = with(|v| v["module"][0]["max_ast"] = json!(120));
         assert!(go(&up, "bump", ARCH).unwrap_err().contains("raise: <reason>"));
         let r = go(&up, "raise(parser): the parser grew", ARCH).unwrap();
         assert_eq!((r[0].budget.as_str(), r[0].old, r[0].new), ("module a max_ast", 100, 120));
         assert_eq!((r[0].task.as_deref(), r[0].reason.as_str(), r[0].at), (Some("parser"), "the parser grew", 7));
-        assert!(go(&up, "raise: x", &["architecture.toml", "src/x.rs"]).unwrap_err().contains("src/x.rs"));
-        let mixed = up.replace("paths = [\"a\"]", "paths = [\"a\", \"c\"]");
+        assert!(go(&up, "raise: x", &["architecture/Architecture.lean", "src/x.rs"]).unwrap_err().contains("src/x.rs"));
+        let mut mixed = up.clone();
+        mixed["module"][0]["paths"] = json!(["a", "c"]);
         assert!(go(&mixed, "raise: x", ARCH).unwrap_err().contains("only budget fields"));
-        let big = OLD.replace("max_ast = 100", "max_ast = 126");
+        let big = with(|v| v["module"][0]["max_ast"] = json!(126));
         assert!(go(&big, "raise: x", ARCH).unwrap_err().contains("step cap (125"));
-        let off = OLD.replace("max_ast = 100\n", "");
+        let off = with(|v| {
+            v["module"][0].as_object_mut().unwrap().remove("max_ast");
+        });
         assert!(go(&off, "raise: x", ARCH).unwrap_err().contains("-> off"));
-        let small = OLD.replace("max_constructors = 3", "max_constructors = 5");
+        let small = with(|v| v["api"][0]["max_constructors"] = json!(5));
         assert!(go(&small, "raise: x", ARCH).unwrap_err().contains("step cap (4"));
     }
 

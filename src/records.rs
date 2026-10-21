@@ -921,12 +921,11 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     }
     add_pinned_path(hub, &commit, &format!("tasks/{slug}/"), &mut map);
 
-    // The architecture (architect-v3.md): the manifest (TOML, or the whole
-    // Lean package with its suite files) and every API file are the
+    // The architecture (architect-v3.md): the whole Lean package with its
+    // suite files and every API's paths are the
     // director's and task agent's, never a worker's. A spike never merges;
     // a test-speedup owns the suite files.
     if !is_spike_at(hub, &commit, slug) {
-        add_pinned_path(hub, &commit, config::ARCH_FILE, &mut map);
         add_pinned_path(hub, &commit, &format!("{}/", config::ARCH_DIR), &mut map);
         if speedup {
             map.retain(|p, _| !config::is_tests_path(p));
@@ -951,9 +950,9 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     Some(map)
 }
 
-/// The architecture at `commit`, if there is one and it parses: the TOML
-/// manifest, or the Lean package's export cached by the player
-/// (`arch_source_at`; nothing is run here).
+/// The architecture at `commit`, if there is one and it parses: the Lean
+/// package's export cached by the player (`arch_source_at`; nothing is run
+/// here).
 pub fn arch_at(hub: &Git, commit: &str) -> Option<config::ArchConfig> {
     arch_source_at(hub, commit, None).ok().flatten().map(|s| s.cfg)
 }
@@ -968,17 +967,7 @@ pub fn arch_source_at(
     commit: &str,
     exporter: Option<&crate::lean::Exporter>,
 ) -> Result<Option<crate::raise::Source>, String> {
-    let toml = hub.show_file(commit, config::ARCH_FILE);
-    let lean = hub.show_file(commit, config::ARCH_LEAN_MANIFEST).is_some();
-    match (toml, lean) {
-        (Some(_), true) => Err(format!(
-            "both {} and {} exist: a project has one architecture",
-            config::ARCH_FILE,
-            config::ARCH_LEAN_MANIFEST
-        )),
-        (Some(text), false) => crate::raise::Source::from_toml(&text).map(Some).map_err(|e| format!("{}: {e}", config::ARCH_FILE)),
-        (None, _) => Ok(exported_at(hub, commit, exporter)?.map(|e| crate::raise::Source::from_export(&e))),
-    }
+    Ok(exported_at(hub, commit, exporter)?.map(|e| crate::raise::Source::from_export(&e)))
 }
 
 /// The Lean package's export at `commit`: `Ok(None)` when the commit has

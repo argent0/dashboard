@@ -1726,7 +1726,7 @@ impl<S: Sessions> Player<S> {
                 return Err((
                     Reason::Ownership,
                     format!(
-                        "ownership: main commit touches {path:?}, which is neither roadmap.toml, prompts.kdl, the architecture (architecture.toml or architecture/) nor a docs_paths entry"
+                        "ownership: main commit touches {path:?}; a main commit changes only roadmap.toml, prompts.kdl, the architecture (architecture/) and docs_paths entries"
                     ),
                 ));
             }
