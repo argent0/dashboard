@@ -1743,8 +1743,13 @@ impl<S: Sessions> Player<S> {
     /// `Runner::run_set_for`.
     fn run_set_for(&self, slug: &str, commit: &str, diff_from: Option<&str>) -> Result<checks::RunSet, String> {
         let tip = self.hub.rev_parse(&format!("refs/heads/task/{slug}")).unwrap_or_else(|| commit.to_string());
-        let modules = records::task_config_at(&self.hub, &tip, slug).map(|c| c.modules).unwrap_or_default();
-        self.runner.run_set_for(commit, &modules, diff_from)
+        let cfg = records::task_config_at(&self.hub, &tip, slug).ok_or_else(|| format!("tasks/{slug}/task.toml missing or invalid at {tip}"))?;
+        // A flaky-test-fix and a test-speedup work on the suite itself: no
+        // modules, the whole suite. A task always names its modules.
+        if cfg.kind == TaskKind::Task && cfg.modules.is_empty() {
+            return Err(format!("task/{slug}: a task with no modules (validation refuses this plan)"));
+        }
+        self.runner.run_set_for(commit, &cfg.modules, diff_from)
     }
 
     /// Runs `slug`'s run set at `commit`; a set that can't be built fails.

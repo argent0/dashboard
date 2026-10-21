@@ -185,7 +185,7 @@ fn a_higher_evidence_limit_only_strikes() {
 }
 
 #[test]
-fn the_stress_check_may_not_join_tests_toml() {
+fn the_stress_check_may_not_join_the_suite() {
     let repo = director_repo();
     let (home_dir, home) = init_hub(&repo);
     let tests = format!(

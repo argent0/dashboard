@@ -404,10 +404,14 @@ fn a_speedup_touching_non_test_code_is_struck() {
 }
 
 #[test]
-fn a_speedup_changing_runs_or_adding_a_check_is_struck() {
+fn a_speedup_changing_runs_covers_or_adding_a_check_is_struck() {
     let mut ctx = speedup_started("check_timeout = 1", "sleep 3", "true");
     worker_edit(&ctx, &[(TESTS_LEAN, &*suite_lean(&tests_toml("true", "true", "runs = 3\nmin_pass = 1\n")))]);
     assert_struck_for_scope(&mut ctx, "runs");
+
+    let mut ctx = speedup_started("check_timeout = 1", "sleep 3", "true");
+    worker_edit(&ctx, &[(TESTS_LEAN, &*suite_lean(&tests_toml("true", "true", "covers = [\"app\"]\n")))]);
+    assert_struck_for_scope(&mut ctx, "covers");
 
     let mut ctx = speedup_started("check_timeout = 1", "sleep 3", "true");
     worker_edit(
