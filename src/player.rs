@@ -1148,7 +1148,9 @@ impl<S: Sessions> Player<S> {
             .filter(|sha| *sha == req.commit)
         {
             Some(sha) => {
-                let suite = self.runner.run_suite(&sha);
+                // The task's run set, against the hub tip it builds on.
+                let tip = self.hub.rev_parse(&format!("refs/heads/task/{}", req.slug));
+                let suite = self.run_task_set(&req.slug, &sha, tip.as_deref());
                 (suite.pass, queue::render(&suite))
             }
             None => (
@@ -4465,7 +4467,7 @@ impl<S: Sessions> Player<S> {
                         flaky::prompt_lists(&cfg.fix_paths, &cfg.replace);
                     Some(prompts.render(
                         "worker.flaky",
-                        &[("fix_paths", &fix_paths), ("replacements", &replacements)],
+                        &[("slug", slug), ("fix_paths", &fix_paths), ("replacements", &replacements)],
                     ))
                 }
                 TaskKind::TestSpeedup => {
@@ -4479,7 +4481,7 @@ impl<S: Sessions> Player<S> {
                 }
                 _ => None,
             });
-            let mut preamble = prompts.render("worker.launch", &vars);
+            let mut preamble = prompts.render("worker.launch", &vars[..2]);
             if self.queued() {
                 preamble = prompts::Prompts::with_block(&preamble, &prompts.render("worker.queued", &[]));
             }
@@ -5408,27 +5410,9 @@ impl<S: Sessions> Player<S> {
 
     /// Where a task agent (or the director's send-back and contest reply)
     /// may write on `slug`, read at `tip` so a commit can't widen it for
-    /// itself: its own `Tests/<slug>.lean`, the `files` of the checks in the
-    /// task's run set, the APIs whose generator and consumer are both in
-    /// its modules (their Lean file and paths), `test_paths`, `tasks/<slug>/`
-    /// and the roadmap's `[player] lock_files`. Paths and directory prefixes.
+    /// itself (`records::agent_scope_at`).
     fn agent_scope(&self, slug: &str, tip: &str) -> Vec<String> {
-        let mut out = vec![config::tests_file(slug), format!("tasks/{slug}/")];
-        let modules = records::task_config_at(&self.hub, tip, slug).map(|c| c.modules).unwrap_or_default();
-        if let Ok(set) = self.runner.run_set_for(tip, &modules, None) {
-            for c in &set.checks {
-                out.extend(c.files.iter().cloned());
-            }
-        }
-        if let Some(arch) = records::arch_at(&self.hub, tip) {
-            for a in arch.apis.iter().filter(|a| modules.contains(&a.generator) && modules.contains(&a.consumer)) {
-                out.push(crate::lean::api_file(&a.name));
-                out.extend(a.paths.iter().cloned());
-            }
-        }
-        out.extend(self.test_paths_at(tip));
-        out.extend(self.roadmap_at(tip).map(|r| r.player.lock_files).unwrap_or_default());
-        out
+        records::agent_scope_at(&self.hub, slug, tip, Some(self.runner.exporter()))
     }
 
     /// Where a task agent may write (`agent_scope`); and in `task.toml`

@@ -390,7 +390,7 @@ impl Runner {
         Self {
             hub: Git::new(home.hub()),
             work: home.work(),
-            views: home.views(),
+            views: home.views().join("player"),
             sandbox: Sandbox::off(),
             budget: BudgetConfig::default(),
             exporter: Exporter::new(home.root.join("arch"), Sandbox::off()),
@@ -399,6 +399,17 @@ impl Runner {
 
     /// Runs every check from now on under `sandbox` (off by default). The
     /// hub stays readable inside it: the worktree's `.git` points there.
+    /// A runner for `dashboard test` beside the player's: its own worktree
+    /// (`Home::work_cli`), views and export package, the same hub and notes.
+    pub fn for_cli(home: &Home) -> Self {
+        Self {
+            work: home.work_cli(),
+            views: home.views().join("cli"),
+            exporter: Exporter::new(home.root.join("arch-cli"), Sandbox::off()),
+            ..Self::new(home)
+        }
+    }
+
     /// Views and the worktree (whose `linked` caches a view links to) are
     /// writable in it.
     pub fn set_sandbox(&mut self, sandbox: Sandbox) {

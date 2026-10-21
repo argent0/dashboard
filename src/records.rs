@@ -1113,6 +1113,9 @@ pub struct Scope {
     /// of the checks that file declares.
     pub paths: Vec<String>,
     pub worker_file: String,
+    /// Why each of `paths` is there, in step: a module or root name,
+    /// `shared`, `your checks` or `files of your checks`.
+    pub why: Vec<String>,
     /// The task's run set (check names).
     pub run_set: Vec<String>,
 }
@@ -1123,23 +1126,58 @@ pub fn scope_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::lean:
     let e = exported_at(hub, tip, exporter)?.ok_or_else(|| format!("no {} at {tip}", config::ARCH_LEAN_MANIFEST))?;
     let worker_file = config::worker_tests_file(slug);
     let mut paths: Vec<String> = Vec::new();
+    let mut why: Vec<String> = Vec::new();
+    let mut add = |p: &String, w: &str| {
+        if !paths.contains(p) {
+            paths.push(p.clone());
+            why.push(w.to_string());
+        }
+    };
     for m in &cfg.modules {
         if let Some((_, ps)) = e.arch.node(m) {
-            paths.extend(ps.iter().cloned());
+            ps.iter().for_each(|p| add(p, m));
         }
     }
-    paths.extend(e.arch.shared.iter().cloned());
-    paths.push(worker_file.clone());
+    e.arch.shared.iter().for_each(|p| add(p, "shared"));
+    add(&worker_file, "your checks");
     for c in e.suite.from_file(&worker_file) {
-        paths.extend(c.files.iter().cloned());
+        c.files.iter().for_each(|p| add(p, "files of your checks"));
     }
-    paths.dedup();
     let run_set = if cfg.modules.is_empty() {
         e.suite.checks.iter().map(|c| c.name.clone()).collect()
     } else {
         impacted_at(hub, tip, &cfg.modules, exporter)?
     };
-    Ok(Scope { modules: cfg.modules, paths, worker_file, run_set })
+    Ok(Scope { modules: cfg.modules, paths, worker_file, why, run_set })
+}
+
+/// Where `slug`'s task agent (or the director's send-back and contest
+/// reply) may write, read at `tip` (spec §17): its own `Tests/<slug>.lean`,
+/// `tasks/<slug>/`, the `files` of the checks in the task's run set, the
+/// APIs whose generator and consumer are both in its modules (their Lean
+/// file and paths), `test_paths` and the roadmap's `[player] lock_files`.
+/// Paths and directory prefixes.
+pub fn agent_scope_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::lean::Exporter>) -> Vec<String> {
+    let mut out = vec![config::tests_file(slug), format!("tasks/{slug}/")];
+    let modules = task_config_at(hub, tip, slug).map(|c| c.modules).unwrap_or_default();
+    if let Ok(Some(e)) = exported_at(hub, tip, exporter) {
+        let names: Vec<String> = if modules.is_empty() {
+            e.suite.checks.iter().map(|c| c.name.clone()).collect()
+        } else {
+            impacted_at(hub, tip, &modules, exporter).unwrap_or_default()
+        };
+        let names: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+        out.extend(e.suite.files_of(&names));
+        for a in e.arch.apis.iter().filter(|a| modules.contains(&a.generator) && modules.contains(&a.consumer)) {
+            out.push(crate::lean::api_file(&a.name));
+            out.extend(a.paths.iter().cloned());
+        }
+        out.extend(e.suite.test_paths.iter().cloned());
+    }
+    if let Some(r) = hub.show_file(tip, "roadmap.toml").and_then(|t| config::roadmap_config_from_str(&t).ok()) {
+        out.extend(r.player.lock_files);
+    }
+    out
 }
 
 /// What `candidate` (a worker's finish on `slug`) does beyond its scope at

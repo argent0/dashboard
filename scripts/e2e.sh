@@ -415,7 +415,7 @@ wait_until "task/alpha's tmux session exists" session_alive alpha
 wait_until "task/alpha tested" task_status_is alpha tested
 alpha_prompt=$(cat "$AGENT_LOGS/alpha.prompts")
 assert_contains "$alpha_prompt" "You are the worker for task \`alpha\` in project \`$PROJECT\`" "alpha's launch prompt"
-assert_contains "$alpha_prompt" "architecture/Tests/alpha.lean" "alpha's launch prompt (its pinned files)"
+assert_contains "$alpha_prompt" "architecture/Tests/alpha.worker.lean" "alpha's launch prompt (its scope)"
 assert_contains "$alpha_prompt" "Implement the feature: create feature.txt." "alpha's launch prompt (prompt.md)"
 
 # --------------------------------------------------------------------------

@@ -16,9 +16,9 @@ pub const STARTER: &str = include_str!("prompts.kdl");
 
 /// Every template, as `section.name`, with the placeholders it may use.
 const TEMPLATES: &[(&str, &[&str])] = &[
-    ("worker.launch", &["slug", "project", "pinned"]),
+    ("worker.launch", &["slug", "project"]),
     ("worker.queued", &[]),
-    ("worker.flaky", &["fix_paths", "replacements"]),
+    ("worker.flaky", &["slug", "fix_paths", "replacements"]),
     ("worker.test-speedup", &["slow"]),
     ("worker.finish-accepted", &[]),
     ("worker.rejected", &["message", "recovery"]),
@@ -401,7 +401,7 @@ mod tests {
         assert!(
             p.render(
                 "worker.launch",
-                &[("slug", "s"), ("project", "p"), ("pinned", "  - a")]
+                &[("slug", "s"), ("project", "p")]
             )
             .starts_with("You are the worker for task `s` in project `p`.")
         );
@@ -505,7 +505,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("worker.review is 128 bytes, over its max-bytes 100"),
+            err.contains("worker.review is 142 bytes, over its max-bytes 100"),
             "{err}"
         );
         let err = Prompts::parse(&replace(
@@ -514,7 +514,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("worker.launch is 1210 bytes, over its max-bytes 1000"),
+            err.contains("worker.launch is 1531 bytes, over its max-bytes 1000"),
             "{err}"
         );
         let err = Prompts::parse(&replace(

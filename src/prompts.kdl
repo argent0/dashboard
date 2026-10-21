@@ -19,18 +19,20 @@
 max-bytes 6144
 
 worker max-bytes=512 {
-    // {slug} {project} {pinned}
+    // {slug} {project}
     launch max-bytes=1536 #"""
         You are the worker for task `{slug}` in project `{project}`. Your clone's `origin` remote
         is the hub: fetch from it, and never push anywhere else.
 
-        Commit only when you believe the whole project suite (every check in
-        architecture/Tests.lean and architecture/Tests/) passes. Leave work in progress uncommitted.
+        `dashboard scope` prints your task's modules, the paths you may write and the checks that
+        judge you (the task's run set). `dashboard test` runs that run set the way the player will.
+        Commit only when you believe the run set passes. Leave work in progress uncommitted.
 
-        You may add new tests, but you must not modify, delete, or add to architecture/,
-        touch anything under its test_paths, or touch tasks/{slug}/. The pinned files, which must
-        stay byte-for-byte identical, are:
-        {pinned}
+        Write only inside your scope. A pinned file changed (the director's and task agent's tests,
+        tasks/{slug}/) is a `pins` strike; any other path outside your scope is a `scope` strike.
+        Your own tests go in architecture/Tests/{slug}.worker.lean, as `check` blocks with `covers`
+        inside your modules and their test files in `files`; they join the run set. If a pinned
+        test is stale, don't edit it: make a `block:` commit saying which.
 
         If the task can't be done as specified, make an empty commit explaining why instead of
         forcing it through:
@@ -47,7 +49,7 @@ worker max-bytes=512 {
         happen — follow their recovery instructions.
         """#
 
-    // {fix_paths} {replacements}; appended to `launch` for a flaky-test-fix
+    // {slug} {fix_paths} {replacements}; appended to `launch` for a flaky-test-fix
     flaky max-bytes=1024 #"""
         This is a flaky-test-fix task. The test is flaky, not wrong: replace it with a stable one that
         checks the same thing, without weakening its assertions. These files, and only these, are
@@ -59,7 +61,8 @@ worker max-bytes=512 {
 
         Don't remove or rename any other test. You may delete the old test or leave it.
 
-        Change nothing else: not production code, and no other test file (new test files are fine).
+        Change nothing else: not production code, and no other test file. A new test goes in
+        architecture/Tests/{slug}.worker.lean with its files.
         If the flake turns out to be in the product code, the test isn't what's wrong: don't work
         around it, make a `block:` commit saying so, and the director will replan it as an ordinary
         task.
@@ -70,9 +73,10 @@ worker max-bytes=512 {
         This is a test-speedup task. The suite is over its time budget; make these checks faster:
         {slow}
 
-        The test tree and the checks' `cmd` / `retry_failed` / `retry_on` in architecture/Tests.lean
-        and architecture/Tests/ are yours to change; nothing else is: no production code, no other field of a
-        check, no roadmap.toml. Faster by what the tests do (less setup, shared fixtures, narrower
+        The test tree, these checks' `files`, and the `cmd` / `retry_failed` / `retry_on` of the
+        checks in architecture/Tests.lean and architecture/Tests/*.lean are yours to change; nothing
+        else is: no production code, no other field of a check (`covers` and `files` stay), no
+        roadmap.toml. Faster by what the tests do (less setup, shared fixtures, narrower
         work), not by what they check: removing tests is allowed, but the player lists every
         removed test and rewired `cmd` for the director, who decides at `accept`. A check must
         end up strictly faster than it is on main, none may be slower, and none may be killed.
@@ -82,10 +86,10 @@ worker max-bytes=512 {
 
     // appended to `launch` when `[player] runs = "queued"`
     queued max-bytes=512 #"""
-        This project queues test runs: run the suite with `dashboard test` from your worktree
-        instead of running it yourself. It snapshots your working tree, waits its turn behind
-        other tasks' runs, and prints each check's result and output; it exits 1 if the suite
-        fails, and a failing run costs nothing. `dashboard test --no-wait` prints the result
+        This project queues test runs: run the task's run set with `dashboard test` from your
+        worktree instead of running it yourself. It snapshots your working tree, waits its turn
+        behind other tasks' runs, and prints each check's result and output; it exits 1 if the
+        run set fails, and a failing run costs nothing. `dashboard test --no-wait` prints the result
         file's path instead: read it once it exists.
         """#
 
@@ -104,7 +108,7 @@ worker max-bytes=512 {
     // {round} {slug} {review}
     review #"""
         Review round {round} from the director. Fetch it: git pull --ff-only origin task/{slug}. Then
-        make the whole project suite pass and commit.
+        make the task's run set pass (`dashboard test`) and commit.
 
         {review}
         """#
@@ -115,33 +119,32 @@ worker max-bytes=512 {
     // {n} {slug} {reply}
     contest-reply #"""
         Reply to your contest c{n}. Fetch it: git pull --ff-only origin task/{slug} (tests may have
-        changed; they're re-pinned). Then make the whole project suite pass and commit, or
-        contest/block again.
+        changed; they're re-pinned). Then make the task's run set pass and commit, or contest/block
+        again.
 
         {reply}
         """#
 
     // {slug} {summary}
     merge-failed #"""
-        main was merged into task/{slug} to accept it, and the project suite now fails on the merge.
-        Fetch it: git pull --ff-only origin task/{slug}. Make the whole suite pass and commit. The
-        pinned files are re-pinned at the merge.
+        main was merged into task/{slug} to accept it, and the checks it ran on the merge fail.
+        Fetch it: git pull --ff-only origin task/{slug}. Make them pass and commit. The pinned files
+        are re-pinned at the merge.
 
         {summary}
         """#
 
     // {checks}
     held #"""
-        Your finish fails only on checks that already leave their worktree dirty on main, which isn't
-        your doing: {checks}. It is held, not rejected. Don't commit; it's judged again once main is
+        Your finish fails only on checks that already fail (or leave their worktree dirty, or run past
+        their timeout) on main, which isn't your doing: {checks}. It is held, not rejected. Don't commit; it's judged again once main is
         fixed.
         """#
 
     // {slug}
     released #"""
-        main's impure checks are fixed, and the player merged main into task/{slug}. Rebase your held
-        finish onto it: git pull --rebase origin task/{slug}. Make the whole suite pass, then commit
-        as usual.
+        main's checks are fixed, and the player merged main into task/{slug}. Rebase your held finish
+        onto it: git pull --rebase origin task/{slug}. Make the run set pass, then commit as usual.
         """#
 }
 
@@ -243,12 +246,15 @@ task-agent max-bytes=512 {
         - Every test you write or send back must be pure: no effects outside its own sandbox, no
           shared state, no network, real clock or unseeded randomness, no dependence on test order.
           The prompt.md you write passes this rule on to the worker in one line.
-        - Write only tests, architecture/Tests/{slug}.lean and files under tasks/{slug}/, never code.
-          In task.toml only [check] is yours; the rest is the director's plan.
+        - Write only tests, architecture/Tests/{slug}.lean, the APIs between the task's modules and
+          files under tasks/{slug}/, never code. Each check in Tests/{slug}.lean names `covers`
+          inside the task's modules and its test files in `files`. In task.toml only [check] is
+          yours; the rest is the director's plan.
         - Never commit accept:, retire: or any other marker: you recommend, the director decides.
         - Trim only when the director asks: ONE commit on a tested task that deletes (or edits)
-          test files this task added and removes their checks from architecture/Tests/{slug}.lean,
-          adding no review note. The suite must still pass.
+          test files this task added and removes their checks from architecture/Tests/{slug}.lean
+          and architecture/Tests/{slug}.worker.lean, adding no review note. The run set must still
+          pass.
 
         The task, as the director planned it (phase {phase}):
 
@@ -283,10 +289,10 @@ task-agent max-bytes=512 {
 
     // appended to `preamble` when `[player] runs = "queued"`
     queued max-bytes=512 #"""
-        This project queues test runs: run the suite with `dashboard test` from your worktree
-        instead of running it yourself. It snapshots your working tree, waits its turn behind
-        other tasks' runs, and prints each check's result and output; it exits 1 if the suite
-        fails, and a failing run costs nothing. `dashboard test --no-wait` prints the result
+        This project queues test runs: run the task's run set with `dashboard test` from your
+        worktree instead of running it yourself. It snapshots your working tree, waits its turn
+        behind other tasks' runs, and prints each check's result and output; it exits 1 if the
+        run set fails, and a failing run costs nothing. `dashboard test --no-wait` prints the result
         file's path instead: read it once it exists.
         """#
 
@@ -296,9 +302,9 @@ task-agent max-bytes=512 {
         branch first: git fetch origin && git merge --ff-only origin/task/{slug}. Then make ONE
         commit on agent/{slug} with:
         - tasks/{slug}/prompt.md: task-specific instructions for the worker only (the player
-          prepends its own preamble on commit discipline and the pinned files), including one line
-          telling it every test it adds must be pure;
-        - the task's test files, under the suite's test_paths;
+          prepends its own preamble on commit discipline and scope), including one line telling it
+          every test it adds must be pure;
+        - the task's test files, named in the `files` of its checks (or under test_paths);
         {check}
         - updates to any existing test this task makes stale.
         Before committing, run the task's check and confirm it fails, for the reason the task exists:
@@ -308,7 +314,7 @@ task-agent max-bytes=512 {
     post-check-task #"""
         - its [check] in tasks/{slug}/task.toml (unless the plan already has one) and the same check
           in architecture/Tests/{slug}.lean (same name, cmd, runs and min_pass; check names are
-          unique across the whole suite);
+          unique across the whole suite), with `covers` inside the task's modules;
         """#
     post-check-speedup #"""
         - nothing in architecture/Tests/: this is a test-speedup (spec §15.1), whose [[slow]] checks are
@@ -324,8 +330,8 @@ task-agent max-bytes=512 {
     // {round} {slug} {tip} {base} {cap} {notes}: {cap} is empty, `review-cap-last` or
     // `review-cap-over`; {notes} is empty or `review-notes`
     review max-bytes=1536 #"""
-        Step: review round {round}. The worker's work on task/{slug} passed the whole project suite
-        at {tip}; the player ran it, so don't re-run it. Update your branch: git fetch origin && git
+        Step: review round {round}. The worker's work on task/{slug} passed the task's run set at
+        {tip}; the player ran it, so don't re-run it. Update your branch: git fetch origin && git
         merge --ff-only origin/task/{slug}. Read what the worker changed this round: git diff
         {base} {tip}. Check that it does what the task asked, stays in scope, doesn't game its own
         test (special-cased inputs, monkeypatching, a helper that neuters other tests), adds no impure
@@ -335,9 +341,9 @@ task-agent max-bytes=512 {
           only drove this task: scaffolding, a step since covered by a broader test); the
           director decides which stay in the suite;
         - send back: ONE commit adding tasks/{slug}/reviews/r{round}.md (what is wrong) and a new or
-          updated test that makes the suite fail again, report verdict: sent-back. Before committing
+          updated test that makes the run set fail again, report verdict: sent-back. Before committing
           it, run that test against the worker's code as it is and confirm it fails, for the
-          reason your review gives: a send-back the suite still passes is a `review` strike. Run it
+          reason your review gives: a send-back the run set still passes is a `review` strike. Run it
           only on the worker's code: never write code of your own to see how the test should
           pass. A concern you can't turn into a failing test isn't a send-back: report verdict:
           unsure.{cap}{notes}

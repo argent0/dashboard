@@ -124,10 +124,14 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         question: Vec<String>,
     },
-    /// Run the suite through the player's queue (`[player] runs = "queued"`)
-    /// from a worker's or task agent's worktree: snapshots the working tree,
-    /// waits its turn and prints each check's result and output. Exits 1 if
-    /// the suite fails. A failing run is never a strike.
+    /// Print the task's scope from a worker's or task agent's clone: its
+    /// modules, the paths it may write and the checks that judge it.
+    Scope,
+    /// Run the task's run set from a worker's or task agent's worktree, the
+    /// way the player will: snapshots the working tree and prints each
+    /// check's result and output. Runs it here, in its own worktree, unless
+    /// `[player] runs = "queued"`, where it waits its turn in the player's
+    /// queue. Exits 1 if the run set fails. A failing run is never a strike.
     Test {
         /// Print the result file's path and return instead of waiting.
         #[arg(long)]
@@ -171,6 +175,7 @@ fn main() {
             run_relaunch(args.home, &slug, agent, reset)
         }
         Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
+        Some(Command::Scope) => run_scope(args.home),
         Some(Command::Test { no_wait, timeout }) => run_test(args.home, no_wait, timeout),
         Some(Command::Arch { action: ArchAction::Check { root } }) => run_arch_check(&root),
         Some(Command::Arch { action: ArchAction::Gen { root, check } }) => run_arch_gen(&root, check),
@@ -562,43 +567,142 @@ fn run_ask(home: Option<PathBuf>, slug: &str, question: &str) {
 }
 
 /// `dashboard test`: see `queue.rs`.
-fn run_test(home: Option<PathBuf>, no_wait: bool, timeout: Option<u64>) {
-    let fail = |msg: String| -> ! {
-        eprintln!("error: {msg}");
-        std::process::exit(1);
-    };
+/// What `dashboard scope` and `dashboard test` start from: the home, the
+/// worktree they run in, its task's slug and whether it's a task agent's.
+struct TaskClone {
+    home: Home,
+    worktree: git::Git,
+    slug: String,
+    agent: bool,
+}
+
+fn fail(msg: String) -> ! {
+    eprintln!("error: {msg}");
+    std::process::exit(1);
+}
+
+fn task_clone(home: Option<PathBuf>) -> TaskClone {
     let cwd = std::env::current_dir().unwrap_or_else(|e| fail(format!("cannot read current directory: {e}")));
     let home = paths::resolve_home(home, &cwd).unwrap_or_else(|e| fail(e));
-    let hub = git::Git::new(home.hub());
-    let queued = hub
-        .rev_parse("refs/heads/main")
-        .and_then(|tip| hub.show_file(&tip, "roadmap.toml"))
-        .and_then(|text| config::roadmap_config_from_str(&text).ok())
-        .is_some_and(|r| r.player.runs == config::Runs::Queued);
-    if !queued {
-        fail("runs are not queued in this project ([player] runs): run the suite yourself".into());
-    }
     let worktree = git::Git::new(&cwd);
     let branch = worktree
         .run(&["symbolic-ref", "--short", "HEAD"])
         .unwrap_or_else(|e| fail(e.to_string()));
     let slug = queue::slug_of_branch(&branch)
-        .unwrap_or_else(|| fail(format!("branch {branch} is not a task/<slug> or agent/<slug> branch")));
-    let commit = queue::snapshot(&worktree).unwrap_or_else(|e| fail(e));
+        .unwrap_or_else(|| fail(format!("branch {branch} is not a task/<slug> or agent/<slug> branch")))
+        .to_string();
+    TaskClone { home, worktree, slug, agent: branch.starts_with("agent/"), }
+}
+
+/// The roadmap on the hub's main.
+fn hub_roadmap(hub: &git::Git) -> config::RoadmapConfig {
+    hub.rev_parse("refs/heads/main")
+        .and_then(|tip| hub.show_file(&tip, "roadmap.toml"))
+        .and_then(|text| config::roadmap_config_from_str(&text).ok())
+        .unwrap_or_else(|| fail("no valid roadmap.toml on the hub's main".into()))
+}
+
+/// The CLI's runner (`Runner::for_cli`) under the roadmap's jail and budget.
+fn cli_runner(home: &Home, roadmap: &config::RoadmapConfig) -> dashboard::checks::Runner {
+    let mut runner = dashboard::checks::Runner::for_cli(home);
+    let sandbox = dashboard::sandbox::Sandbox::from_config(&roadmap.sandbox).unwrap_or_else(|e| fail(e));
+    runner.set_sandbox(sandbox);
+    runner.set_budget(roadmap.budget);
+    runner
+}
+
+fn run_scope(home: Option<PathBuf>) {
+    let c = task_clone(home);
+    let hub = git::Git::new(c.home.hub());
+    let runner = cli_runner(&c.home, &hub_roadmap(&hub));
+    let slug = c.slug.as_str();
+    let tip = hub
+        .rev_parse(&format!("refs/heads/task/{slug}"))
+        .unwrap_or_else(|| fail(format!("the hub has no task/{slug}")));
+    let ex = Some(runner.exporter());
+    let scope = dashboard::records::scope_at(&hub, slug, &tip, ex).unwrap_or_else(|e| fail(e));
+    let suite = dashboard::records::suite_at(&hub, &tip, ex).unwrap_or_else(|e| fail(e));
+    println!("task/{slug}  modules: {}", scope.modules.join(", "));
+    println!("writable:");
+    if c.agent {
+        for p in dashboard::records::agent_scope_at(&hub, slug, &tip, ex) {
+            println!("  {p}");
+        }
+    } else {
+        for (p, why) in scope.paths.iter().zip(&scope.why) {
+            println!("  {p:<30} ({why})");
+        }
+    }
+    println!("run set ({} checks):", scope.run_set.len());
+    for name in &scope.run_set {
+        let Some(check) = suite.check(name) else { continue };
+        let mut line = format!("  {name:<20}");
+        if check.source.as_deref() == Some(config::ARCH_LEAN_MANIFEST) {
+            line.push_str(" module test ");
+        }
+        if check.all {
+            line.push_str(" all");
+        } else {
+            line.push_str(&format!(" covers {}", check.covers.join(", ")));
+        }
+        if !check.files.is_empty() {
+            line.push_str(&format!("  files {}", check.files.join(", ")));
+        }
+        println!("{}", line.trim_end());
+    }
+}
+
+fn run_test(home: Option<PathBuf>, no_wait: bool, timeout: Option<u64>) {
+    let c = task_clone(home);
+    let hub = git::Git::new(c.home.hub());
+    let roadmap = hub_roadmap(&hub);
+    let commit = queue::snapshot(&c.worktree).unwrap_or_else(|e| fail(e));
+    if roadmap.player.runs != config::Runs::Queued {
+        // Here and now, in the CLI's own worktree: fetch the snapshot into
+        // the hub (the cache is its notes), run, drop the ref.
+        let slug = c.slug.as_str();
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let local = format!("refs/dashboard/test/{millis:016}-{slug}");
+        let repo = c
+            .worktree
+            .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .unwrap_or_else(|e| fail(e.to_string()));
+        c.worktree.update_ref(&local, &commit).unwrap_or_else(|e| fail(e.to_string()));
+        let fetched = hub.run(&["fetch", "--quiet", &repo, &format!("+{local}:{local}")]);
+        let _ = c.worktree.delete_ref(&local);
+        fetched.unwrap_or_else(|e| fail(e.to_string()));
+        let runner = cli_runner(&c.home, &roadmap);
+        let tip = hub.rev_parse(&format!("refs/heads/task/{slug}"));
+        let modules = tip
+            .as_deref()
+            .and_then(|t| dashboard::records::task_config_at(&hub, t, slug))
+            .map(|cfg| cfg.modules)
+            .unwrap_or_default();
+        let suite = match runner.run_set_for(&commit, &modules, tip.as_deref()) {
+            Ok(set) => runner.run_set(&commit, &set),
+            Err(e) => dashboard::checks::SuiteResult::failing(e),
+        };
+        let _ = hub.delete_ref(&local);
+        print!("{}", queue::render(&suite));
+        std::process::exit(if suite.pass { 0 } else { 1 });
+    }
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let req = queue::enqueue(&home, &worktree, slug, &commit, millis).unwrap_or_else(|e| fail(e));
-    let result = queue::result_path(&home, &req.id);
+    let req = queue::enqueue(&c.home, &c.worktree, &c.slug, &commit, millis).unwrap_or_else(|e| fail(e));
+    let result = queue::result_path(&c.home, &req.id);
     if no_wait {
         println!("{}", result.display());
         return;
     }
     eprintln!("queued {}; waiting for the player", req.id);
-    match queue::wait(&home, &req.id, timeout.map(std::time::Duration::from_secs)) {
+    match queue::wait(&c.home, &req.id, timeout.map(std::time::Duration::from_secs)) {
         Some((pass, report)) => {
-            let _ = worktree.delete_ref(&req.ref_name());
+            let _ = c.worktree.delete_ref(&req.ref_name());
             print!("{report}");
             std::process::exit(if pass { 0 } else { 1 });
         }
