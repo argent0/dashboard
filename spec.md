@@ -92,7 +92,8 @@ tmux session  ◄──┘ (player launches the worker, relays rejections/revisi
 - **Hub** — a bare repository owned by the player. The only source of truth.
   Only the player updates its refs.
 - **Clones** — the director has one clone; the worker gets its own clone
-  of the hub checked out on its task branch, and so does the task agent
+  of the hub checked out on its task branch, holding its task's files only
+  (§21), and so does the task agent
   (§17). Separate clones, not
   worktrees: worktrees share refs. Agents fetch from the hub freely but
   never push.
@@ -139,7 +140,8 @@ reason so `dashboard` shows it, and relays it to the worker's tmux session
 when the worker is the author. The agent recovers in its own clone: a
 fixing commit on top for content violations (e.g. restoring a pinned file),
 or `git reset --hard` to the hub ref for history violations. The player
-never modifies an agent's clone. Each rejection is a strike in its reason's
+writes a worker's sparse patterns (§21) and nothing else in an agent's
+clone. Each rejection is a strike in its reason's
 counter (§10).
 
 ## 6. Tests
@@ -306,7 +308,9 @@ A task runs only the checks that can see its change.
   cache), so an agent sees the player's verdict before committing. With
   `[player] runs = "queued"` the player runs it in its queue; otherwise the
   command runs it itself, in its own worktree and views beside the
-  player's. A branch with no plan runs the whole suite.
+  player's. A branch with no plan runs the whole suite. `dashboard test`
+  takes check names and `dashboard build` compiles the task's modules in
+  their views (§21).
 
 ## 7. Worker commits
 
@@ -382,7 +386,7 @@ task's `modules` (§6.6) at the hub tip, so a commit can't widen its own:
 A pinned file changed is a `pins` strike; any other path outside scope, or
 a worker check whose `covers` leaves `modules`, is a `scope` strike. The
 worker's prompt names `dashboard scope` (§6.6), which prints exactly this
-area.
+area and the working tree it sits in (§21).
 
 Pins and scope close tampering with the tests themselves, and work outside
 the task's modules, not every way of beating a test (e.g. special-casing
@@ -805,7 +809,8 @@ with the operator.
   so the director can ask it what went wrong.
 
 **Clone.** Another worktree of the workers' shared workspace (CLAUDE.md),
-at `<director>/.dashboard/agents/<slug>/`, on the local branch
+at `<director>/.dashboard/agents/<slug>/`, with a full working tree (§21),
+on the local branch
 `agent/<slug>` (the worker's worktree has `task/<slug>`). The player
 fetches `agent/<slug>` into `refs/incoming/agent/<slug>`; provenance by fetch
 source (§4) makes its commits the task agent's (`actor: task_agent`).
@@ -1014,3 +1019,65 @@ Held work is released once those checks pass on `main`.
 Not enforced: determinism and order independence (a clock, unseeded
 randomness, state shared through a `writable` path). The task agent's review
 still reads for those.
+
+## 21. The task workspace
+
+A worker's working tree holds its task's files and the files its checks
+read; everything else is absent. Git's sparse checkout keeps it so in the
+worker's worktree. The clone's objects hold the whole history
+(`git show origin/task/<slug>:<path>` reads any file), so the working tree
+is the boundary, and the boundary is what the worker's tools see.
+
+**Contents**, computed at the hub tip the pins are taken at (§8.3):
+
+- *Writable*, the scope of §8.3: the paths of the task's `modules` and
+  roots (inline tests included), `shared`,
+  `architecture/Tests/<slug>.worker.lean` and the `files` its checks
+  declare.
+- *Read-only*, pinned: `architecture/` whole, so the worker's tools read
+  the same Lean package the player reads; `tasks/<slug>/`; the files of
+  the APIs of each of `modules` (generated or consumed, every API they
+  ref, with their `impl` files); the `files` of the checks in the task's
+  run set; `test_paths`; every `.gitignore`.
+- *Absent*: other modules' and roots' sources, and so their inline tests,
+  and the `files` of every check outside the run set. An inline test
+  outside the scope stays out of every run because its source is out of
+  the tree.
+
+**Patterns follow the pins.** The player recomputes the patterns whenever
+it pins (launch, send-back, contest reply, trim, a merge of `main`, a
+resolution), from the tip the pins are taken at. A modified or untracked
+file whose path leaves the patterns stays on disk (git warns and leaves
+it). The player writes a worker's sparse patterns and nothing else in its
+clone (§5).
+
+**Declaring a check opens its files.** `git add -A` in a sparse tree
+stages only paths inside the patterns. `dashboard build` and
+`dashboard test` read `architecture/Tests/<slug>.worker.lean` from the
+working tree and add the `files` of its checks to the patterns before they
+run, so a new test file is in the worker's next commit. The worker prompt
+says: declare the check, then write its files; within one `dashboard test`
+either order works.
+
+**Two verbs** assemble the views, so the player stays toolchain-neutral:
+
+- `dashboard build [node…]` snapshots the working tree (as `dashboard test`
+  does) and, for each of the task's `modules`, or the named ones, which
+  must be among them, runs its `build_cmd` in the module's view
+  (`architect-v3.md`) built from the snapshot, generators first, stopping
+  at the first failure. A root builds in a full worktree of the snapshot:
+  roots have no view and link the modules they call. A build compiles only
+  and runs no tests; its output streams to the caller. It runs locally, in
+  the CLI's own worktree, even with `[player] runs = "queued"`, and
+  records no verdict. A node without `build_cmd` is reported as having
+  none. `build_cmd` gets `DASHBOARD_MODULE` and `DASHBOARD_ROOT` like
+  `test_cmd`.
+- `dashboard test [check…]` runs the run set (§6.6), or only the named
+  checks, which must be in the run set; any other name is an error listing
+  the allowed names. The local and the queued path both take the names.
+
+`dashboard scope` prints the working tree's contents as a third section
+beside the writable paths and the run set.
+
+**Full working tree** for every other session: task agents (§17), spikes
+(§14), flaky-test-fixes (§15) and test-speedups (§15.1).

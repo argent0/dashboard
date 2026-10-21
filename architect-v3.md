@@ -63,11 +63,13 @@ module database where
   max_bytes = 260000
   max_ast = 90000
   test_cmd = "cargo test --offline -p database"
+  build_cmd = "cargo build --offline -p database"
 
 root «engine-bridge» where
   lang = rust
   paths = ["engine/bridge"]
   max_bytes = 20000
+  build_cmd = "cargo build --offline -p engine-bridge"
 
 api «nutrition-db» : database → nutrition where   -- generator → consumer
   paths = ["apis/nutrition-db"]                    -- bindings go to apis/nutrition-db/gen/
@@ -245,7 +247,9 @@ prints the order.
 A root (`root «engine-bridge» where …`) calls modules and forwards their
 values (typically generated dispatch and client stubs). It owns files like a
 module and is budgeted like one (`max_bytes`, `max_ast`, and `max_roots` in
-total), but has no `test_cmd` and no view: story tests only. It appears as an
+total), but has no `test_cmd` and no view: story tests only. It may have a `build_cmd`:
+`dashboard build` runs it in a full worktree of the worker's snapshot, since
+a root links the modules it calls (spec §21). It appears as an
 API's consumer like a module, so "one API per pair" and the DAG stay honest,
 and the lints apply to it. With `source_paths` set, every file under them
 must belong to a module, an API, a root or `shared`: "`<path>`: owned by
@@ -323,7 +327,7 @@ Steps 2 and 3 depend only on the API from step 1, not on each other, so they can
 - Suite checks per module: the constructor / `T` budget, the AST and byte budgets, and the no-wildcard rule.
   - The no-wildcard rule needs a per-language check (compiler or linter); which one is a project choice, not part of this design.
   - Rust: `clippy::wildcard_enum_match_arm` and `clippy::match_wildcard_for_single_variants` at deny.
-- Module tests run in a jail view: a fresh directory holding only the module's files, its APIs' files and `shared`, plus a symlink back into the checkout for each existing `linked` path (build caches like `node_modules` and `target`, never copied, never in a budget). `linked` may not overlap any module or API path. A missing cache is skipped, so the suite check's `cmd` builds the caches before `dashboard arch check`. `test_cmd` gets `DASHBOARD_MODULE` and `DASHBOARD_ROOT`.
+- Module tests run in a jail view: a fresh directory holding only the module's files, its APIs' files and `shared`, plus a symlink back into the checkout for each existing `linked` path (build caches like `node_modules` and `target`, never copied, never in a budget). `linked` may not overlap any module or API path. A missing cache is skipped, so the suite check's `cmd` builds the caches before `dashboard arch check`. `test_cmd` and `build_cmd` get `DASHBOARD_MODULE` and `DASHBOARD_ROOT`; `dashboard build` compiles a module in the same view (spec §21).
 - Opaque `T`s are checked by the API check: each `T` is a wrapped newtype with no derive, no public inner field and no accessors, or another API's type.
 
 ## Budget increase path
@@ -380,6 +384,8 @@ check «search-story» where
 - `Dashboard.impacted : List Node → List Check` gives a task's run set from
   its `modules` (spec §6.6); `covers = all` checks are always in it.
 - The player runs the whole suite once at start, then run sets only.
+- A worker's working tree holds its task's files only (spec §21);
+  `dashboard build` and `dashboard test` assemble the views.
 
 ### Inter-module tests
 
