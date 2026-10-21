@@ -465,7 +465,7 @@ fn instances_present(root: &Path, a: &crate::config::ApiConfig, idl: &Idl) -> Re
 
 /// Every API `module` sees in its view: those it generates or consumes,
 /// plus every API they ref, transitively (their generated files name them).
-fn view_apis<'a>(cfg: &'a ArchConfig, idls: &BTreeMap<String, Idl>, module: &str) -> Vec<&'a crate::config::ApiConfig> {
+pub fn view_apis<'a>(cfg: &'a ArchConfig, idls: &BTreeMap<String, Idl>, module: &str) -> Vec<&'a crate::config::ApiConfig> {
     let mut names: Vec<&str> = cfg
         .apis
         .iter()

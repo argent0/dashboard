@@ -125,7 +125,8 @@ enum Command {
         question: Vec<String>,
     },
     /// Print the task's scope from a worker's or task agent's clone: its
-    /// modules, the paths it may write and the checks that judge it.
+    /// modules, the paths it may write, what else its working tree holds
+    /// (read-only) and the checks that judge it.
     Scope,
     /// Run the task's run set from a worker's or task agent's worktree, the
     /// way the player will: snapshots the working tree and prints each
@@ -620,7 +621,8 @@ fn run_scope(home: Option<PathBuf>) {
         .rev_parse(&format!("refs/heads/task/{slug}"))
         .unwrap_or_else(|| fail(format!("the hub has no task/{slug}")));
     let ex = Some(runner.exporter());
-    let scope = dashboard::records::scope_at(&hub, slug, &tip, ex).unwrap_or_else(|e| fail(e));
+    let workspace = dashboard::records::workspace_at(&hub, slug, &tip, ex).unwrap_or_else(|e| fail(e));
+    let scope = &workspace.scope;
     let suite = dashboard::records::suite_at(&hub, &tip, ex).unwrap_or_else(|e| fail(e));
     println!("task/{slug}  modules: {}", scope.modules.join(", "));
     println!("writable:");
@@ -630,6 +632,14 @@ fn run_scope(home: Option<PathBuf>) {
         }
     } else {
         for (p, why) in scope.paths.iter().zip(&scope.why) {
+            println!("  {p:<30} ({why})");
+        }
+    }
+    if c.agent {
+        println!("working tree: full");
+    } else {
+        println!("working tree:");
+        for (p, why) in &workspace.readonly {
             println!("  {p:<30} ({why})");
         }
     }

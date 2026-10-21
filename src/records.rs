@@ -1137,6 +1137,73 @@ pub fn scope_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::lean:
     Ok(Scope { modules: cfg.modules, paths, worker_file, why, run_set })
 }
 
+/// What a worker's working tree holds (spec §21), read at `tip`.
+#[derive(Debug, Clone, Default)]
+pub struct Workspace {
+    pub scope: Scope,
+    /// Read-only paths with why each is there, in order and deduplicated
+    /// against `scope.paths`: `architecture`, `tasks/<slug>`, `api <name>`
+    /// (paths and impl files of every API a node in `modules` generates,
+    /// consumes or refs), `files of <check>` for each run-set check,
+    /// `test_paths`, `.gitignore`.
+    pub readonly: Vec<(String, String)>,
+}
+
+/// The working tree of `slug`'s worker at `tip`: its scope plus what it
+/// reads (spec §21).
+pub fn workspace_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::lean::Exporter>) -> Result<Workspace, String> {
+    let scope = scope_at(hub, slug, tip, exporter)?;
+    let e = exported_at(hub, tip, exporter)?.ok_or_else(|| format!("no {} at {tip}", config::ARCH_LEAN_MANIFEST))?;
+    let mut readonly: Vec<(String, String)> = Vec::new();
+    let mut add = |p: &String, w: String| {
+        if !scope.paths.contains(p) && !readonly.iter().any(|(q, _)| q == p) {
+            readonly.push((p.clone(), w));
+        }
+    };
+    add(&format!("{}/", config::ARCH_DIR), "architecture".into());
+    add(&format!("tasks/{slug}/"), format!("tasks/{slug}"));
+    for n in &scope.modules {
+        for a in crate::arch::view_apis(&e.arch, &e.idls, n) {
+            a.paths.iter().chain(&a.impls).for_each(|p| add(p, format!("api {}", a.name)));
+        }
+    }
+    for c in e.suite.checks.iter().filter(|c| scope.run_set.contains(&c.name)) {
+        c.files.iter().for_each(|p| add(p, format!("files of {}", c.name)));
+    }
+    e.suite.test_paths.iter().for_each(|p| add(p, "test_paths".into()));
+    add(&".gitignore".to_string(), ".gitignore".into());
+    Ok(Workspace { scope, readonly })
+}
+
+impl Workspace {
+    /// The sparse-checkout patterns (non-cone) of the tree: each path
+    /// anchored with a leading `/` and its trailing `/` trimmed, so it
+    /// matches the file or the directory with everything under it;
+    /// `.gitignore` stays bare and matches at every depth.
+    pub fn patterns(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for p in self.scope.paths.iter().chain(self.readonly.iter().map(|(p, _)| p)) {
+            let pat = if p == ".gitignore" { p.clone() } else { sparse_pattern(p) };
+            if !out.contains(&pat) {
+                out.push(pat);
+            }
+        }
+        out
+    }
+}
+
+/// `path` as an anchored non-cone sparse pattern, glob characters escaped.
+pub fn sparse_pattern(path: &str) -> String {
+    let mut out = String::from("/");
+    for ch in path.trim_start_matches('/').trim_end_matches('/').chars() {
+        if matches!(ch, '*' | '?' | '[' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Where `slug`'s task agent (or the director's send-back and contest
 /// reply) may write, read at `tip` (spec §17): its own `Tests/<slug>.lean`,
 /// `tasks/<slug>/`, the `files` of the checks in the task's run set, the
@@ -1455,5 +1522,23 @@ mod tests {
             Some("padded-slug".to_string())
         );
         assert_eq!(task_trailer("Task: \n"), None);
+    }
+
+    #[test]
+    fn patterns_are_anchored_non_cone() {
+        let scope = Scope {
+            paths: vec!["a".into(), "shared.txt".into(), "architecture/Tests/s.worker.lean".into()],
+            ..Scope::default()
+        };
+        let readonly = ["architecture/", "tasks/s/", "stories", ".gitignore", "a"]
+            .iter()
+            .map(|p| (p.to_string(), "why".to_string()))
+            .collect();
+        let w = Workspace { scope, readonly };
+        assert_eq!(
+            w.patterns(),
+            ["/a", "/shared.txt", "/architecture/Tests/s.worker.lean", "/architecture", "/tasks/s", "/stories", ".gitignore"]
+        );
+        assert_eq!(sparse_pattern("x/[a]*?\\b/"), "/x/\\[a]\\*\\?\\\\b");
     }
 }

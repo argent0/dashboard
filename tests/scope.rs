@@ -72,6 +72,27 @@ fn scope_lists_modules_writable_paths_and_the_run_set() {
 }
 
 #[test]
+fn workspace_lists_the_tree_the_worker_sees() {
+    let (_repo, _home_dir, home, _player, clone) = launched("parallel");
+    let hub = Git::new(home.hub());
+    let tip = hub.rev_parse("refs/heads/task/s").unwrap();
+    let runner = dashboard::checks::Runner::for_cli(&home);
+    let w = dashboard::records::workspace_at(&hub, "s", &tip, Some(runner.exporter())).expect("workspace");
+    let ro: Vec<&str> = w.readonly.iter().map(|(p, _)| p.as_str()).collect();
+    for p in ["architecture/", "tasks/s/", "api", "stories/s.sh", ".gitignore"] {
+        assert!(ro.contains(&p), "{p}: {ro:?}");
+    }
+    let all: Vec<&str> = ro.iter().copied().chain(w.scope.paths.iter().map(|p| p.as_str())).collect();
+    assert!(!all.iter().any(|p| p.starts_with('b')), "{all:?}");
+    let (code, text) = dash(&clone, &home, "scope");
+    assert_eq!(code, 0, "{text}");
+    let tree = text.split("working tree:\n").nth(1).expect("a working tree section");
+    let tree = tree.split("run set").next().unwrap();
+    assert!(tree.contains("  api ") && tree.contains("  stories/s.sh "), "{text}");
+    assert!(!tree.contains("b/"), "{text}");
+}
+
+#[test]
 fn test_runs_the_run_set_in_its_own_worktree() {
     let (_repo, _home_dir, home, _player, clone) = launched("parallel");
     let (code, text) = dash(&clone, &home, "test");
