@@ -257,7 +257,7 @@ FAKE_AGENT_EOF
 # Launched with "Step: post" in its prompt, it copies the post the scenario
 # prepared for its slug ($TA_TEMPLATES/<slug>/) into its worktree, commits it
 # on agent/<slug> and reports `posted`. Then it watches the hub: once the
-# worker's work (<slug>.txt, or <slug>/<slug>.txt) is on task/<slug>, it reports `accept`.
+# worker's work (src/<slug>.txt, or <slug>/<slug>.txt) is on task/<slug>, it reports `accept`.
 # --------------------------------------------------------------------------
 
 write_fake_task_agent() {
@@ -296,7 +296,7 @@ end=$(($(date +%s) + 60))
 while [ "$(date +%s)" -lt "$end" ]; do
   git fetch -q origin || true
   tip=$(git rev-parse "origin/task/$slug" 2>/dev/null || echo "")
-  if [ -n "$tip" ] && [ "$tip" != "$reviewed" ] && { git cat-file -e "$tip:$slug.txt" 2>/dev/null || git cat-file -e "$tip:$slug/$slug.txt" 2>/dev/null; }; then
+  if [ -n "$tip" ] && [ "$tip" != "$reviewed" ] && { git cat-file -e "$tip:src/$slug.txt" 2>/dev/null || git cat-file -e "$tip:$slug/$slug.txt" 2>/dev/null; }; then
     git merge -q --ff-only "origin/task/$slug" || true
     write_report "review r1" accept
     reviewed=$tip
@@ -348,12 +348,12 @@ EOF
 # with a suite of one check.
 "$BIN" arch gen --root "$DIR_REPO" >/dev/null
 task_tests "$DIR_REPO/architecture/Tests.lean" baseline true all
-# One root, `app`, for the tasks to name in `modules`: it owns the files
-# the fake workers write (a worker writes only inside its task's modules).
+# One root, `app` over src/, for the tasks to name in `modules`: the
+# fake workers write there (a worker writes only inside its modules).
 APP_ROOT='
 root app where
   lang = rust
-  paths = ["src", "feature.txt", "feature2.txt", "featureb.txt", "gamma.txt", "delta.txt", "shared.txt", "eta.txt", "epsilon.txt"]
+  paths = ["src"]
 '
 printf '%s' "$APP_ROOT" >>"$DIR_REPO/architecture/Architecture.lean"
 
@@ -393,7 +393,7 @@ wait_until "task/alpha planned (ready)" task_status_is alpha ready
 
 log "step 2: post alpha"
 cat >"$DIR_REPO/tasks/alpha/prompt.md" <<'EOF'
-Implement the feature: create feature.txt.
+Implement the feature: create src/feature.txt.
 EOF
 cat >"$DIR_REPO/tasks/alpha/task.toml" <<'EOF'
 title = "Add feature"
@@ -402,13 +402,14 @@ modules = ["app"]
 
 [check]
 name = "alpha-check"
-cmd = "test -f feature.txt"
+cmd = "test -f src/feature.txt"
 EOF
 cat >"$DIR_REPO/tasks/alpha/agent.sh" <<'EOF'
 #!/bin/sh
-echo ok > feature.txt
+mkdir -p src
+echo ok > src/feature.txt
 EOF
-task_tests "$DIR_REPO/architecture/Tests/alpha.lean" alpha-check "test -f feature.txt"
+task_tests "$DIR_REPO/architecture/Tests/alpha.lean" alpha-check "test -f src/feature.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "post: alpha"
 
@@ -417,7 +418,7 @@ wait_until "task/alpha tested" task_status_is alpha tested
 alpha_prompt=$(cat "$AGENT_LOGS/alpha.prompts")
 assert_contains "$alpha_prompt" "You are the worker for task \`alpha\` in project \`$PROJECT\`" "alpha's launch prompt"
 assert_contains "$alpha_prompt" "architecture/Tests/alpha.worker.lean" "alpha's launch prompt (its scope)"
-assert_contains "$alpha_prompt" "Implement the feature: create feature.txt." "alpha's launch prompt (prompt.md)"
+assert_contains "$alpha_prompt" "Implement the feature: create src/feature.txt." "alpha's launch prompt (prompt.md)"
 
 # --------------------------------------------------------------------------
 # 3. `dashboard wait --timeout 5` prints the tested event.
@@ -441,13 +442,14 @@ git -C "$DIR_REPO" merge -q --ff-only hub/task/alpha
 
 mkdir -p "$DIR_REPO/tasks/alpha/reviews"
 cat >"$DIR_REPO/tasks/alpha/reviews/r1.md" <<'EOF'
-Please also add feature2.txt.
+Please also add src/feature2.txt.
 EOF
 cat >"$DIR_REPO/tasks/alpha/agent-r1.sh" <<'EOF'
 #!/bin/sh
-echo ok2 > feature2.txt
+mkdir -p src
+echo ok2 > src/feature2.txt
 EOF
-task_tests "$DIR_REPO/architecture/Tests/alpha.lean" alpha-check "test -f feature.txt && test -f feature2.txt"
+task_tests "$DIR_REPO/architecture/Tests/alpha.lean" alpha-check "test -f src/feature.txt && test -f src/feature2.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "send-back: alpha r1"
 
@@ -460,7 +462,7 @@ git -C "$DIR_REPO" commit -q -m "send-back: alpha r1"
 send_back_out=$(tick_capture)
 assert_contains "$send_back_out" "(send_back)" "the send-back tick's report"
 wait_until "task/alpha tested again" task_status_is alpha tested
-alpha_pasted() { grep -qF "Please also add feature2.txt." "$AGENT_LOGS/alpha.pastes" 2>/dev/null; }
+alpha_pasted() { grep -qF "Please also add src/feature2.txt." "$AGENT_LOGS/alpha.pastes" 2>/dev/null; }
 wait_until "the review pasted into alpha's session" alpha_pasted
 alpha_pastes=$(cat "$AGENT_LOGS/alpha.pastes")
 assert_contains "$alpha_pastes" "finish accepted" "alpha's pasted relays"
@@ -514,13 +516,13 @@ depends_on = ["alpha"]
 
 [check]
 name = "beta-check"
-cmd = "test -f featureb.txt"
+cmd = "test -f src/featureb.txt"
 EOF
 cat >"$DIR_REPO/tasks/beta/agent.sh" <<'EOF'
 #!/bin/sh
-git commit --allow-empty -m "block: stale test" -m "featureb.txt can't be produced as specified; the check needs a design change."
+git commit --allow-empty -m "block: stale test" -m "src/featureb.txt can't be produced as specified; the check needs a design change."
 EOF
-task_tests "$DIR_REPO/architecture/Tests/beta.lean" beta-check "test -f featureb.txt"
+task_tests "$DIR_REPO/architecture/Tests/beta.lean" beta-check "test -f src/featureb.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "post: beta"
 
@@ -636,7 +638,7 @@ wait_until "probe's tmux session is gone" session_gone probe
 # --------------------------------------------------------------------------
 # 7c. Parallel tasks (spec §4): gamma and delta posted side by side, both
 #     workers live at once. Each post adds its own Tests/<slug>.lean, so
-#     the suite never conflicts; but both agents write shared.txt
+#     the suite never conflicts; but both agents write src/shared.txt
 #     differently, so once gamma is accepted, the player can't merge main
 #     into delta to land its accept:
 #     delta goes `conflicted`, and the director resolves exactly that
@@ -660,10 +662,10 @@ wait_until "gamma and delta planned" both_ready
 
 for t in gamma delta; do
   git -C "$DIR_REPO" checkout -q "task/$t"
-  echo "Create $t.txt." >"$DIR_REPO/tasks/$t/prompt.md"
-  printf 'title = "%s"\nphase = "p1"\nmodules = ["app"]\n\n[check]\nname = "%s-check"\ncmd = "test -f %s.txt"\n' "$t" "$t" "$t" >"$DIR_REPO/tasks/$t/task.toml"
-  printf '#!/bin/sh\necho ok > %s.txt\necho %s > shared.txt\n' "$t" "$t" >"$DIR_REPO/tasks/$t/agent.sh"
-  task_tests "$DIR_REPO/architecture/Tests/$t.lean" "$t-check" "test -f $t.txt"
+  echo "Create src/$t.txt." >"$DIR_REPO/tasks/$t/prompt.md"
+  printf 'title = "%s"\nphase = "p1"\nmodules = ["app"]\n\n[check]\nname = "%s-check"\ncmd = "test -f src/%s.txt"\n' "$t" "$t" "$t" >"$DIR_REPO/tasks/$t/task.toml"
+  printf '#!/bin/sh\nmkdir -p src\necho ok > src/%s.txt\necho %s > src/shared.txt\n' "$t" "$t" >"$DIR_REPO/tasks/$t/agent.sh"
+  task_tests "$DIR_REPO/architecture/Tests/$t.lean" "$t-check" "test -f src/$t.txt"
   git -C "$DIR_REPO" add -A
   git -C "$DIR_REPO" commit -q -m "post: $t"
 done
@@ -687,14 +689,14 @@ wait_out=$(dash wait --timeout 5)
 assert_contains "$wait_out" "conflict" "dashboard wait output"
 assert_contains "$wait_out" "$main_at_conflict" "the conflict event names the main commit"
 
-# The resolution merges exactly that main commit and touches only shared.txt.
+# The resolution merges exactly that main commit and touches only src/shared.txt.
 git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" merge -q --ff-only hub/task/delta
 if git -C "$DIR_REPO" merge -q --no-edit "$main_at_conflict" >/dev/null 2>&1; then
-  echo "e2e: expected shared.txt to conflict when resolving delta" >&2
+  echo "e2e: expected src/shared.txt to conflict when resolving delta" >&2
   exit 1
 fi
-printf 'gamma\ndelta\n' >"$DIR_REPO/shared.txt"
+printf 'gamma\ndelta\n' >"$DIR_REPO/src/shared.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q --no-edit
 wait_until "task/delta accepted" task_status_is delta accepted
@@ -722,10 +724,10 @@ printf 'title = "eta"\nphase = "p1"\nmodules = ["app"]\n' >"$DIR_REPO/tasks/eta/
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: eta"
 wait_until "eta is ready" task_status_is eta ready
-echo "Create eta.txt." >"$DIR_REPO/tasks/eta/prompt.md"
-printf 'title = "eta"\nphase = "p1"\nmodules = ["app"]\n\n[check]\nname = "eta-check"\ncmd = "test -f eta.txt"\n' >"$DIR_REPO/tasks/eta/task.toml"
-printf '#!/bin/sh\necho ok > eta.txt\n' >"$DIR_REPO/tasks/eta/agent.sh"
-task_tests "$DIR_REPO/architecture/Tests/eta.lean" eta-check "test -f eta.txt"
+echo "Create src/eta.txt." >"$DIR_REPO/tasks/eta/prompt.md"
+printf 'title = "eta"\nphase = "p1"\nmodules = ["app"]\n\n[check]\nname = "eta-check"\ncmd = "test -f src/eta.txt"\n' >"$DIR_REPO/tasks/eta/task.toml"
+printf '#!/bin/sh\nmkdir -p src\necho ok > src/eta.txt\n' >"$DIR_REPO/tasks/eta/agent.sh"
+task_tests "$DIR_REPO/architecture/Tests/eta.lean" eta-check "test -f src/eta.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "post: eta"
 
@@ -779,13 +781,13 @@ hub_has_task_agents() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:r
 wait_until "roadmap with task agents on main" hub_has_task_agents
 
 mkdir -p "$TA_TEMPLATES/epsilon/tasks/epsilon"
-echo "Create epsilon.txt. Tests you add must be pure." >"$TA_TEMPLATES/epsilon/tasks/epsilon/prompt.md"
-printf '#!/bin/sh\necho ok > epsilon.txt\n' >"$TA_TEMPLATES/epsilon/tasks/epsilon/agent.sh"
-task_tests "$TA_TEMPLATES/epsilon/architecture/Tests/epsilon.lean" epsilon-check "test -f epsilon.txt"
+echo "Create src/epsilon.txt. Tests you add must be pure." >"$TA_TEMPLATES/epsilon/tasks/epsilon/prompt.md"
+printf '#!/bin/sh\nmkdir -p src\necho ok > src/epsilon.txt\n' >"$TA_TEMPLATES/epsilon/tasks/epsilon/agent.sh"
+task_tests "$TA_TEMPLATES/epsilon/architecture/Tests/epsilon.lean" epsilon-check "test -f src/epsilon.txt"
 
 git -C "$DIR_REPO" checkout -q -b task/epsilon main
 mkdir -p "$DIR_REPO/tasks/epsilon"
-printf 'title = "epsilon"\nphase = "p1"\nmodules = ["app"]\nbrief = "a fake task agent posts this"\n\n[check]\nname = "epsilon-check"\ncmd = "test -f epsilon.txt"\n' >"$DIR_REPO/tasks/epsilon/task.toml"
+printf 'title = "epsilon"\nphase = "p1"\nmodules = ["app"]\nbrief = "a fake task agent posts this"\n\n[check]\nname = "epsilon-check"\ncmd = "test -f src/epsilon.txt"\n' >"$DIR_REPO/tasks/epsilon/task.toml"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: epsilon"
 
@@ -852,7 +854,7 @@ cat >>"$DIR_REPO/architecture/Architecture.lean" <<'EOF'
 
 root app where
   lang = rust
-  paths = ["feature.txt", "feature2.txt", "gamma.txt", "delta.txt", "shared.txt", "eta.txt", "epsilon.txt"]
+  paths = ["src"]
 EOF
 git -C "$DIR_REPO" add architecture
 git -C "$DIR_REPO" commit -q -m "architecture: one module, a linked cache"
