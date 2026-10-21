@@ -28,8 +28,8 @@ This spec replaces that with state computed from git.
   the player: the director's delegate for that task, writing its post and
   send-backs and reviewing the finished work (§17).
 - **Worker** — an LLM (Claude Code session), one per task, launched by the
-  player. Writes code (and may add new tests) until the project suite
-  passes, then commits — or blocks.
+  player. Writes code (and may add new tests) inside its task's modules
+  until the task's run set (§6.6) passes, then commits — or blocks.
 - **Player** — a process; `dashboard`'s new responsibility. The only writer
   of the canonical repo. Imports and validates every commit, runs every
   test itself, launches workers, counts strikes, merges accepted work,
@@ -50,8 +50,8 @@ checkable test:
 
 - The director cannot **post** a task until it has committed a test that
   currently *fails*.
-- The worker cannot **finish** a task until the whole project suite
-  *passes*.
+- The worker cannot **finish** a task until every check that can see its
+  change (its run set, §6.6) *passes*.
 - **Sending back** requires a new failing-test commit, not a prose objection.
 - **Accepting** is also a commit, not silence.
 
@@ -118,11 +118,11 @@ Enforced by the player on import; a violating commit is never imported.
 - **No merge commits from agents.** The only merge commits are the
   player's own and the director's resolution of a recorded conflict (§11).
 - **Path ownership.** A worker commit must leave every pin (§8.3)
-  unchanged. The director commits to a task branch only through the
-  transitions in §9.
+  unchanged and stay inside the task's scope. The director commits to a
+  task branch only through the transitions in §9.
 - **`main` is player-only**, except for director commits touching only
   `roadmap.toml`, `prompts.kdl` (§19) or the doc paths declared in
-  `roadmap.toml` (`docs_paths`). The player runs the project suite on these
+  `roadmap.toml` (`docs_paths`). The player runs the whole suite on these
   like any other `main` commit.
 
 **Marker commits.** A few transitions are events with no content: *block*,
@@ -146,18 +146,21 @@ counter (§10).
 
 ### 6.1 Checks and thresholds
 
-The unit of evidence is a **check**: a shell command plus a threshold.
+The unit of evidence is a **check**: a shell command plus a threshold,
+declared in Lean (§6.2).
 
-```toml
-[[check]]
-name = "unit"
-cmd = "cargo test"            # deterministic: runs = 1, min_pass = 1 (defaults)
+```lean
+check unit where
+  cmd = "cargo test -p database"     -- deterministic: runs = 1, min_pass = 1 (defaults)
+  covers = [database]
+  files = ["engine/crates/database/tests"]
 
-[[check]]
-name = "summary-grounding"
-cmd = "pytest tests/llm/test_summary.py"
-runs = 10
-min_pass = 8
+check «summary-grounding» where
+  cmd = "pytest tests/llm/test_summary.py"
+  covers = [summary]
+  files = ["tests/llm/test_summary.py"]
+  runs = 10
+  min_pass = 8
 ```
 
 The player runs `cmd` `runs` times; the check **passes** when at least
@@ -176,32 +179,54 @@ the others to absorb it.
 
 ### 6.2 The project suite
 
-`tests.toml` at the repo root declares the project suite:
+The suite is part of the architecture's Lean package (`architect-v3.md`),
+in three kinds of file:
 
-- `[[check]]` entries (as above) — every check the project must pass.
-- `test_paths` — the files and directories that make up the test tree,
-  including anything that could defeat a test without touching it
-  (fixtures, `conftest.py`, test config). The tool can't tell which files
-  are tests in an arbitrary language, so the project declares it.
+- `architecture/Tests.lean` (director-owned): the project's checks, plus
+  `test_paths`, the files that could defeat a test without belonging to one
+  (fixtures, `conftest.py`, test config), and `list_cmd` (§15).
+- `architecture/Tests/<slug>.lean`: the checks a task's post adds (§6.3),
+  written by the director or its task agent.
+- `architecture/Tests/<slug>.worker.lean`: the checks the task's worker
+  adds (§6.6).
 
-The suite also includes every `tests.d/*.toml` fragment: `[[check]]`
-entries only, read in path order after `tests.toml`'s. A check name must be
-unique across all of them. Fragments exist so that parallel tasks (§4)
-never edit the same suite file: each post adds its own (§6.3), and two
-tasks only conflict there when they really change the same check.
+Per-task files keep parallel tasks (§4) apart: each writes its own, and two
+tasks only conflict in the suite when they really change the same check.
+
+Every check declares:
+
+- `covers` — the modules (and roots) its test exercises. Lean resolves each
+  name against the manifest, so a check covering an undeclared module is a
+  Lean error. `covers = all` marks a global check (`dashboard arch check`,
+  budgets, lints): it runs in every run set, in the full worktree.
+- `files` — the check's own test code: what pins protect, what scope
+  allows the check's author to write, and what a trim deletes.
+
+Each module's `test_cmd` is an implicit check named after the module,
+covering exactly that module. Check names share one Lean namespace, so a
+duplicate is a Lean error.
 
 **The suite passes** when every check passes. Once a task is merged its
 checks and test files are project tests, not "that task's tests". The
-invariant is that the project suite passes at every commit on `main`.
+invariant is that the project suite passes at every commit on `main`; the
+player keeps it while running only run sets (§6.6).
+
+**Each check proves its `covers`.** A check (other than `covers = all`)
+runs in a view built like a module's (`architect-v3.md`): the covered
+modules' files, their APIs' files and `impl` files, `shared`, `test_paths`
+and the check's own `files`, plus the `linked` symlinks, all inside the jail
+(§20). A test that reaches into a module outside its `covers` finds nothing
+there and fails like any failing check. For a worker's own check that is a
+`suite` strike; for a pinned check the worker contests it (§18).
 
 ### 6.3 The task check
 
-Each task's `task.toml` declares the task's own check (same shape as
-`[[check]]`): the thing that must fail at post and is the task's reason to
-exist. In the post commit the director also adds it to the task's own
-suite fragment, `tests.d/<slug>.toml`, so while the task runs it is part of
-the suite. It goes there, not into `tests.toml`. Whether it stays there
-after accept is the director's call (§6.5).
+Each task's `task.toml` declares the task's own check (same shape, in TOML):
+the thing that must fail at post and is the task's reason to exist. In the
+post commit the director also declares it in
+`architecture/Tests/<slug>.lean`, so while the task runs it is part of the
+suite. Whether it stays there after accept is the director's call (§6.5).
+Every check in that file covers only modules in the task's `modules`.
 
 ### 6.4 Stale tests
 
@@ -210,8 +235,9 @@ that a test is stale — rather than inconvenient — is a design decision and
 belongs to the director, never the worker:
 
 - **Foreseen:** the director updates or deletes the stale test (and its
-  `tests.toml` or `tests.d/` entry) in the task's post commit, visible in
-  the diff.
+  declaration) in the task's post commit, visible in
+  the diff. A stale test outside the task's run set (§6.6) needs a task
+  whose `modules` reach it.
 - **Found mid-task:** the worker cannot touch pinned tests, so it
   **blocks**, explaining the conflict. That escalates the task (§10); the
   director and operator replan, typically retiring it and posting a
@@ -225,20 +251,56 @@ every later task runs them. The rest (scaffolding for one step, a case a
 broader test now covers) cost suite time for nothing once the task lands.
 
 The director decides which stay. The task agent's review report recommends
-keep or drop for each test the task added (§17); before `accept:` the
-director (or the task agent, at its request) makes a **trim** commit on the
-`tested` task that:
+keep or drop for each check the task added, the worker's included (§17);
+before `accept:` the director (or the task agent, at its request) makes a
+**trim** commit on the `tested` task that:
 
-- deletes or edits test files the task added (under `test_paths`, absent on
-  `main`), and
-- removes `[[check]]` entries from `tests.d/<slug>.toml` (or the whole
-  fragment).
+- deletes or edits the `files` of the dropped checks (absent on `main`),
+  and
+- removes their entries from `architecture/Tests/<slug>.lean` and
+  `architecture/Tests/<slug>.worker.lean` (or a whole file).
 
 Everything else stays: tests already on `main`, the task check in
 `tasks/<slug>/task.toml` (the record of what the task asked), and the
-dropped tests themselves in the branch's history. The suite must still pass
-at the trim. The task stays `tested`, re-pinned at the trim; accept then
-lands the trimmed branch. A task with nothing to drop needs no trim.
+dropped tests themselves in the branch's history. The run set must still
+pass at the trim. The task stays `tested`, re-pinned at the trim; accept
+then lands the trimmed branch. A task with nothing to drop needs no trim.
+
+### 6.6 Scoped runs
+
+A task runs only the checks that can see its change.
+
+- **Modules.** `task.toml` declares `modules = [...]`, the modules and roots
+  the task changes. The director sets it at plan and may change it by
+  replan until the post; from the post on it is pinned. A worker that needs
+  another module blocks (§7), and the director replans.
+- **Run set.** The player computes it in Lean: a generated runner applies
+  `Dashboard.impacted` to the task's `modules`, so an undeclared name is a
+  `plan` rejection. The run set is every check whose `covers` meets
+  `modules`, plus every `covers = all` check. A commit that touches `shared`
+  runs the whole suite. The result is cached by the architecture tree and
+  the module list.
+- **Worker checks.** The worker may add tests wherever the project keeps
+  them, declared in `architecture/Tests/<slug>.worker.lean` with `covers`
+  within `modules`. Their `files` and that file stay the worker's to edit
+  until the trim. A worker check joins the run set as soon as it is declared.
+- **Where run sets apply.** Every task-level judgement uses the task's run
+  set: finish, send-back and trim (§9).
+  Landing an accept runs `impacted(the task's modules ∪ the modules main
+  changed since the branch last saw it)` on the merge result (§11).
+- **Where the whole suite runs.** At player start, on `main` (the
+  `verify_main` run, §20), and on every director commit to `main`. A
+  failure at start holds work like an over-budget `main` (§20) until a task
+  fixes it.
+- **Why a run set is enough.** Scope (§8.3) keeps a task's changes inside
+  its modules, and each check's view (§6.2) keeps its test inside its
+  `covers`, so a check outside the run set sees the same files before and
+  after the task. What a view leaves out (toolchain, `linked` caches, the
+  host) is what the start run catches.
+- **Tools.** In any clone, `dashboard scope` prints the task's modules,
+  the paths its author may write (§8.3), and its run set; `dashboard test`
+  runs that run set in the player's views and jail, so an agent sees the
+  player's verdict before committing.
 
 ## 7. Worker commits
 
@@ -272,9 +334,10 @@ branch moves to `refs/retired/<slug>`; its slug is never reused.
 roadmap.toml                   on main: title, phases (id, title, goal, hidden),
                                docs_paths, [limits] (§10)
 prompts.kdl                    on main: every prompt the player sends (§19)
-tests.toml                     project suite: [[check]] entries, test_paths
-tests.d/<slug>.toml            the suite fragment a task's post adds: its check
-tasks/<slug>/task.toml         title, phase, milestone, depends_on, check
+architecture/Tests.lean        project suite: checks, test_paths, list_cmd (§6.2)
+architecture/Tests/<slug>.lean the checks a task's post adds
+architecture/Tests/<slug>.worker.lean   the checks the task's worker adds
+tasks/<slug>/task.toml         title, phase, milestone, depends_on, modules, check
 tasks/<slug>/prompt.md         director → worker instructions
 tasks/<slug>/reviews/r<N>.md   director's send-back notes, round N
 ```
@@ -284,7 +347,7 @@ a permanent, immutable record of what the task asked for and how it was
 reviewed. Blocks, acceptances and retirements are marker commits (§5), not
 files.
 
-### 8.3 Pins
+### 8.3 Pins and scope
 
 Pins are computed by the player as late as possible: immediately before
 the worker starts work — at launch, and again before relaying a
@@ -293,18 +356,32 @@ send-back. Until then the director may keep refining tests freely.
 The player records git's blob hash (`git rev-parse <tip>:<file>`) of every
 file that exists at that moment under:
 
-- `tests.toml`, every `tests.d/` fragment, and every entry of `test_paths`
+- `architecture/` (the manifest, the APIs and every suite file), except the
+  task's own `Tests/<slug>.worker.lean`,
+- the `files` of every check other than the worker's own, and `test_paths`
   (the whole test tree),
 - `tasks/<slug>/`.
 
 Every worker commit must leave each pinned file present and byte-identical
-— mechanically checked, no trust involved. New files are allowed: the
-worker may add tests (which become project tests on merge), but not a new
-`tests.d/` fragment: the suite's checks are the director's.
+— mechanically checked, no trust involved.
 
-Pins close tampering with the tests themselves, not every way of beating
-them (e.g. special-casing the code under test, or a new file that
-monkeypatches). Catching that is the director's review job.
+**Scope** is what the worker's commits may change at all, derived from the
+task's `modules` (§6.6) at the hub tip, so a commit can't widen its own:
+
+- the paths of the task's modules and roots (an API's `impl` files lie
+  there), and `shared`,
+- `architecture/Tests/<slug>.worker.lean` and the `files` its checks
+  declare, new or existing, anywhere the project keeps tests.
+
+A pinned file changed is a `pins` strike; any other path outside scope, or
+a worker check whose `covers` leaves `modules`, is a `scope` strike. The
+worker's prompt names `dashboard scope` (§6.6), which prints exactly this
+area.
+
+Pins and scope close tampering with the tests themselves, and work outside
+the task's modules, not every way of beating a test (e.g. special-casing
+the code under test, or a new file that monkeypatches). Catching that is
+the director's review job.
 
 ## 9. Transitions
 
@@ -313,15 +390,15 @@ failed validation is a rejection with the listed reason (§10).
 
 | Transition | Commit (author) | Player checks | Rejection reason |
 |---|---|---|---|
-| **plan** | new branch `task/<slug>` from `main`, adding `tasks/<slug>/task.toml` (director) | slug unused (incl. retired); `depends_on` slugs exist and aren't retired; no cycles | `plan` |
+| **plan** | new branch `task/<slug>` from `main`, adding `tasks/<slug>/task.toml` (director) | slug unused (incl. retired); `depends_on` slugs exist and aren't retired; no cycles; `modules` non-empty, each declared in `main`'s architecture (§6.6) | `plan` |
 | **replan** | edits `tasks/<slug>/task.toml` on a not-yet-posted branch (director) | same as plan | `plan` |
-| **post** | adds `prompt.md`, the task check and its test files, `tests.d/<slug>.toml` entry, stale-test updates (director, or its task agent §17) | all `depends_on` accepted and merged into the branch (§11); task check **fails** | `post` |
+| **post** | adds `prompt.md`, the task check and its test files, `architecture/Tests/<slug>.lean`, stale-test updates (director, or its task agent §17) | all `depends_on` accepted and merged into the branch (§11); every new check's `covers` within `modules`; task check **fails** | `post` |
 | **launch** | — (player) | task check still **fails** at the tip; records pins; starts `tmux` session running `claude` in a fresh worker clone with `prompt.md` | — |
-| **finish** | code, optionally new tests (worker) | pins unchanged; project suite **passes** | `pins`, `suite` |
+| **finish** | code, optionally new tests (worker) | pins unchanged; inside scope (§8.3); run set (§6.6) **passes** | `pins`, `scope`, `suite` |
 | **block** | `block:` marker (worker) | — | — (escalates) |
 | **contest** / **reply** | `contest:` marker (worker); the reply (task agent or director) | §18 | §18 |
-| **send back** | adds `reviews/r<N>.md` + new/updated tests (director, or its task agent §17) | task is `tested`; project suite now **fails**; re-pins; relays the note | `review` |
-| **trim** | deletes/edits test files the task added, removes checks from `tests.d/<slug>.toml`; leaves `tasks/<slug>/` alone (director, or its task agent §17) | task is `tested`; touches nothing else; the fragment only loses entries; project suite **passes**; re-pins; stays `tested` (§6.5) | `accept` |
+| **send back** | adds `reviews/r<N>.md` + new/updated tests (director, or its task agent §17) | task is `tested`; run set now **fails**; re-pins; relays the note | `review` |
+| **trim** | deletes/edits the `files` of checks the task added, removes their entries from `architecture/Tests/<slug>.lean` and `<slug>.worker.lean`; leaves `tasks/<slug>/` alone (director, or its task agent §17) | task is `tested`; touches nothing else; both files only lose entries; run set **passes**; re-pins; stays `tested` (§6.5) | `accept` |
 | **accept** | `accept:` marker (director) | task is `tested`; the player lands it (§11), merging `main` in first if it moved: a conflict leaves it `conflicted`, a suite failure caused by the merge sends it back to the worker | `accept` |
 | **resolve** | merge of the recorded `main` commit into the task tip (director) | task is `conflicted`; merges exactly the `main` commit the conflict was recorded against; differs from git's own merge only on the recorded paths; re-pins; the player then lands the accept (§11) | `history`, `ownership` |
 | **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is conflicted, contested or escalated; player moves the branch to `refs/retired/<slug>` and ends the worker session | `retire` |
@@ -348,10 +425,11 @@ its own limit in `roadmap.toml` under `[limits.strikes]`:
 | `history` | either | rebase, amend, force push, merge commit | 2 |
 | `ownership` | director, task agent | commit that fits no transition, or touches paths it may not | 2 |
 | `pins` | worker | finish claim modified or deleted a pinned file | 2 |
-| `suite` | worker | finish claim where the project suite fails | 2 |
+| `scope` | worker | finish claim touching a path outside the task's scope, or declaring a check that covers a module outside `modules` (§8.3) | 2 |
+| `suite` | worker | finish claim where the task's run set fails | 2 |
 | `plan` | director | invalid plan/replan (bad slug, bad dependency, cycle) | 2 |
 | `post` | director, task agent | post whose task check passes, or whose dependencies aren't met | 2 |
-| `review` | director, task agent | send-back where the suite still passes — an objection without evidence | 2 |
+| `review` | director, task agent | send-back where the run set still passes — an objection without evidence | 2 |
 | `accept` | director | accept while the task isn't `tested` | 2 |
 | `retire` | director | retire of a task that is in flight and not escalated | 2 |
 | `claims` | worker | a spike's finish claim whose findings or claims don't validate (§14) | 2 |
@@ -400,8 +478,9 @@ commits.
      tried and the conflicted paths. This is no strike, and the director is
      notified (a `conflict` event).
   2. It merges the branch into `main` with `--no-ff` and a `Task: <slug>`
-     trailer, after running the project suite on the merge result. If the
-     suite fails because of what the merge brought in (a semantic
+     trailer, after running the landing run set (§6.6: the task's modules
+     plus those `main` changed since the branch last saw it) on the merge
+     result. If it fails because of what the merge brought in (a semantic
      conflict), `main` doesn't move: the task goes back to the worker,
      `in_revision`, re-pinned at the sync, with the failure relayed as the
      evidence and no review round spent. Once it is `tested` again, the
@@ -465,6 +544,9 @@ spec's parking lot" for the detail behind each pointer):
 - **Auto-relaunch**: deferred. A dead worker session is shown and emitted
   as an event, never restarted automatically; `dashboard relaunch <slug>`
   is the manual trigger — CLAUDE.md's Decisions section.
+- **Scope and suite subsetting**: a task declares `modules`; the worker
+  stays inside them (§8.3) and every judgement runs only the checks that
+  cover them (§6.6). The whole suite runs at player start.
 - **Parallel tasks**: allowed; the player merges `main` into a task when
   landing its accept, and the director resolves only recorded conflicts
   (§4, §11).
@@ -482,10 +564,6 @@ Still not decided:
 - Timeout/crash handling beyond manual relaunch: what the player does if
   the worker session hangs, crashes, or never commits, beyond leaving
   that to the operator via `dashboard relaunch`.
-- Scope enforcement beyond pins: whether the player restricts which
-  non-test paths a worker commit may touch.
-- Suite runtime: the full suite (including multi-run checks) runs at every
-  finish and merge; may need caching or subsetting for large projects.
 - Whether the `dashboard` skill is rewritten as the director's playbook or
   replaced entirely (CLAUDE.md's Installing section: it must happen before
   `cargo install --path .` propagates this version to consumers).
@@ -597,12 +675,12 @@ task.
 `task.toml` adds `fix_paths` (plain files, no wildcards), `[[replace]]`
 (`old`, `new` test names) and `[[evidence]]` (a command run `runs` times on
 `main`, `min_pass <= passes <= max_pass < runs`). `[check]` is required and
-proves the replacement stable. `tests.toml` needs `list_cmd`, printing one
+proves the replacement stable. `architecture/Tests.lean` needs `list_cmd`, printing one
 test per line.
 
 - *Pins*: only `fix_paths` are unpinned; `tasks/<slug>/` stays pinned.
 - *Post*: the §6.3 rules, except the `[check]` must not be in the suite (no
-  `tests.d/<slug>.toml`; a stress check would slow every later suite). The evidence must reproduce
+  `architecture/Tests/<slug>.lean`; a stress check would slow every later suite). The evidence must reproduce
   the flake, else the post is an `evidence` rejection.
 - *No repro*: `evidence` has a strike limit of 1. The player retires the task
   itself (§9 allows no other retirer): it moves the branch to
@@ -627,7 +705,7 @@ or the total past `suite_fail`) can't be fixed by an ordinary task: the test
 tree is pinned. A task of `kind = "test-speedup"` is the fix. Its plan names
 the slow checks, `[[slow]] check = "<suite check name>"`, and has no `[check]`
 (its evidence is main's recorded timings) and adds nothing to the suite;
-`tests.toml` needs `list_cmd`.
+`architecture/Tests.lean` needs `list_cmd`.
 
 - **Post.** The evidence is read from `main`'s cached suite run, never
   re-measured: `main` must be over its budget, every named check must exist
@@ -637,8 +715,9 @@ the slow checks, `[[slow]] check = "<suite check name>"`, and has no `[check]`
   rejection (limit 1) and the player retires the task, as for a flake that
   doesn't reproduce; the launch re-checks it. The post itself needs no passing
   or failing suite, so it imports while `main` is over budget.
-- **Scope** (the inverse of the usual pins). `tests.toml`, `tests.d/` and the
-  `test_paths` tree are unpinned. The worker may change those paths, and in the
+- **Scope** (the inverse of the usual pins). The suite files under
+  `architecture/`, the named checks' `files` and the `test_paths` tree are
+  unpinned. The worker may change those paths, and in the
   suite definition only a check's `cmd`, `retry_failed` and `retry_on`.
   Changing `runs`, `min_pass`, `test_paths`, `list_cmd`, adding or removing a
   check, any non-test path or `roadmap.toml` (so `[budget]`) is a `pins` strike.
@@ -745,15 +824,15 @@ fetch is validated, as one cumulative change from the hub tip:
 
 | Task status | Commit | Validated as | Rejection reason |
 |---|---|---|---|
-| `ready` | adds `prompt.md`, the test files, `tests.d/<slug>.toml`, `[check]` in `task.toml` | the post row of §9 | `post`, `evidence` |
+| `ready` | adds `prompt.md`, the test files, `architecture/Tests/<slug>.lean`, `[check]` in `task.toml` | the post row of §9 | `post`, `evidence` |
 | `tested` | adds `reviews/r<N>.md` + new/updated tests | the send-back row of §9 | `review` |
 | `tested` | leaves `tasks/<slug>/` alone: removes tests the task added | the trim row of §9, only when the director asks | `accept` |
 | `contested` | adds `contests/c<N>.md` + optionally fixed tests | the reply row of §18 | `ownership` |
-| any | touches a path outside `tests.toml`, `tests.d/`, the hub's `test_paths` and `tasks/<slug>/`; changes `task.toml` beyond `[check]`; any other status | — | `ownership` |
+| any | touches a path outside its scope: `architecture/Tests/<slug>.lean`, the `files` of checks in the task's run set, the APIs whose both ends are in `modules`, the hub's `test_paths` and `tasks/<slug>/`; changes `task.toml` beyond `[check]`; any other status | — | `ownership` |
 | any | an empty (marker) commit | — | `ownership` |
 | any | merge commit, or rewrites a commit imported from it | — | `history` |
 
-`test_paths` is read at the hub tip, so a commit can't widen its own scope.
+Scope is read at the hub tip, so a commit can't widen its own.
 Rejections count against the task's strike counters like anyone's (§10) and
 are relayed into the task agent's session with a recovery hint. A hub tip
 that moved under an unimported commit (an unblock merge, a director replan)
@@ -793,7 +872,7 @@ instead.
 | Transition | Commit (author) | Player checks | Rejection reason |
 |---|---|---|---|
 | **contest** | `contest:` marker naming the test, body = why it's wrong (worker) | a clean marker on the hub tip (as `block:`); not a spike; within `max_contest_rounds`, else the task escalates and the marker isn't imported | `history`, `suite` |
-| **reply** | adds `tasks/<slug>/contests/c<N>.md` and optionally fixed tests (task agent; the director when task agents are off) | task is `contested`; only the reply, `tests.toml`, `tests.d/`, `test_paths` and `tasks/<slug>/`; re-pins; relays the reply to the worker | `ownership` |
+| **reply** | adds `tasks/<slug>/contests/c<N>.md` and optionally fixed tests (task agent; the director when task agents are off) | task is `contested`; only the reply and the task agent's scope (§17); re-pins; relays the reply to the worker | `ownership` |
 
 - While `contested` (§12) the worker waits; the player fetches nothing from
   it. The task agent is asked to reply (once per contest), still without

@@ -358,6 +358,29 @@ Units stay deferred. The raise machinery only compares a number against its prev
 
 ## Tests
 
+Every check is declared in Lean with the modules it `covers` and its own
+`files` (`architecture/Tests.lean`, `architecture/Tests/<slug>.lean`,
+`architecture/Tests/<slug>.worker.lean`; spec §6.2):
+
+```lean
+import Dashboard
+import Architecture
+open Dashboard
+
+check «search-story» where
+  cmd = "deno test web/stories/search.test.ts"
+  covers = [database, nutrition, «engine-bridge»]
+  files = ["web/stories/search.test.ts"]
+```
+
+- A module's `test_cmd` is an implicit check covering that module.
+- A check runs in the view of its `covers` (the module view, widened to
+  every covered module, plus `test_paths` and its `files`), so its
+  `covers` is proven on every run: a test reaching outside it fails.
+- `Dashboard.impacted : List Node → List Check` gives a task's run set from
+  its `modules` (spec §6.6); `covers = all` checks are always in it.
+- The player runs the whole suite once at start, then run sets only.
+
 ### Inter-module tests
 
 * Tests that the `generator` module can generate the FSTOP with the right `T`. That is, that the types and values are
@@ -370,6 +393,7 @@ Units stay deferred. The raise machinery only compares a number against its prev
 ### User story tests
 
 - Created from an operator-provided list.
-- The modules a story impacts are detected with `atime` or `strace`-like tools.
-- Run at `player` start and on merges to `main`.
-- On merges to `main`, only the stories that exercise the changed modules run.
+- A story is a check whose `covers` lists the modules and roots it
+  exercises; its view proves the list.
+- Runs at `player` start with the whole suite, then in the run set of every
+  task whose `modules` meet its `covers`.
