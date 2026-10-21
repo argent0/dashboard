@@ -11,7 +11,8 @@
 #   dying: relaunch, the relaunch cap, --reset -> task agents on: a
 #   fake task agent posts and reviews a task in its own tmux session -> an
 #   `arch check` suite check whose module view links a build cache -> a
-#   director rejection on main
+#   task scoped to one module: its run set, `dashboard scope`, a landing
+#   run set grown by main's changes -> a director rejection on main
 #
 # asserting each transition via `dashboard status --no-color` and raw git
 # ref checks against the hub. See spec.md for the model and CLAUDE.md for
@@ -836,7 +837,7 @@ import Dashboard
 open Dashboard
 
 architecture where
-  max_modules = 1
+  max_modules = 3
   linked = ["cache"]
 
 module zeta where
@@ -885,6 +886,98 @@ git --git-dir "$HOME_DIR/hub.git" cat-file -e refs/heads/main:zeta/lib.rs || { e
 if git --git-dir "$HOME_DIR/hub.git" cat-file -e refs/heads/main:cache/built 2>/dev/null; then
   echo "e2e: the linked cache was committed to main" >&2; exit 1
 fi
+
+# --------------------------------------------------------------------------
+# 7g. Scoped runs (spec §6.6, §8.3): modules `a` and `b`; `b_only` covers
+#     `b` and fails once a/a.txt exists, so it is out of reach of task `a`
+#     (on modules ["a"]), whose finish imports. Its worker adds its own
+#     check in Tests/a.worker.lean; `dashboard scope` from its clone shows
+#     the scope. Then a docs change under b/ on main puts b in the landing
+#     run set: b_only fails on the merge and `a` goes back to its worker.
+# --------------------------------------------------------------------------
+
+log "step 7g: scoped runs (task a on module a)"
+git -C "$DIR_REPO" checkout -q main
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/main
+sed -i 's|^title = "E2E Project"$|title = "E2E Project"\ndocs_paths = ["a/README.md", "b/README.md"]|' "$DIR_REPO/roadmap.toml"
+git -C "$DIR_REPO" commit -q -am "roadmap: module docs"
+hub_has_docs() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:roadmap.toml | grep -q docs_paths; }
+wait_until "docs_paths on main" hub_has_docs
+
+cat >>"$DIR_REPO/architecture/Architecture.lean" <<'EOF'
+
+module a where
+  lang = rust
+  paths = ["a"]
+
+module b where
+  lang = rust
+  paths = ["b"]
+EOF
+cat >>"$DIR_REPO/architecture/Tests.lean" <<'EOF'
+
+check b_only where
+  cmd = "test ! -e \"$DASHBOARD_ROOT/a/a.txt\""
+  covers = [b]
+EOF
+# zeta's arch check now needs the whole tree: the director widens it.
+task_tests "$DIR_REPO/architecture/Tests/zeta.lean" zeta-arch "$arch_cmd" all
+mkdir -p "$DIR_REPO/a" "$DIR_REPO/b"
+echo "# a" >"$DIR_REPO/a/README.md"
+echo "# b" >"$DIR_REPO/b/README.md"
+git -C "$DIR_REPO" add -A
+git -C "$DIR_REPO" commit -q -m "architecture: modules a and b"
+hub_has_ab() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:architecture/Tests.lean 2>/dev/null | grep -q b_only; }
+wait_until "modules a and b on main" hub_has_ab
+
+mkdir -p "$TA_TEMPLATES/a/tasks/a"
+echo "Create a/a.txt. Tests you add must be pure." >"$TA_TEMPLATES/a/tasks/a/prompt.md"
+cat >"$TA_TEMPLATES/a/tasks/a/agent.sh" <<'EOF'
+#!/bin/sh
+echo ok > a/a.txt
+echo 'test -f a/a.txt' > a/t.sh
+mkdir -p architecture/Tests
+printf 'import Architecture\nopen Dashboard\n\ncheck a_own where\n  cmd = "sh a/t.sh"\n  covers = [a]\n  files = ["a/t.sh"]\n' > architecture/Tests/a.worker.lean
+EOF
+task_tests "$TA_TEMPLATES/a/architecture/Tests/a.lean" a-check "test -f a/a.txt" "[a]"
+
+git -C "$DIR_REPO" checkout -q -b task/a main
+mkdir -p "$DIR_REPO/tasks/a"
+printf 'title = "a"\nphase = "p1"\nmodules = ["a"]\nbrief = "scoped to module a"\n\n[check]\nname = "a-check"\ncmd = "test -f a/a.txt"\n' >"$DIR_REPO/tasks/a/task.toml"
+git -C "$DIR_REPO" add -A
+git -C "$DIR_REPO" commit -q -m "plan: a"
+wait_until "a is ready" task_status_is a ready
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/task/a
+git -C "$DIR_REPO" commit -q --allow-empty -m "stage: a" -m "start its task agent"
+wait_until "a's worker session exists" session_alive a
+
+scope_out=$(cd "$DIR_REPO/.dashboard/workers/a" && dash scope)
+assert_contains "$scope_out" "task/a  modules: a" "dashboard scope"
+assert_contains "$scope_out" "architecture/Tests/a.worker.lean" "dashboard scope"
+assert_contains "$scope_out" "a-check" "dashboard scope (run set)"
+case "$scope_out" in *b_only*) echo "e2e: b_only is in task a's run set" >&2; exit 1 ;; esac
+
+wait_until "task/a tested" task_status_is a tested
+a_tip=$(git --git-dir "$HOME_DIR/hub.git" rev-parse refs/heads/task/a)
+git --git-dir "$HOME_DIR/hub.git" cat-file -e "$a_tip:architecture/Tests/a.worker.lean" || { echo "e2e: a's worker check missing" >&2; exit 1; }
+
+# main moves under b: the landing run set gains b's checks.
+git -C "$DIR_REPO" checkout -q main
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/main
+echo "# b, revised" >"$DIR_REPO/b/README.md"
+git -C "$DIR_REPO" commit -q -am "docs: b"
+hub_has_b_docs() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:b/README.md | grep -q revised; }
+wait_until "b's docs on main" hub_has_b_docs
+git -C "$DIR_REPO" checkout -q task/a
+git -C "$DIR_REPO" fetch -q hub
+git -C "$DIR_REPO" merge -q --ff-only hub/task/a
+git -C "$DIR_REPO" commit -q --allow-empty -m "accept: a" -m "the task agent recommends it"
+a_merge_failed() { [ "$(event_count merge_failed a)" -ge 1 ]; }
+wait_until "a's landing fails on b_only" a_merge_failed
+assert_contains "$(dash wait --all | grep -A20 -E '^#[0-9]+ merge_failed +a( |$)')" "b_only" "a's merge_failed event"
 
 # --------------------------------------------------------------------------
 # 8. A director rejection path: commit a non-doc file on main ->
