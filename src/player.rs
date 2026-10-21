@@ -20,7 +20,6 @@ use crate::checks;
 use crate::config::{self, Reason, RoadmapConfig, TaskConfig, TaskKind, path_under_test_paths};
 use crate::events::{self, EventKind};
 use crate::flaky;
-use crate::lean;
 use crate::speedup;
 use crate::fsm::{self, Move, Verdict};
 use crate::git::Git;
@@ -424,6 +423,17 @@ pub fn screen_tail(screen: Option<&str>) -> String {
 
 /// Wraps `s` in single quotes for safe interpolation into a `sh -c` string,
 /// escaping any single quote in `s` itself (`'` -> `'\''`).
+/// The first check of the task's own suite files (`own`) at the trim that
+/// the tip lacks verbatim, or `None` when the trim only removed checks.
+fn trim_additions(before: &config::Suite, after: &config::Suite, own: &[String]) -> Option<String> {
+    after
+        .checks
+        .iter()
+        .filter(|c| c.source.as_ref().is_some_and(|s| own.contains(s)))
+        .find(|c| before.check(&c.name) != Some(*c))
+        .map(|c| c.name.clone())
+}
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
@@ -1691,38 +1701,17 @@ impl<S: Sessions> Player<S> {
     /// Lean package in `<home>/arch/` (jailed like a check) and caching the
     /// result on its tree the first time.
     pub fn arch_source(&self, commit: &str) -> Result<Option<raise::Source>, String> {
-        let export = |tree: &str| self.export_arch_tree(tree);
-        records::arch_source_at(&self.hub, commit, Some(&export))
+        records::arch_source_at(&self.hub, commit, Some(self.runner.exporter()))
     }
 
-    /// Materializes the `architecture/` tree `tree` under `<home>/arch/`
-    /// (keeping its `.lake/` build cache between exports) and runs the
-    /// exporter there.
-    fn export_arch_tree(&self, tree: &str) -> Result<lean::Exported, String> {
-        let dir = self.home.root.join("arch");
-        let pkg = dir.join(config::ARCH_DIR);
-        if pkg.exists() {
-            for e in std::fs::read_dir(&pkg).map_err(|e| e.to_string())?.flatten() {
-                if e.file_name() != ".lake" {
-                    let p = e.path();
-                    if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) }.map_err(|e| e.to_string())?;
-                }
-            }
-        }
-        std::fs::create_dir_all(&pkg).map_err(|e| e.to_string())?;
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "git --git-dir {} archive --format=tar {tree} | tar -x -C {}",
-                shell_quote(&self.hub.dir.display().to_string()),
-                shell_quote(&pkg.display().to_string())
-            ))
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(format!("archive {tree}: {}", String::from_utf8_lossy(&out.stderr).trim()));
-        }
-        lean::export(&pkg, self.runner.sandbox())
+    /// The suite at `commit` (`records::suite_at`), exported on a miss.
+    fn suite_at(&self, commit: &str) -> Result<config::Suite, String> {
+        records::suite_at(&self.hub, commit, Some(self.runner.exporter()))
+    }
+
+    /// The suite's `test_paths` at `commit`; none when it doesn't load.
+    fn test_paths_at(&self, commit: &str) -> Vec<String> {
+        self.suite_at(commit).map(|s| s.test_paths).unwrap_or_default()
     }
 
     /// `base` is "the current hub main" at this point in the cumulative walk
@@ -1746,12 +1735,7 @@ impl<S: Sessions> Player<S> {
             Some(text) => {
                 let new = config::roadmap_config_from_str(&text)
                     .map_err(|e| (Reason::Ownership, format!("ownership: roadmap.toml: {e}")))?;
-                let test_paths = self
-                    .hub
-                    .show_file(candidate, "tests.toml")
-                    .and_then(|t| config::tests_config_from_str(&t).ok())
-                    .map(|c| c.test_paths)
-                    .unwrap_or_default();
+                let test_paths = self.test_paths_at(candidate);
                 config::check_lock_files(&new.player.lock_files, &test_paths)
                     .map_err(|e| (Reason::Ownership, format!("ownership: roadmap.toml: {e}")))?;
             }
@@ -1763,6 +1747,7 @@ impl<S: Sessions> Player<S> {
             }
         }
         self.arch_source(candidate).map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
+        self.suite_at(candidate).map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
         self.main_raises(base, candidate).map_err(|e| (Reason::Ownership, e))?;
         match self.hub.show_file(candidate, prompts::FILE) {
             Some(text) => {
@@ -2621,8 +2606,8 @@ impl<S: Sessions> Player<S> {
     /// spec §9's post row: status must be `ready` (other tasks may be in
     /// flight: spec §4's parallel tasks); every accepted dependency's merge must already be an
     /// ancestor of `candidate` (else the branch hasn't been unblocked into
-    /// yet); `task.toml` must parse and declare a check; its suite fragment
-    /// `tests.d/<slug>.toml` must carry a matching entry and the whole suite
+    /// yet); `task.toml` must parse and declare a check; its suite file
+    /// `architecture/Tests/<slug>.lean` must carry a matching check and the whole suite
     /// must load (spec §6.3); and that check must currently
     /// *fail* (spec §3.1's evidence requirement).
     fn validate_post(
@@ -2689,21 +2674,22 @@ impl<S: Sessions> Player<S> {
             .ok_or_else(|| format!("post: task/{slug}: {task_toml_path} missing"))?;
         let cfg = config::task_config_from_str(&text)
             .map_err(|e| format!("post: task/{slug}: {task_toml_path}: {e}"))?;
-        let suite = config::suite_at(&self.hub, candidate)
-            .map_err(|e| format!("post: task/{slug}: {e}"))?;
-        let fragment_path = config::suite_fragment_path(slug);
-        let fragment = self.hub.blob_hash(candidate, &fragment_path).is_some();
+        let suite = self.suite_at(candidate).map_err(|e| format!("post: task/{slug}: {e}"))?;
+        let tests_path = config::tests_file(slug);
+        let own = suite.from_file(&tests_path);
+        let has_file = self.hub.blob_hash(candidate, &tests_path).is_some();
         if cfg.kind == TaskKind::TestSpeedup {
             // No task check: its evidence is the named checks' times on main
             // (`evidence_miss`), and it adds nothing to the suite.
-            if fragment {
+            if has_file {
                 return Err(format!(
-                    "post: task/{slug}: a test-speedup adds no check to the suite ({fragment_path})"
+                    "post: task/{slug}: a test-speedup adds no check to the suite ({tests_path})"
                 ));
             }
             if suite.list_cmd.is_none() {
                 return Err(format!(
-                    "post: task/{slug}: a test-speedup needs `list_cmd` in tests.toml (the player lists the tests it removes with it)"
+                    "post: task/{slug}: a test-speedup needs `list_cmd` in the `suite where` block of {} (the player lists the tests it removes with it)",
+                    config::TESTS_LEAN
                 ));
             }
             return Ok(());
@@ -2714,26 +2700,22 @@ impl<S: Sessions> Player<S> {
         if cfg.kind == TaskKind::FlakyTestFix {
             // The stress check is a one-off proof for this task, an exception
             // to spec §6.3: it must not slow every future suite.
-            if fragment || suite.check.iter().any(|c| c.name == check.name) {
+            if has_file || suite.check(&check.name).is_some() {
                 return Err(format!(
-                    "post: task/{slug}: a flaky-test-fix's check {:?} must not be added to the suite (tests.toml or {fragment_path})",
-                    check.name
+                    "post: task/{slug}: a flaky-test-fix's check {:?} must not be added to the suite ({} or {tests_path})",
+                    check.name,
+                    config::TESTS_LEAN
                 ));
             }
             if suite.list_cmd.is_none() {
                 return Err(format!(
-                    "post: task/{slug}: a flaky-test-fix needs `list_cmd` in tests.toml (the player compares test inventories with it)"
+                    "post: task/{slug}: a flaky-test-fix needs `list_cmd` in the `suite where` block of {} (the player compares test inventories with it)",
+                    config::TESTS_LEAN
                 ));
             }
         } else {
-            // Read the fragment on its own: the check must live there, not in
-            // tests.toml, so parallel posts never edit the same file.
-            let own = self
-                .hub
-                .show_file(candidate, &fragment_path)
-                .and_then(|t| config::suite_from_parts("", &[(fragment_path.clone(), t)]).ok())
-                .map(|c| c.check)
-                .unwrap_or_default();
+            // The check must live in the task's own file, not Tests.lean, so
+            // parallel posts never edit the same file.
             if !own.iter().any(|c| {
                 c.name == check.name
                     && c.cmd == check.cmd
@@ -2741,7 +2723,7 @@ impl<S: Sessions> Player<S> {
                     && c.min_pass == check.min_pass
             }) {
                 return Err(format!(
-                    "post: task/{slug}: {fragment_path} has no [[check]] entry matching the task check {:?} (same name, cmd, runs, min_pass)",
+                    "post: task/{slug}: {tests_path} has no check matching the task check {:?} (same name, cmd, runs, min_pass)",
                     check.name
                 ));
             }
@@ -2768,8 +2750,8 @@ impl<S: Sessions> Player<S> {
 
     /// spec §9's send-back row: the cumulative diff must add exactly the
     /// next review file (`reviews/r<N+1>.md`, `N` = the current review
-    /// round); every other changed path must be a test path (spec §6.2),
-    /// `tests.toml` itself, or a suite fragment under `tests.d/`; a round beyond `max_review_rounds` escalates
+    /// round); every other changed path must be a test path (spec §6.2) or
+    /// a suite file (`Tests.lean`, `Tests/`); a round beyond `max_review_rounds` escalates
     /// instead of importing; and the project suite must now *fail* (spec
     /// §3.1's evidence requirement for a send-back). On success, re-pins and
     /// relays the review note to the worker's session (spec §8.3).
@@ -2813,16 +2795,10 @@ impl<S: Sessions> Player<S> {
             return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
 
-        let test_paths = self
-            .hub
-            .show_file(candidate, "tests.toml")
-            .and_then(|t| config::tests_config_from_str(&t).ok())
-            .map(|c| c.test_paths)
-            .unwrap_or_default();
+        let test_paths = self.test_paths_at(candidate);
         let task_prefix = format!("tasks/{slug}/");
         for (_, path) in diffs {
-            if path == "tests.toml"
-                || config::is_suite_fragment(path)
+            if config::is_tests_path(path)
                 || path.starts_with(&task_prefix)
                 || path_under_test_paths(path, &test_paths)
             {
@@ -2906,7 +2882,8 @@ impl<S: Sessions> Player<S> {
     /// A commit on a `tested` task that drops tests the task added from the
     /// suite: the director keeps only those that matter to the application.
     /// It may delete or edit test files the task added (absent on `main`)
-    /// and remove `[[check]]` entries from `tests.d/<slug>.toml`; the suite
+    /// and remove checks from `architecture/Tests/<slug>.lean` and
+    /// `<slug>.worker.lean` (with their `files`); the suite
     /// must still pass. The task stays `tested`, re-pinned at the trim, and
     /// its task agent is asked for no new review.
     fn try_trim(
@@ -2923,29 +2900,43 @@ impl<S: Sessions> Player<S> {
             .hub
             .rev_parse("refs/heads/main")
             .ok_or_else(|| "hub has no main".to_string())?;
-        let test_paths = self
-            .hub
-            .show_file(tip, "tests.toml")
-            .and_then(|t| config::tests_config_from_str(&t).ok())
-            .map(|c| c.test_paths)
-            .unwrap_or_default();
-        let fragment_path = config::suite_fragment_path(slug);
-        for (status, path) in diffs {
-            if *path == fragment_path {
-                continue;
+        let own = [config::tests_file(slug), config::worker_tests_file(slug)];
+        let (before, after) = match (self.suite_at(tip), self.suite_at(candidate)) {
+            (Ok(b), Ok(a)) => (b, a),
+            (_, Err(e)) | (Err(e), _) => {
+                let msg = format!("trim: task/{slug}: {e}");
+                return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
             }
-            let added_by_task = self.hub.blob_hash(&main_tip, path).is_none();
-            if *status != 'A' && added_by_task && path_under_test_paths(path, &test_paths) {
-                continue;
-            }
+        };
+        if let Some(extra) = trim_additions(&before, &after, &own) {
             let msg = format!(
-                "trim: task/{slug}: a trim only deletes or edits test files this task added and removes checks from {fragment_path}, not {path:?} (a send-back adds tasks/{slug}/reviews/r<N>.md)"
+                "trim: task/{slug}: {} and {} may only lose checks; {extra:?} is new or changed",
+                own[0], own[1]
             );
             return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
         }
-        if let Some(extra) = self.fragment_additions(tip, candidate, &fragment_path) {
+        // The files of the checks the trim removed are its to delete too.
+        let dropped: Vec<&str> = before
+            .checks
+            .iter()
+            .filter(|c| after.check(&c.name).is_none())
+            .map(|c| c.name.as_str())
+            .collect();
+        let dropped_files = before.files_of(&dropped);
+        for (status, path) in diffs {
+            if own.contains(path) {
+                continue;
+            }
+            let added_by_task = self.hub.blob_hash(&main_tip, path).is_none();
+            if *status != 'A'
+                && added_by_task
+                && (path_under_test_paths(path, &before.test_paths) || path_under_test_paths(path, &dropped_files))
+            {
+                continue;
+            }
             let msg = format!(
-                "trim: task/{slug}: {fragment_path} may only lose [[check]] entries; {extra:?} is new or changed"
+                "trim: task/{slug}: a trim only deletes or edits test files this task added and removes checks from {}, not {path:?} (a send-back adds tasks/{slug}/reviews/r<N>.md)",
+                own[0]
             );
             return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
         }
@@ -2979,30 +2970,6 @@ impl<S: Sessions> Player<S> {
             records::set_agent_asked(&self.hub, slug, candidate)?;
         }
         Ok(())
-    }
-
-    /// The first `[[check]]` of `path` at `candidate` that `tip`'s copy
-    /// lacks verbatim (by name when it changed), or `None` when every entry
-    /// was already there: a trim only removes checks.
-    fn fragment_additions(&self, tip: &str, candidate: &str, path: &str) -> Option<String> {
-        let checks = |c: &str| -> Vec<toml::Value> {
-            self.hub
-                .show_file(c, path)
-                .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
-                .and_then(|mut t| t.remove("check"))
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default()
-        };
-        let before = checks(tip);
-        checks(candidate)
-            .into_iter()
-            .find(|c| !before.contains(c))
-            .map(|c| {
-                c.get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("?")
-                    .to_string()
-            })
     }
 
     // ---- contest (spec §18) ----
@@ -3095,16 +3062,10 @@ impl<S: Sessions> Player<S> {
             let msg = format!("ownership: task/{slug} is contested: the reply must add {expected}");
             return self.reject_by(actor, slug, candidate, Reason::Ownership, msg, report);
         }
-        let test_paths = self
-            .hub
-            .show_file(tip, "tests.toml")
-            .and_then(|t| config::tests_config_from_str(&t).ok())
-            .map(|c| c.test_paths)
-            .unwrap_or_default();
+        let test_paths = self.test_paths_at(tip);
         let task_prefix = format!("tasks/{slug}/");
         if let Some((_, path)) = diffs.iter().find(|(_, p)| {
-            !(p == "tests.toml"
-                || config::is_suite_fragment(p)
+            !(config::is_tests_path(p)
                 || p.starts_with(&task_prefix)
                 || path_under_test_paths(p, &test_paths))
         }) {
@@ -3497,7 +3458,7 @@ impl<S: Sessions> Player<S> {
     /// (`prompt.md`, `questions/1.toml`, optional `baseline/1.toml` and its
     /// scripts, anything else under `tasks/<slug>/` but `claims/` and
     /// `findings/`); the question is valid; and the director's baseline claims
-    /// pass on the current code. There is no task check and no `tests.toml`
+    /// pass on the current code. There is no task check and no suite
     /// entry: a spike never merges.
     fn validate_spike_post(
         &self,
@@ -4729,7 +4690,7 @@ impl<S: Sessions> Player<S> {
         let pins_violations = records::check_pins(&self.hub, slug, candidate);
         if !pins_violations.is_empty() {
             let msg = format!(
-                "pins: task/{slug}'s finish claim changed or removed pinned files (or added a tests.d/ suite fragment): {}",
+                "pins: task/{slug}'s finish claim changed or removed pinned files (or added a suite file under architecture/Tests/): {}",
                 pins_violations.join(", ")
             );
             return self.reject_and_relay(slug, candidate, Reason::Pins, msg, report);
@@ -4863,12 +4824,7 @@ impl<S: Sessions> Player<S> {
     ) -> Option<Vec<String>> {
         let cfg = records::task_config_at(&self.hub, hub_tip, slug)
             .filter(|c| c.kind == TaskKind::FlakyTestFix)?;
-        let test_paths = self
-            .hub
-            .show_file(hub_tip, "tests.toml")
-            .and_then(|t| config::tests_config_from_str(&t).ok())
-            .map(|c| c.test_paths)
-            .unwrap_or_default();
+        let test_paths = self.test_paths_at(hub_tip);
         let stray: Vec<String> = self
             .hub
             .diff_names(hub_tip, candidate)
@@ -4910,25 +4866,26 @@ impl<S: Sessions> Player<S> {
     }
 
     /// For a test-speedup: what `candidate` changes beyond its scope. The
-    /// paths must be the test tree, `tests.toml` or a suite fragment; the
-    /// suite definition may change only in its checks' `cmd` / `retry_*`
-    /// (`speedup::scope_problems`). Never `roadmap.toml`, so never `[budget]`.
-    fn test_speedup_scope(&self, hub_tip: &str, candidate: &str, _cfg: &TaskConfig) -> Vec<String> {
-        let (Ok(base), Ok(cand)) = (
-            config::suite_at(&self.hub, hub_tip),
-            config::suite_at(&self.hub, candidate),
-        ) else {
-            return vec!["tests.toml or a tests.d/ fragment doesn't load".to_string()];
+    /// paths must be the test tree, the suite files (`Tests.lean`, `Tests/`)
+    /// or the named checks' `files`; the suite definition may change only
+    /// in its checks' `cmd` / `retry_*` (`speedup::scope_problems`). Never
+    /// `roadmap.toml`, so never `[budget]`.
+    fn test_speedup_scope(&self, hub_tip: &str, candidate: &str, cfg: &TaskConfig) -> Vec<String> {
+        let (base, cand) = match (self.suite_at(hub_tip), self.suite_at(candidate)) {
+            (Ok(b), Ok(c)) => (b, c),
+            (_, Err(e)) | (Err(e), _) => return vec![format!("the suite doesn't load: {e}")],
         };
+        let named: Vec<&str> = cfg.slow.iter().map(|s| s.check.as_str()).collect();
+        let files = base.files_of(&named);
         let mut problems: Vec<String> = self
             .hub
             .diff_names(hub_tip, candidate)
             .into_iter()
             .map(|(_, path)| path)
             .filter(|path| {
-                !(path == "tests.toml"
-                    || config::is_suite_fragment(path)
-                    || path_under_test_paths(path, &base.test_paths))
+                !(config::is_tests_path(path)
+                    || path_under_test_paths(path, &base.test_paths)
+                    || path_under_test_paths(path, &files))
             })
             .collect();
         problems.extend(speedup::scope_problems(&base, &cand));
@@ -4944,7 +4901,7 @@ impl<S: Sessions> Player<S> {
         hub_tip: &str,
         candidate: &str,
     ) -> Result<String, String> {
-        let cand = config::suite_at(&self.hub, candidate)?;
+        let cand = self.suite_at(candidate)?;
         let base_commit = self
             .hub
             .rev_parse(&format!("refs/dashboard/pins/{slug}"))
@@ -4952,10 +4909,10 @@ impl<S: Sessions> Player<S> {
         let list_cmd = cand
             .list_cmd
             .clone()
-            .ok_or("tests.toml has no list_cmd")?;
+            .ok_or("the suite has no list_cmd")?;
         let before = self.runner.run_list(&base_commit, &list_cmd)?;
         let after = self.runner.run_list(candidate, &list_cmd)?;
-        let base = config::suite_at(&self.hub, hub_tip)?;
+        let base = self.suite_at(hub_tip)?;
         Ok(speedup::removal_text(
             &flaky::removed(&before, &after),
             &speedup::changed_checks(&base, &cand),
@@ -4992,12 +4949,7 @@ impl<S: Sessions> Player<S> {
             ));
         }
 
-        let list_cmd = self
-            .hub
-            .show_file(candidate, "tests.toml")
-            .and_then(|t| config::tests_config_from_str(&t).ok())
-            .and_then(|c| c.list_cmd)
-            .ok_or("tests.toml has no list_cmd")?;
+        let list_cmd = self.suite_at(candidate)?.list_cmd.ok_or("the suite has no list_cmd")?;
         let base = self
             .hub
             .rev_parse(&format!("refs/dashboard/pins/{slug}"))
@@ -5348,7 +5300,8 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
-    /// Where a task agent may write: `tests.toml`, `tests.d/`, the hub's
+    /// Where a task agent may write: the suite files (`Tests.lean`,
+    /// `Tests/`), API files, the hub's
     /// `test_paths` (read at `tip`, so a commit can't widen them for itself)
     /// and `tasks/<slug>/`; and in `task.toml` only `[check]`, the rest
     /// being the director's plan. Also the roadmap's `[player] lock_files`,
@@ -5360,12 +5313,7 @@ impl<S: Sessions> Player<S> {
         candidate: &str,
         diffs: &[(char, String)],
     ) -> Result<(), String> {
-        let test_paths = self
-            .hub
-            .show_file(tip, "tests.toml")
-            .and_then(|t| config::tests_config_from_str(&t).ok())
-            .map(|c| c.test_paths)
-            .unwrap_or_default();
+        let test_paths = self.test_paths_at(tip);
         let lock_files = self
             .roadmap_at(tip)
             .map(|r| r.player.lock_files)
@@ -5378,10 +5326,9 @@ impl<S: Sessions> Player<S> {
             .unwrap_or_default();
         let task_prefix = format!("tasks/{slug}/");
         for (_, path) in diffs {
-            if !(path == "tests.toml"
+            if !(config::is_tests_path(path)
                 || path_under_test_paths(path, &api_paths)
                 || config::is_arch_api_file(path)
-                || config::is_suite_fragment(path)
                 || path.starts_with(&task_prefix)
                 || lock_files.contains(path)
                 || path_under_test_paths(path, &test_paths))

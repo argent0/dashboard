@@ -42,10 +42,10 @@ fn suite_repo(budget: &str, slow: &str, other: &str) -> DirectorRepo {
     );
     write_file(
         repo.path(),
-        "tests.toml",
-        &format!(
+        TESTS_LEAN,
+        &*suite_lean(&format!(
             "test_paths = [\"tests/\"]\nlist_cmd = \"cat tests/inventory.txt\"\n\n[[check]]\nname = \"slow\"\ncmd = {slow:?}\n\n[[check]]\nname = \"other\"\ncmd = {other:?}\n"
-        ),
+        )),
     );
     write_file(repo.path(), "tests/inventory.txt", "one\ntwo\nthree\n");
     commit(repo.path(), "budget suite");
@@ -108,7 +108,7 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task
 
 /// Posts `slug` (already planned and `ready`) with a task check
 /// `test -f feature.txt` (fails until the "worker" creates that file) and
-/// the matching `tests.toml` entry. Ticks (which also launches the worker,
+/// the matching check in `architecture/Tests/<slug>.lean`. Ticks (which also launches the worker,
 /// per step 6) and returns the report so callers can inspect `launched`/
 /// `errors` too.
 fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> player::TickReport {
@@ -127,8 +127,8 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
     );
     write_file(
         repo.path(),
-        &format!("tests.d/{slug}.toml"),
-        &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*tests_file(&slug),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
@@ -350,7 +350,7 @@ fn a_speedup_post_imports_while_main_is_over_and_unproven_evidence_retires_it() 
     assert_eq!(task_status(&hub, "speed"), Status::Posted);
     let pinned = records::pinned_files(&hub, "speed").unwrap();
     assert!(
-        !pinned.contains_key("tests.toml") && !pinned.contains_key("tests/inventory.txt"),
+        !pinned.contains_key(TESTS_LEAN) && !pinned.contains_key("tests/inventory.txt"),
         "the test side is unpinned: {pinned:?}"
     );
     let clone = paths::worker_clone(&repo.director_path(), "speed");
@@ -398,7 +398,7 @@ fn a_speedup_touching_non_test_code_is_struck() {
     let mut ctx = speedup_started("check_timeout = 1", "sleep 3", "true");
     worker_edit(
         &ctx,
-        &[("src/lib.rs", "// faster\n"), ("tests.toml", &tests_toml("true", "true", ""))],
+        &[("src/lib.rs", "// faster\n"), (TESTS_LEAN, &*suite_lean(&tests_toml("true", "true", "")))],
     );
     assert_struck_for_scope(&mut ctx, "code");
 }
@@ -406,15 +406,15 @@ fn a_speedup_touching_non_test_code_is_struck() {
 #[test]
 fn a_speedup_changing_runs_or_adding_a_check_is_struck() {
     let mut ctx = speedup_started("check_timeout = 1", "sleep 3", "true");
-    worker_edit(&ctx, &[("tests.toml", &tests_toml("true", "true", "runs = 3\nmin_pass = 1\n"))]);
+    worker_edit(&ctx, &[(TESTS_LEAN, &*suite_lean(&tests_toml("true", "true", "runs = 3\nmin_pass = 1\n")))]);
     assert_struck_for_scope(&mut ctx, "runs");
 
     let mut ctx = speedup_started("check_timeout = 1", "sleep 3", "true");
     worker_edit(
         &ctx,
         &[(
-            "tests.toml",
-            &tests_toml("true", "true", "\n[[check]]\nname = \"extra\"\ncmd = \"true\"\n"),
+            TESTS_LEAN,
+            &*suite_lean(&tests_toml("true", "true", "\n[[check]]\nname = \"extra\"\ncmd = \"true\"\n")),
         )],
     );
     assert_struck_for_scope(&mut ctx, "added check");
@@ -431,7 +431,7 @@ fn a_speedup_touching_the_roadmap_budget_is_struck() {
         &ctx,
         &[
             ("roadmap.toml", &roadmap.replace("check_timeout = 1", "check_timeout = 600")),
-            ("tests.toml", &tests_toml("true", "true", "")),
+            (TESTS_LEAN, &*suite_lean(&tests_toml("true", "true", ""))),
         ],
     );
     assert_struck_for_scope(&mut ctx, "roadmap");
@@ -443,7 +443,7 @@ fn a_faster_check_finishes_with_the_removals_reported_and_accept_lands_it() {
     worker_edit(
         &ctx,
         &[
-            ("tests.toml", &tests_toml("true", "true", "")),
+            (TESTS_LEAN, &*suite_lean(&tests_toml("true", "true", ""))),
             ("tests/inventory.txt", "one\nthree\n"),
         ],
     );
@@ -477,7 +477,7 @@ fn the_whole_flow_main_over_budget_to_held_work_released() {
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(report.held.len(), 1, "{report}");
 
-    worker_edit(&ctx, &[("tests.toml", &tests_toml("true", "true", ""))]);
+    worker_edit(&ctx, &[(TESTS_LEAN, &*suite_lean(&tests_toml("true", "true", "")))]);
     let report = ctx.player.tick().unwrap();
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(task_status(&ctx.hub, "speed"), Status::Tested);
@@ -510,7 +510,7 @@ fn over_total() -> Ctx {
 #[test]
 fn a_faster_check_that_is_still_over_budget_passes_the_ratchet() {
     let mut ctx = over_total();
-    worker_edit(&ctx, &[("tests.toml", &tests_toml("sleep 3", "sleep 2", ""))]);
+    worker_edit(&ctx, &[(TESTS_LEAN, &*suite_lean(&tests_toml("sleep 3", "sleep 2", "")))]);
     let report = ctx.player.tick().unwrap();
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(task_status(&ctx.hub, "speed"), Status::Tested);
@@ -519,7 +519,7 @@ fn a_faster_check_that_is_still_over_budget_passes_the_ratchet() {
 #[test]
 fn a_check_that_is_not_faster_fails_the_ratchet() {
     let mut ctx = over_total();
-    worker_edit(&ctx, &[("tests.toml", &tests_toml("sleep 5", "sleep 2", ""))]);
+    worker_edit(&ctx, &[(TESTS_LEAN, &*suite_lean(&tests_toml("sleep 5", "sleep 2", "")))]);
     let report = ctx.player.tick().unwrap();
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Budget);
@@ -529,7 +529,7 @@ fn a_check_that_is_not_faster_fails_the_ratchet() {
 #[test]
 fn another_check_getting_slower_fails_the_ratchet() {
     let mut ctx = over_total();
-    worker_edit(&ctx, &[("tests.toml", &tests_toml("sleep 3", "sleep 4", ""))]);
+    worker_edit(&ctx, &[(TESTS_LEAN, &*suite_lean(&tests_toml("sleep 3", "sleep 4", "")))]);
     let report = ctx.player.tick().unwrap();
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Budget);

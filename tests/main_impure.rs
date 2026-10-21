@@ -26,10 +26,10 @@ fn impure_repo() -> DirectorRepo {
     let repo = director_repo();
     write_file(
         repo.path(),
-        "tests.toml",
-        &format!(
+        TESTS_LEAN,
+        &*suite_lean(&format!(
             "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"env\"\ncmd = {IMPURE:?}\n"
-        ),
+        )),
     );
     commit(repo.path(), "an impure check");
     repo
@@ -78,8 +78,8 @@ fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
     );
     write_file(
         repo.path(),
-        "tests.d/a.toml",
-        "[[check]]\nname = \"a-check\"\ncmd = \"test -f feature.txt\"\n",
+        &*tests_file("a"),
+        &*task_suite_lean("[[check]]\nname = \"a-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
     commit(repo.path(), "post: a");
     let report = player.tick().unwrap();

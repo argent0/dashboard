@@ -95,6 +95,36 @@ pub fn vendored() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The rest of a starter package (`dashboard arch gen` on a root without
+/// `architecture/`), relative to the root: a manifest with no modules and a
+/// suite whose one check runs `dashboard arch check` on the whole tree.
+pub fn starter() -> Vec<(String, String)> {
+    vec![
+        (
+            config::ARCH_LEAN_MANIFEST.to_string(),
+            "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 0\n".to_string(),
+        ),
+        (
+            config::TESTS_LEAN.to_string(),
+            "import Architecture\nopen Dashboard\n\nsuite where\n  test_paths = []\n\n\
+             check arch where\n  cmd = \"dashboard arch check --root .\"\n  covers = all\n"
+                .to_string(),
+        ),
+    ]
+}
+
+/// Writes the vendored files and the starter package under `root`; returns
+/// what it wrote.
+pub fn write_starter(root: &Path) -> Result<Vec<String>, String> {
+    let mut wrote = write_vendored(root)?;
+    for (rel, text) in starter() {
+        let path = root.join(&rel);
+        std::fs::write(&path, text).map_err(|e| format!("{rel}: {e}"))?;
+        wrote.push(rel);
+    }
+    Ok(wrote)
+}
+
 /// Whether `root` has a Lean architecture (`architecture/Architecture.lean`).
 pub fn present(root: &Path) -> bool {
     root.join(config::ARCH_LEAN_MANIFEST).is_file()
@@ -448,6 +478,72 @@ fn parse_suite(json: &serde_json::Value, arch: &ArchConfig) -> Result<config::Su
         }
     }
     Ok(config::Suite { checks: out, test_paths: block.test_paths, list_cmd: block.list_cmd })
+}
+
+/// Exports `architecture/` trees of a hub in one package directory
+/// (`<home>/arch`), whose `.lake/` build cache survives between trees.
+#[derive(Debug, Clone)]
+pub struct Exporter {
+    dir: PathBuf,
+    sandbox: Sandbox,
+}
+
+impl Exporter {
+    pub fn new(dir: PathBuf, sandbox: Sandbox) -> Self {
+        Exporter { dir, sandbox }
+    }
+
+    pub fn set_sandbox(&mut self, sandbox: Sandbox) {
+        self.sandbox = sandbox;
+    }
+
+    /// Materializes `tree` (an `architecture/` tree id of `hub`) as
+    /// `<dir>/architecture`, keeping its `.lake/`, and returns the package.
+    fn checkout(&self, hub: &crate::git::Git, tree: &str) -> Result<PathBuf, String> {
+        let pkg = self.dir.join(DIR);
+        if pkg.exists() {
+            for e in std::fs::read_dir(&pkg).map_err(|e| e.to_string())?.flatten() {
+                if e.file_name() != ".lake" {
+                    let p = e.path();
+                    if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) }.map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        std::fs::create_dir_all(&pkg).map_err(|e| e.to_string())?;
+        // Plain git, no `tar`: blob by blob, bytes as stored.
+        let git = |args: &[&str]| -> Result<Vec<u8>, String> {
+            let out = Command::new("git").arg("-C").arg(&hub.dir).args(args).output().map_err(|e| e.to_string())?;
+            if out.status.success() {
+                Ok(out.stdout)
+            } else {
+                Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()))
+            }
+        };
+        let listing = git(&["ls-tree", "-r", "-z", tree])?;
+        for entry in listing.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+            let entry = String::from_utf8_lossy(entry);
+            let Some((meta, path)) = entry.split_once('\t') else { continue };
+            let mut parts = meta.split(' ');
+            let (_, kind, sha) = (parts.next(), parts.next(), parts.next().unwrap_or_default());
+            if kind != Some("blob") {
+                continue;
+            }
+            let dest = pkg.join(path);
+            std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+            std::fs::write(&dest, git(&["cat-file", "blob", sha])?).map_err(|e| format!("{}: {e}", dest.display()))?;
+        }
+        Ok(pkg)
+    }
+
+    /// The export of `tree`.
+    pub fn export_tree(&self, hub: &crate::git::Git, tree: &str) -> Result<Exported, String> {
+        export(&self.checkout(hub, tree)?, &self.sandbox)
+    }
+
+    /// The run set of `modules` in `tree`.
+    pub fn impacted_tree(&self, hub: &crate::git::Git, tree: &str, modules: &[String]) -> Result<Vec<String>, String> {
+        impacted(&self.checkout(hub, tree)?, &self.sandbox, modules)
+    }
 }
 
 /// `lake` is on this host (needed to load a Lean architecture at all).

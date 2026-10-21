@@ -161,9 +161,9 @@ fn changing_a_tracked_file_is_a_leak_but_ignored_build_output_is_not() {
     assert!(r.pass, "{r:?}");
     assert!(r.leaked.is_empty());
 
-    let r = runner.run_check(&commit, &check("edits", "echo >> tests.toml"));
+    let r = runner.run_check(&commit, &check("edits", "echo >> roadmap.toml"));
     assert!(!r.pass);
-    assert_eq!(r.leaked, vec!["M tests.toml".to_string()]);
+    assert_eq!(r.leaked, vec!["M roadmap.toml".to_string()]);
 }
 
 #[test]
@@ -216,8 +216,8 @@ fn an_impure_task_check_cannot_stand_in_for_a_failing_one_at_post() {
     );
     write_file(
         repo.path(),
-        "tests.d/a.toml",
-        &format!("[[check]]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
+        &*tests_file("a"),
+        &*task_suite_lean(&format!("[[check]]\nname = \"a-check\"\ncmd = {cmd:?}\n")),
     );
     commit(repo.path(), "post: a");
     let report = player.tick().unwrap();
@@ -372,8 +372,8 @@ fn a_task_check_failing_only_against_the_jail_cannot_be_posted() {
     );
     write_file(
         repo.path(),
-        "tests.d/a.toml",
-        &format!("[[check]]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
+        &*tests_file("a"),
+        &*task_suite_lean(&format!("[[check]]\nname = \"a-check\"\ncmd = {cmd:?}\n")),
     );
     let post = commit(repo.path(), "post: a");
     let report = player.tick().unwrap();
@@ -438,8 +438,8 @@ fn a_held_launch_is_reported_once_per_tip() {
     );
     write_file(
         repo.path(),
-        "tests.d/a.toml",
-        &format!("[[check]]\nname = \"a-check\"\ncmd = {cmd:?}\n"),
+        &*tests_file("a"),
+        &*task_suite_lean(&format!("[[check]]\nname = \"a-check\"\ncmd = {cmd:?}\n")),
     );
     let post = commit(repo.path(), "post: a");
     repo.git().run(&["push", "-q", "hub", "task/a"]).unwrap();

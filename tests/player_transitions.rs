@@ -77,7 +77,7 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task
 
 /// Posts `slug` (already planned and `ready`) with a task check
 /// `test -f feature.txt` (fails until a "worker" creates that file) and
-/// the matching `tests.toml` entry. Ticks and asserts the post was
+/// the matching check in `architecture/Tests/<slug>.lean`. Ticks and asserts the post was
 /// imported.
 fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
     checkout_branch(repo.path(), &format!("task/{slug}"));
@@ -95,8 +95,8 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
     );
     write_file(
         repo.path(),
-        &format!("tests.d/{slug}.toml"),
-        &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*tests_file(&slug),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
@@ -214,8 +214,8 @@ fn post_rejected_when_the_task_check_already_passes() {
     );
     write_file(
         repo.path(),
-        "tests.d/eager.toml",
-        "[[check]]\nname = \"eager-check\"\ncmd = \"test -f feature.txt\"\n",
+        &*tests_file("eager"),
+        &*task_suite_lean("[[check]]\nname = \"eager-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
     // The director's mistake: the file already exists, so the check already
     // passes at post — it must fail (spec §3.1).
@@ -258,8 +258,8 @@ fn post_rejected_when_dependencies_are_not_accepted() {
     );
     write_file(
         repo.path(),
-        "tests.d/b.toml",
-        "[[check]]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n",
+        &*tests_file("b"),
+        &*task_suite_lean("[[check]]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
     commit(repo.path(), "post: b (a not accepted yet)");
 
@@ -301,8 +301,8 @@ fn post_rejected_when_the_suite_fragment_is_missing() {
         "tasks/notests/task.toml",
         "title = \"No tests entry\"\nphase = \"p1\"\n\n[check]\nname = \"notests-check\"\ncmd = \"test -f feature.txt\"\n",
     );
-    // tests.d/notests.toml deliberately not added.
-    commit(repo.path(), "post: notests (forgot tests.d/notests.toml)");
+    // architecture/Tests/notests.lean deliberately not added.
+    commit(repo.path(), "post: notests (forgot its Tests file)");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
@@ -310,7 +310,7 @@ fn post_rejected_when_the_suite_fragment_is_missing() {
     assert!(
         report.rejected[0]
             .message
-            .contains("tests.d/notests.toml has no [[check]]"),
+            .contains("architecture/Tests/notests.lean has no check"),
         "{}",
         report.rejected[0].message
     );
@@ -318,7 +318,7 @@ fn post_rejected_when_the_suite_fragment_is_missing() {
 }
 
 #[test]
-fn post_rejected_when_the_task_check_goes_in_tests_toml() {
+fn post_rejected_when_the_task_check_goes_in_tests_lean() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
@@ -341,16 +341,16 @@ fn post_rejected_when_the_task_check_goes_in_tests_toml() {
     // The old shape: appended to the file every parallel post would edit.
     write_file(
         repo.path(),
-        "tests.toml",
-        "[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"shared-check\"\ncmd = \"test -f feature.txt\"\n",
+        TESTS_LEAN,
+        &*suite_lean("[[check]]\nname = \"unit\"\ncmd = \"true\"\n\n[[check]]\nname = \"shared-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
-    commit(repo.path(), "post: shared (check in tests.toml)");
+    commit(repo.path(), "post: shared (check in Tests.lean)");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Post);
     assert!(
-        report.rejected[0].message.contains("tests.d/shared.toml"),
+        report.rejected[0].message.contains("architecture/Tests/shared.lean"),
         "{}",
         report.rejected[0].message
     );
@@ -379,16 +379,16 @@ fn post_rejected_when_a_check_name_is_declared_twice() {
     );
     write_file(
         repo.path(),
-        "tests.d/dup.toml",
-        "[[check]]\nname = \"unit\"\ncmd = \"test -f feature.txt\"\n",
+        &*tests_file("dup"),
+        &*task_suite_lean("[[check]]\nname = \"unit\"\ncmd = \"test -f feature.txt\"\n"),
     );
-    commit(repo.path(), "post: dup (reuses tests.toml's check name)");
+    commit(repo.path(), "post: dup (reuses Tests.lean's check name)");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Post);
     assert!(
-        report.rejected[0].message.contains("more than once"),
+        report.rejected[0].message.contains("unit"),
         "{}",
         report.rejected[0].message
     );
@@ -428,8 +428,8 @@ fn post_rejected_when_a_dependency_is_accepted_but_not_yet_merged_into_the_branc
     );
     write_file(
         repo.path(),
-        "tests.d/b.toml",
-        "[[check]]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n",
+        &*tests_file("b"),
+        &*task_suite_lean("[[check]]\nname = \"b-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
     commit(repo.path(), "post: b (branch never merged a's acceptance)");
 
@@ -461,8 +461,8 @@ fn send_back_happy_path() {
     // send-back (spec §3.1).
     write_file(
         repo.path(),
-        "tests.d/x.toml",
-        "[[check]]\nname = \"x-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n",
+        &*tests_file("x"),
+        &*task_suite_lean("[[check]]\nname = \"x-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
     );
     write_file(
         repo.path(),
@@ -535,8 +535,8 @@ fn send_back_rejected_with_the_wrong_round_number() {
     // Round should be r1 (review_round is 0), not r2.
     write_file(
         repo.path(),
-        "tests.d/z.toml",
-        "[[check]]\nname = \"z-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n",
+        &*tests_file("z"),
+        &*task_suite_lean("[[check]]\nname = \"z-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
     );
     write_file(repo.path(), "tasks/z/reviews/r2.md", "skipping ahead\n");
     commit(repo.path(), "send-back: z r2 (wrong round)");
@@ -564,8 +564,8 @@ fn send_back_rejected_when_touching_a_non_test_path() {
 
     write_file(
         repo.path(),
-        "tests.d/w.toml",
-        "[[check]]\nname = \"w-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n",
+        &*tests_file("w"),
+        &*task_suite_lean("[[check]]\nname = \"w-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
     );
     write_file(
         repo.path(),
@@ -607,8 +607,8 @@ fn send_back_exceeding_max_review_rounds_escalates_instead_of_importing() {
     director_pull_task_branch(repo.path(), "v");
     write_file(
         repo.path(),
-        "tests.d/v.toml",
-        "[[check]]\nname = \"v-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n",
+        &*tests_file("v"),
+        &*task_suite_lean("[[check]]\nname = \"v-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
     );
     write_file(
         repo.path(),
@@ -670,7 +670,7 @@ fn trim_drops_the_task_check_from_the_suite_and_accept_lands_without_it() {
 
     post_and_finish(&repo, &hub, &home, &mut player, "tr");
     director_pull_task_branch(repo.path(), "tr");
-    std::fs::remove_file(repo.path().join("tests.d/tr.toml")).unwrap();
+    std::fs::remove_file(repo.path().join(tests_file("tr"))).unwrap();
     commit(repo.path(), "trim: tr's check only drove this task");
 
     let report = player.tick().expect("tick should succeed");
@@ -688,7 +688,7 @@ fn trim_drops_the_task_check_from_the_suite_and_accept_lands_without_it() {
     let report = player.tick().expect("tick should succeed");
     assert_eq!(task_status(&hub, "tr"), Status::Accepted, "{report}");
     let main_tip = hub.rev_parse("refs/heads/main").unwrap();
-    assert!(hub.blob_hash(&main_tip, "tests.d/tr.toml").is_none());
+    assert!(hub.blob_hash(&main_tip, &tests_file("tr")).is_none());
     assert!(hub.blob_hash(&main_tip, "tasks/tr/task.toml").is_some());
 }
 
@@ -701,14 +701,14 @@ fn trim_rejected_when_touching_a_file_already_on_main() {
 
     post_and_finish(&repo, &hub, &home, &mut player, "tm");
     director_pull_task_branch(repo.path(), "tm");
-    write_file(repo.path(), "tests.toml", "[[check]]\nname = \"unit\"\ncmd = \"true\"\nruns = 2\n");
+    write_file(repo.path(), TESTS_LEAN, &*suite_lean("[[check]]\nname = \"unit\"\ncmd = \"true\"\nruns = 2\n"));
     commit(repo.path(), "trim: edits the project suite");
 
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Accept);
     assert!(
-        report.rejected[0].message.contains("tests.toml"),
+        report.rejected[0].message.contains("Tests.lean"),
         "{}",
         report.rejected[0].message
     );
@@ -726,8 +726,8 @@ fn trim_rejected_when_the_fragment_gains_a_check() {
     director_pull_task_branch(repo.path(), "tg");
     write_file(
         repo.path(),
-        "tests.d/tg.toml",
-        "[[check]]\nname = \"tg-check\"\ncmd = \"true\"\n",
+        &*tests_file("tg"),
+        &*task_suite_lean("[[check]]\nname = \"tg-check\"\ncmd = \"true\"\n"),
     );
     commit(repo.path(), "trim: weakens the check instead");
 
@@ -1055,8 +1055,8 @@ fn empty_marker_on_top_of_a_rejected_non_empty_commit_is_ownership() {
     );
     write_file(
         repo.path(),
-        "tests.d/stack.toml",
-        "[[check]]\nname = \"stack-check\"\ncmd = \"true\"\n",
+        &*tests_file("stack"),
+        &*task_suite_lean("[[check]]\nname = \"stack-check\"\ncmd = \"true\"\n"),
     );
     // The task check trivially always passes — this post will be rejected.
     commit(repo.path(), "post: stack (bad, check already passes)");
@@ -1099,8 +1099,8 @@ fn two_post_rejections_escalate_the_task() {
     );
     write_file(
         repo.path(),
-        "tests.d/strikeout.toml",
-        "[[check]]\nname = \"strikeout-check\"\ncmd = \"true\"\n",
+        &*tests_file("strikeout"),
+        &*task_suite_lean("[[check]]\nname = \"strikeout-check\"\ncmd = \"true\"\n"),
     );
     commit(repo.path(), "post: strikeout attempt 1 (always passes)");
     let report = player.tick().expect("tick should succeed");

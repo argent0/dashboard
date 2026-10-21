@@ -311,6 +311,14 @@ FAKE_TASK_AGENT_EOF
 # Setup: throwaway director repo + hub
 # --------------------------------------------------------------------------
 
+# A Lean suite file at $1 holding one check named $2 running $3, covering
+# the whole project.
+task_tests() {
+  mkdir -p "$(dirname "$1")"
+  esc=$(printf '%s' "$3" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  printf 'import Architecture\nopen Dashboard\n\ncheck «%s» where\n  cmd = "%s"\n  covers = all\n' "$2" "$esc" >"$1"
+}
+
 mkdir -p "$AGENT_LOGS"
 write_fake_agent
 write_fake_task_agent
@@ -334,11 +342,10 @@ runs = "parallel"
 task_agent_cmd = ""
 EOF
 
-cat >"$DIR_REPO/tests.toml" <<'EOF'
-[[check]]
-name = "baseline"
-cmd = "true"
-EOF
+# The Lean package every project has: the starter of `dashboard arch gen`,
+# with a suite of one check.
+"$BIN" arch gen --root "$DIR_REPO" >/dev/null
+task_tests "$DIR_REPO/architecture/Tests.lean" baseline true
 
 # Step 7c's suite check builds this cache in the checkout: ignored build
 # output, which the jail's clean-worktree check allows.
@@ -369,7 +376,7 @@ git -C "$DIR_REPO" commit -q -m "plan: alpha"
 wait_until "task/alpha planned (ready)" task_status_is alpha ready
 
 # --------------------------------------------------------------------------
-# 2. Post alpha: prompt.md, agent.sh, the check in tests.d/alpha.toml.
+# 2. Post alpha: prompt.md, agent.sh, the check in architecture/Tests/alpha.lean.
 #    Tick -> launched in tmux. Tick until tested.
 # --------------------------------------------------------------------------
 
@@ -389,12 +396,7 @@ cat >"$DIR_REPO/tasks/alpha/agent.sh" <<'EOF'
 #!/bin/sh
 echo ok > feature.txt
 EOF
-mkdir -p "$DIR_REPO/tests.d"
-cat >"$DIR_REPO/tests.d/alpha.toml" <<'EOF'
-[[check]]
-name = "alpha-check"
-cmd = "test -f feature.txt"
-EOF
+task_tests "$DIR_REPO/architecture/Tests/alpha.lean" alpha-check "test -f feature.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "post: alpha"
 
@@ -402,7 +404,7 @@ wait_until "task/alpha's tmux session exists" session_alive alpha
 wait_until "task/alpha tested" task_status_is alpha tested
 alpha_prompt=$(cat "$AGENT_LOGS/alpha.prompts")
 assert_contains "$alpha_prompt" "You are the worker for task \`alpha\` in project \`$PROJECT\`" "alpha's launch prompt"
-assert_contains "$alpha_prompt" "tests.d/alpha.toml" "alpha's launch prompt (its pinned files)"
+assert_contains "$alpha_prompt" "architecture/Tests/alpha.lean" "alpha's launch prompt (its pinned files)"
 assert_contains "$alpha_prompt" "Implement the feature: create feature.txt." "alpha's launch prompt (prompt.md)"
 
 # --------------------------------------------------------------------------
@@ -415,7 +417,7 @@ assert_contains "$wait_out" "tested" "dashboard wait output"
 assert_contains "$wait_out" "alpha" "dashboard wait output"
 
 # --------------------------------------------------------------------------
-# 4. Send back r1: reviews/r1.md, a tighter check in tests.d/alpha.toml, agent-r1.sh.
+# 4. Send back r1: reviews/r1.md, a tighter check in Tests/alpha.lean, agent-r1.sh.
 #    Tick -> in_revision. The fake agent pulls the review, runs agent-r1.sh,
 #    and commits. Tick until tested again.
 # --------------------------------------------------------------------------
@@ -433,11 +435,7 @@ cat >"$DIR_REPO/tasks/alpha/agent-r1.sh" <<'EOF'
 #!/bin/sh
 echo ok2 > feature2.txt
 EOF
-cat >"$DIR_REPO/tests.d/alpha.toml" <<'EOF'
-[[check]]
-name = "alpha-check"
-cmd = "test -f feature.txt && test -f feature2.txt"
-EOF
+task_tests "$DIR_REPO/architecture/Tests/alpha.lean" alpha-check "test -f feature.txt && test -f feature2.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "send-back: alpha r1"
 
@@ -508,11 +506,7 @@ cat >"$DIR_REPO/tasks/beta/agent.sh" <<'EOF'
 #!/bin/sh
 git commit --allow-empty -m "block: stale test" -m "featureb.txt can't be produced as specified; the check needs a design change."
 EOF
-cat >"$DIR_REPO/tests.d/beta.toml" <<'EOF'
-[[check]]
-name = "beta-check"
-cmd = "test -f featureb.txt"
-EOF
+task_tests "$DIR_REPO/architecture/Tests/beta.lean" beta-check "test -f featureb.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "post: beta"
 
@@ -627,7 +621,7 @@ wait_until "probe's tmux session is gone" session_gone probe
 
 # --------------------------------------------------------------------------
 # 7c. Parallel tasks (spec §4): gamma and delta posted side by side, both
-#     workers live at once. Each post adds its own tests.d/<slug>.toml, so
+#     workers live at once. Each post adds its own Tests/<slug>.lean, so
 #     the suite never conflicts; but both agents write shared.txt
 #     differently, so once gamma is accepted, the player can't merge main
 #     into delta to land its accept:
@@ -655,7 +649,7 @@ for t in gamma delta; do
   echo "Create $t.txt." >"$DIR_REPO/tasks/$t/prompt.md"
   printf 'title = "%s"\nphase = "p1"\n\n[check]\nname = "%s-check"\ncmd = "test -f %s.txt"\n' "$t" "$t" "$t" >"$DIR_REPO/tasks/$t/task.toml"
   printf '#!/bin/sh\necho ok > %s.txt\necho %s > shared.txt\n' "$t" "$t" >"$DIR_REPO/tasks/$t/agent.sh"
-  printf '[[check]]\nname = "%s-check"\ncmd = "test -f %s.txt"\n' "$t" "$t" >"$DIR_REPO/tests.d/$t.toml"
+  task_tests "$DIR_REPO/architecture/Tests/$t.lean" "$t-check" "test -f $t.txt"
   git -C "$DIR_REPO" add -A
   git -C "$DIR_REPO" commit -q -m "post: $t"
 done
@@ -692,7 +686,7 @@ git -C "$DIR_REPO" commit -q --no-edit
 wait_until "task/delta accepted" task_status_is delta accepted
 assert_contains "$(hub_main_body)" "Task: delta" "hub main's merge commit"
 for t in gamma delta; do
-  git --git-dir "$HOME_DIR/hub.git" cat-file -e "refs/heads/main:tests.d/$t.toml" || { echo "e2e: tests.d/$t.toml missing on main" >&2; exit 1; }
+  git --git-dir "$HOME_DIR/hub.git" cat-file -e "refs/heads/main:architecture/Tests/$t.lean" || { echo "e2e: Tests/$t.lean missing on main" >&2; exit 1; }
 done
 
 # --------------------------------------------------------------------------
@@ -717,7 +711,7 @@ wait_until "eta is ready" task_status_is eta ready
 echo "Create eta.txt." >"$DIR_REPO/tasks/eta/prompt.md"
 printf 'title = "eta"\nphase = "p1"\n\n[check]\nname = "eta-check"\ncmd = "test -f eta.txt"\n' >"$DIR_REPO/tasks/eta/task.toml"
 printf '#!/bin/sh\necho ok > eta.txt\n' >"$DIR_REPO/tasks/eta/agent.sh"
-printf '[[check]]\nname = "eta-check"\ncmd = "test -f eta.txt"\n' >"$DIR_REPO/tests.d/eta.toml"
+task_tests "$DIR_REPO/architecture/Tests/eta.lean" eta-check "test -f eta.txt"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "post: eta"
 
@@ -770,10 +764,10 @@ git -C "$DIR_REPO" commit -q -am "roadmap: turn task agents on"
 hub_has_task_agents() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:roadmap.toml | grep -qF "$FAKE_TASK_AGENT"; }
 wait_until "roadmap with task agents on main" hub_has_task_agents
 
-mkdir -p "$TA_TEMPLATES/epsilon/tasks/epsilon" "$TA_TEMPLATES/epsilon/tests.d"
+mkdir -p "$TA_TEMPLATES/epsilon/tasks/epsilon"
 echo "Create epsilon.txt. Tests you add must be pure." >"$TA_TEMPLATES/epsilon/tasks/epsilon/prompt.md"
 printf '#!/bin/sh\necho ok > epsilon.txt\n' >"$TA_TEMPLATES/epsilon/tasks/epsilon/agent.sh"
-printf '[[check]]\nname = "epsilon-check"\ncmd = "test -f epsilon.txt"\n' >"$TA_TEMPLATES/epsilon/tests.d/epsilon.toml"
+task_tests "$TA_TEMPLATES/epsilon/architecture/Tests/epsilon.lean" epsilon-check "test -f epsilon.txt"
 
 git -C "$DIR_REPO" checkout -q -b task/epsilon main
 mkdir -p "$DIR_REPO/tasks/epsilon"
@@ -811,7 +805,7 @@ wait_until "epsilon's task agent session ended" session_gone epsilon_agent
 
 # --------------------------------------------------------------------------
 # 7f. Module views link build caches: the director commits an
-#     architecture.toml with `linked = ["cache"]`; zeta's post adds a suite
+#     Architecture.lean with `linked = ["cache"]`; zeta's post adds a suite
 #     check that builds cache/ and runs `dashboard arch check` (in the jail),
 #     whose module test_cmd only passes if its view links the cache and has
 #     DASHBOARD_MODULE set. Failing at post (no zeta/lib.rs), passing once the
@@ -822,28 +816,33 @@ log "step 7f: arch check views link a build cache (zeta)"
 git -C "$DIR_REPO" checkout -q main
 git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" merge -q --ff-only hub/main
-cat >"$DIR_REPO/architecture.toml" <<'EOF'
-max_modules = 1
-linked = ["cache"]
+# The module test only means something in `arch check`'s view: as the
+# suite's implicit `zeta` check (outside a view) it passes.
+cat >"$DIR_REPO/architecture/Architecture.lean" <<'EOF'
+import Dashboard
+open Dashboard
 
-[[module]]
-name = "zeta"
-lang = "rust"
-paths = ["zeta"]
-max_ast = 100000
-max_bytes = 100000
-test_cmd = 'test -L cache && test "$(cat cache/built)" = ok && test "$DASHBOARD_MODULE" = zeta && test -f zeta/lib.rs'
+architecture where
+  max_modules = 1
+  linked = ["cache"]
+
+module zeta where
+  lang = rust
+  paths = ["zeta"]
+  max_ast = 100000
+  max_bytes = 100000
+  test_cmd = "[ -z \"$DASHBOARD_MODULE\" ] || { test -L cache && test \"$(cat cache/built)\" = ok && test \"$DASHBOARD_MODULE\" = zeta && test -f zeta/lib.rs; }"
 EOF
-git -C "$DIR_REPO" add architecture.toml
+git -C "$DIR_REPO" add architecture
 git -C "$DIR_REPO" commit -q -m "architecture: one module, a linked cache"
-hub_has_arch() { git --git-dir "$HOME_DIR/hub.git" cat-file -e refs/heads/main:architecture.toml 2>/dev/null; }
-wait_until "architecture.toml on main" hub_has_arch
+hub_has_arch() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:architecture/Architecture.lean 2>/dev/null | grep -q zeta; }
+wait_until "Architecture.lean with zeta on main" hub_has_arch
 
 arch_cmd="mkdir -p cache && echo ok > cache/built && $BIN arch check --root ."
-mkdir -p "$TA_TEMPLATES/zeta/tasks/zeta" "$TA_TEMPLATES/zeta/tests.d"
+mkdir -p "$TA_TEMPLATES/zeta/tasks/zeta"
 echo "Create zeta/lib.rs and zeta.txt." >"$TA_TEMPLATES/zeta/tasks/zeta/prompt.md"
 printf '#!/bin/sh\nmkdir -p zeta\necho "pub fn z() {}" > zeta/lib.rs\necho ok > zeta.txt\n' >"$TA_TEMPLATES/zeta/tasks/zeta/agent.sh"
-printf '[[check]]\nname = "zeta-arch"\ncmd = "%s"\n' "$arch_cmd" >"$TA_TEMPLATES/zeta/tests.d/zeta.toml"
+task_tests "$TA_TEMPLATES/zeta/architecture/Tests/zeta.lean" zeta-arch "$arch_cmd"
 
 git -C "$DIR_REPO" checkout -q -b task/zeta main
 mkdir -p "$DIR_REPO/tasks/zeta"

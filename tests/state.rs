@@ -504,13 +504,11 @@ fn pins_are_recomputed_and_violations_detected() {
     let path = repo.path();
     let git = Git::new(path);
 
-    // Extend main's tests.toml with a test_paths entry over a real test tree.
-    // (test_paths must precede the [[check]] table header — once a TOML table
-    // header is open, keys after it belong to that table, not the root.)
+    // Extend main's Tests.lean with a test_paths entry over a real test tree.
     write_file(
         path,
-        "tests.toml",
-        "test_paths = [\"tests/\"]\n\n[[check]]\nname = \"unit\"\ncmd = \"true\"\n",
+        TESTS_LEAN,
+        &*suite_lean("test_paths = [\"tests/\"]\n\n[[check]]\nname = \"unit\"\ncmd = \"true\"\n"),
     );
     write_file(path, "tests/test_foo.py", "def test_foo(): assert True\n");
     commit(path, "add test_paths");
@@ -525,17 +523,20 @@ fn pins_are_recomputed_and_violations_detected() {
     write_file(path, "tasks/pinned-task/prompt.md", "do it\n");
     write_file(
         path,
-        "tests.d/pinned-task.toml",
-        "[[check]]\nname = \"pinned-task-check\"\ncmd = \"true\"\n",
+        &*tests_file("pinned-task"),
+        &*task_suite_lean("[[check]]\nname = \"pinned-task-check\"\ncmd = \"true\"\n"),
     );
     let pin_commit = commit(path, "post: pinned-task");
     push_ref(path, "refs/heads/task/pinned-task");
 
     records::set_pins(&hub, "pinned-task", &pin_commit).expect("set_pins should succeed");
+    // The player exports the package on import; pins read that note.
+    let runner = dashboard::checks::Runner::new(&home);
+    records::exported_at(&hub, &pin_commit, Some(runner.exporter())).expect("export");
     let pinned = records::pinned_files(&hub, "pinned-task").expect("pins were just set");
-    assert!(pinned.contains_key("tests.toml"));
+    assert!(pinned.contains_key(TESTS_LEAN));
     assert!(pinned.contains_key("tests/test_foo.py"));
-    assert!(pinned.contains_key("tests.d/pinned-task.toml"));
+    assert!(pinned.contains_key(&tests_file("pinned-task")));
     assert!(pinned.contains_key("tasks/pinned-task/prompt.md"));
 
     // Unmodified candidate: no violations.

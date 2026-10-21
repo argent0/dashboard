@@ -6,6 +6,7 @@
 
 use crate::config::{self, BudgetConfig, Check, Claim, Evidence};
 use crate::git::Git;
+use crate::lean::Exporter;
 use crate::paths::Home;
 use crate::sandbox::Sandbox;
 use serde::{Deserialize, Serialize};
@@ -203,7 +204,7 @@ pub fn fmt_secs(millis: u64) -> String {
 }
 
 impl SuiteResult {
-    /// A suite that couldn't even be evaluated (missing/invalid `tests.toml`).
+    /// A suite that couldn't even be evaluated (a missing or failing Lean package).
     pub fn failing(error: impl Into<String>) -> Self {
         Self {
             pass: false,
@@ -327,6 +328,8 @@ pub struct Runner {
     work: PathBuf,
     sandbox: Sandbox,
     budget: BudgetConfig,
+    /// Exports the suite's Lean package at `<home>/arch`, jailed like a check.
+    exporter: Exporter,
 }
 
 enum WorktreeState {
@@ -342,6 +345,7 @@ impl Runner {
             work: home.work(),
             sandbox: Sandbox::off(),
             budget: BudgetConfig::default(),
+            exporter: Exporter::new(home.root.join("arch"), Sandbox::off()),
         }
     }
 
@@ -349,6 +353,11 @@ impl Runner {
     /// hub stays readable inside it: the worktree's `.git` points there.
     pub fn set_sandbox(&mut self, sandbox: Sandbox) {
         self.sandbox = sandbox.with_readable(&self.hub.dir);
+        self.exporter.set_sandbox(self.sandbox.clone());
+    }
+
+    pub fn exporter(&self) -> &Exporter {
+        &self.exporter
     }
 
     /// Applies `[budget]` to every suite from now on.
@@ -487,7 +496,7 @@ impl Runner {
     }
 
     /// Runs `cmd` at `commit` and returns its stdout as trimmed, non-empty
-    /// lines: the project's test inventory (`tests.toml`'s `list_cmd`).
+    /// lines: the project's test inventory (the suite's `list_cmd`).
     pub fn run_list(&self, commit: &str, cmd: &str) -> Result<Vec<String>, String> {
         self.prepare(commit)?;
         let (code, stdout, combined) = run_command(&self.sandbox, cmd, &self.work, None);
@@ -746,20 +755,21 @@ impl Runner {
         }
     }
 
-    /// Reads the suite at `commit` (`tests.toml` plus every `tests.d/*.toml`)
-    /// and runs every `[[check]]`. A missing or invalid suite is reported via
-    /// `error`, not a panic. An empty check list passes.
+    /// Reads the suite at `commit` (the Lean package's `Tests.lean` and
+    /// `Tests/*.lean`, through the export) and runs every check. A missing
+    /// or invalid suite is reported via `error`, not a panic. An empty check
+    /// list passes.
     pub fn run_suite(&self, commit: &str) -> SuiteResult {
-        let cfg = match config::suite_at(&self.hub, commit) {
+        let cfg = match crate::records::suite_at(&self.hub, commit, Some(&self.exporter)) {
             Ok(c) => c,
             Err(e) => return SuiteResult::failing(e),
         };
 
         let timeout =
             (self.budget.check_timeout > 0).then(|| Duration::from_secs(self.budget.check_timeout));
-        let mut checks = Vec::with_capacity(cfg.check.len());
+        let mut checks = Vec::with_capacity(cfg.checks.len());
         let mut pass = true;
-        for check in &cfg.check {
+        for check in &cfg.checks {
             let result = self.run_check_timed(commit, check, timeout, None);
             pass &= result.pass;
             checks.push(result);
@@ -1103,8 +1113,8 @@ mod tests {
 
     #[test]
     fn suite_summary_error_takes_precedence() {
-        let suite = SuiteResult::failing("tests.toml not found");
-        assert_eq!(suite.summary(), "suite failed: tests.toml not found");
+        let suite = SuiteResult::failing("no architecture/Tests.lean");
+        assert_eq!(suite.summary(), "suite failed: no architecture/Tests.lean");
     }
 
     #[test]

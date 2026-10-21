@@ -5,6 +5,7 @@
 
 use crate::config;
 use crate::git::Git;
+use crate::lean;
 use crate::paths::{self, Home};
 use crate::prompts::{self, Prompts};
 use crate::sandbox::Sandbox;
@@ -84,8 +85,20 @@ pub fn init(
         .map_err(|e| format!("cannot find the director's git dir: {e}"))?;
     sandbox.preflight(Path::new(&git_dir))?;
 
-    // tests.toml + tests.d/; also runs Check::validate on every entry
-    let suite = config::suite_at(&director, "refs/heads/main")?;
+    // The Lean package is every project's architecture and suite: export it
+    // once (jailed, in scratch under the git dir) so a broken one stops here.
+    for f in [config::ARCH_LEAN_MANIFEST, config::TESTS_LEAN] {
+        if director.show_file("refs/heads/main", f).is_none() {
+            return Err(format!("{f} not found at main's tip: run `dashboard arch gen` and commit architecture/"));
+        }
+    }
+    let tree = director
+        .rev_parse(&format!("refs/heads/main:{}", config::ARCH_DIR))
+        .ok_or("architecture/ not found at main's tip")?;
+    let scratch = Path::new(&git_dir).join("dashboard-init-arch");
+    let exported = lean::Exporter::new(scratch.clone(), sandbox.clone()).export_tree(&director, &tree);
+    let _ = std::fs::remove_dir_all(&scratch);
+    let suite = exported.map_err(|e| format!("{}: {e}", config::ARCH_DIR))?.suite;
     config::check_lock_files(&roadmap.player.lock_files, &suite.test_paths)
         .map_err(|e| format!("roadmap.toml: {e}"))?;
 

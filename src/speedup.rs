@@ -4,7 +4,7 @@
 // player does the running and the ref work.
 
 use crate::checks::{self, SuiteResult};
-use crate::config::{BudgetConfig, Check, TestsConfig};
+use crate::config::{BudgetConfig, Check, Suite};
 use std::collections::BTreeMap;
 
 /// A check is slow on `main` for a test-speedup's evidence if it is killed
@@ -16,7 +16,7 @@ pub const SLOW_SHARE_PERCENT: u64 = 10;
 /// may: only a check's `cmd`, `retry_failed` and `retry_on` (and the test
 /// tree itself, which the path check covers) are its to change. Everything
 /// that would let it widen or reshape the suite is a problem.
-pub(crate) fn scope_problems(base: &TestsConfig, cand: &TestsConfig) -> Vec<String> {
+pub(crate) fn scope_problems(base: &Suite, cand: &Suite) -> Vec<String> {
     let mut problems = Vec::new();
     if base.test_paths != cand.test_paths {
         problems.push("test_paths changed".to_string());
@@ -24,8 +24,8 @@ pub(crate) fn scope_problems(base: &TestsConfig, cand: &TestsConfig) -> Vec<Stri
     if base.list_cmd != cand.list_cmd {
         problems.push("list_cmd changed".to_string());
     }
-    let by_name = |cfg: &TestsConfig| -> BTreeMap<String, Check> {
-        cfg.check.iter().map(|c| (c.name.clone(), c.clone())).collect()
+    let by_name = |cfg: &Suite| -> BTreeMap<String, Check> {
+        cfg.checks.iter().map(|c| (c.name.clone(), c.clone())).collect()
     };
     let (before, after) = (by_name(base), by_name(cand));
     for name in before.keys().filter(|n| !after.contains_key(*n)) {
@@ -39,6 +39,9 @@ pub(crate) fn scope_problems(base: &TestsConfig, cand: &TestsConfig) -> Vec<Stri
             if old.runs != new.runs || old.min_pass != new.min_pass {
                 problems.push(format!("check {name:?}: runs / min_pass changed"));
             }
+            if old.covers != new.covers || old.all != new.all || old.files != new.files {
+                problems.push(format!("check {name:?}: covers / files changed"));
+            }
         }
     }
     problems
@@ -47,10 +50,10 @@ pub(crate) fn scope_problems(base: &TestsConfig, cand: &TestsConfig) -> Vec<Stri
 /// `name: `old` -> `new`` for every check whose `cmd` or retry policy the
 /// finish changed: a `cmd` turned into `true` removes a test the inventory
 /// diff can't see, so the director is shown it.
-pub(crate) fn changed_checks(base: &TestsConfig, cand: &TestsConfig) -> Vec<String> {
+pub(crate) fn changed_checks(base: &Suite, cand: &Suite) -> Vec<String> {
     let mut out = Vec::new();
-    for new in &cand.check {
-        let Some(old) = base.check.iter().find(|c| c.name == new.name) else {
+    for new in &cand.checks {
+        let Some(old) = base.checks.iter().find(|c| c.name == new.name) else {
             continue;
         };
         if old.cmd != new.cmd {
@@ -155,9 +158,9 @@ mod tests {
     use super::*;
     use crate::checks::CheckResult;
 
-    fn cfg(checks: &[(&str, &str, u32)]) -> TestsConfig {
-        TestsConfig {
-            check: checks
+    fn cfg(checks: &[(&str, &str, u32)]) -> Suite {
+        Suite {
+            checks: checks
                 .iter()
                 .map(|(n, c, runs)| Check {
                     name: n.to_string(),
@@ -196,6 +199,9 @@ mod tests {
         assert!(scope_problems(&base, &cfg(&[("a", "y", 1)])).is_empty());
         assert_eq!(scope_problems(&base, &cfg(&[("a", "x", 3)])).len(), 1);
         assert_eq!(scope_problems(&base, &cfg(&[("b", "x", 1)])).len(), 2);
+        let mut covers = cfg(&[("a", "x", 1)]);
+        covers.checks[0].all = true;
+        assert_eq!(scope_problems(&base, &covers).len(), 1);
         let mut moved = cfg(&[("a", "x", 1)]);
         moved.test_paths.clear();
         assert_eq!(scope_problems(&base, &moved).len(), 1);

@@ -899,8 +899,8 @@ fn add_pinned_path(hub: &Git, commit: &str, path: &str, map: &mut BTreeMap<Strin
 
 /// The pinned path -> blob hash map for `slug`, computed fresh from the
 /// commit `set_pins` last recorded (`None` if pins were never taken):
-/// `tests.toml`, every suite fragment under `tests.d/`, every `test_paths`
-/// entry of the tests.toml *at that commit*, and everything under
+/// the Lean package (`architecture/`, the suite files included), every
+/// `test_paths` entry of the suite *at that commit*, and everything under
 /// `tasks/<slug>/`. A spike pins only
 /// `tasks/<slug>/` (spec §14): it never merges, so the project's tests are
 /// the worker's to change while exploring.
@@ -911,25 +911,26 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
     // A spike pins no suite; a test-speedup unpins it (the whole test side
     // is its to change): the player's scope check (`test_speedup_scope`)
     // fences it in instead.
-    if !is_spike_at(hub, &commit, slug) && !is_test_speedup_at(hub, &commit, slug) {
-        add_pinned_path(hub, &commit, "tests.toml", &mut map);
-        add_pinned_path(hub, &commit, &format!("{}/", config::SUITE_DIR), &mut map);
-        if let Some(text) = hub.show_file(&commit, "tests.toml") {
-            if let Ok(cfg) = config::tests_config_from_str(&text) {
-                for test_path in &cfg.test_paths {
-                    add_pinned_path(hub, &commit, test_path, &mut map);
-                }
+    let speedup = is_test_speedup_at(hub, &commit, slug);
+    if !is_spike_at(hub, &commit, slug) && !speedup {
+        if let Ok(suite) = suite_at(hub, &commit, None) {
+            for test_path in &suite.test_paths {
+                add_pinned_path(hub, &commit, test_path, &mut map);
             }
         }
     }
     add_pinned_path(hub, &commit, &format!("tasks/{slug}/"), &mut map);
 
     // The architecture (architect-v3.md): the manifest (TOML, or the whole
-    // Lean package) and every API file are the director's and task agent's,
-    // never a worker's. A spike never merges.
+    // Lean package with its suite files) and every API file are the
+    // director's and task agent's, never a worker's. A spike never merges;
+    // a test-speedup owns the suite files.
     if !is_spike_at(hub, &commit, slug) {
         add_pinned_path(hub, &commit, config::ARCH_FILE, &mut map);
         add_pinned_path(hub, &commit, &format!("{}/", config::ARCH_DIR), &mut map);
+        if speedup {
+            map.retain(|p, _| !config::is_tests_path(p));
+        }
         if let Some(arch) = arch_at(hub, &commit) {
             for api in arch.api_paths() {
                 add_pinned_path(hub, &commit, &api, &mut map);
@@ -961,18 +962,14 @@ pub fn arch_at(hub: &Git, commit: &str) -> Option<config::ArchConfig> {
 pub const ARCH_NOTES: &str = "refs/notes/dashboard-arch";
 
 /// The architecture at `commit` as the raise judge sees it: `Ok(None)` when
-/// the commit has none, `Err` when it has one that doesn't load. A Lean
-/// package is exported by `export` (given the package's tree id and a
-/// directory to run in) unless its export is already noted on that tree;
-/// with no exporter only the note is consulted.
+/// the commit has none, `Err` when it has one that doesn't load.
 pub fn arch_source_at(
     hub: &Git,
     commit: &str,
-    export: Option<&dyn Fn(&str) -> Result<crate::lean::Exported, String>>,
+    exporter: Option<&crate::lean::Exporter>,
 ) -> Result<Option<crate::raise::Source>, String> {
     let toml = hub.show_file(commit, config::ARCH_FILE);
-    let tree = hub.rev_parse(&format!("{commit}:{}", config::ARCH_DIR));
-    let lean = tree.is_some() && hub.show_file(commit, config::ARCH_LEAN_MANIFEST).is_some();
+    let lean = hub.show_file(commit, config::ARCH_LEAN_MANIFEST).is_some();
     match (toml, lean) {
         (Some(_), true) => Err(format!(
             "both {} and {} exist: a project has one architecture",
@@ -980,21 +977,45 @@ pub fn arch_source_at(
             config::ARCH_LEAN_MANIFEST
         )),
         (Some(text), false) => crate::raise::Source::from_toml(&text).map(Some).map_err(|e| format!("{}: {e}", config::ARCH_FILE)),
-        (None, true) => {
-            let tree = tree.unwrap();
-            if let Some(note) = hub.notes_show(ARCH_NOTES, &tree) {
-                let e = crate::lean::parse(&note)?;
-                return Ok(Some(crate::raise::Source::from_export(&e)));
-            }
-            let Some(export) = export else {
-                return Err(format!("{}: not exported yet (the player exports it on import)", config::ARCH_DIR));
-            };
-            let e = export(&tree)?;
-            let _ = hub.notes_add(ARCH_NOTES, &tree, &(e.json.to_string() + "\n"));
-            Ok(Some(crate::raise::Source::from_export(&e)))
-        }
-        (None, false) => Ok(None),
+        (None, _) => Ok(exported_at(hub, commit, exporter)?.map(|e| crate::raise::Source::from_export(&e))),
     }
+}
+
+/// The Lean package's export at `commit`: `Ok(None)` when the commit has
+/// no `architecture/Architecture.lean`. The export is noted on the
+/// package's tree id; on a miss `exporter` runs it (with none, only the
+/// note is consulted).
+pub fn exported_at(
+    hub: &Git,
+    commit: &str,
+    exporter: Option<&crate::lean::Exporter>,
+) -> Result<Option<crate::lean::Exported>, String> {
+    if hub.show_file(commit, config::ARCH_LEAN_MANIFEST).is_none() {
+        return Ok(None);
+    }
+    let tree = hub
+        .rev_parse(&format!("{commit}:{}", config::ARCH_DIR))
+        .ok_or_else(|| format!("{}: no tree at {commit}", config::ARCH_DIR))?;
+    if let Some(note) = hub.notes_show(ARCH_NOTES, &tree) {
+        return crate::lean::parse(&note).map(Some);
+    }
+    let Some(exporter) = exporter else {
+        return Err(format!("{}: not exported yet (the player exports it on import)", config::ARCH_DIR));
+    };
+    let e = exporter.export_tree(hub, &tree)?;
+    let _ = hub.notes_add(ARCH_NOTES, &tree, &(e.json.to_string() + "\n"));
+    Ok(Some(e))
+}
+
+/// The suite at `commit` (spec §6.2): the checks of `architecture/Tests.lean`
+/// and `architecture/Tests/*.lean`, through the export.
+pub fn suite_at(hub: &Git, commit: &str, exporter: Option<&crate::lean::Exporter>) -> Result<config::Suite, String> {
+    if hub.show_file(commit, config::TESTS_LEAN).is_none() {
+        return Err(format!("no {} at {commit}: the suite lives in the Lean package", config::TESTS_LEAN));
+    }
+    exported_at(hub, commit, exporter)?
+        .map(|e| e.suite)
+        .ok_or_else(|| format!("no {} at {commit}", config::ARCH_LEAN_MANIFEST))
 }
 
 /// `tasks/<slug>/task.toml` at `commit`, if it exists and parses.
@@ -1018,9 +1039,8 @@ pub fn is_test_speedup_at(hub: &Git, commit: &str, slug: &str) -> bool {
 /// Every pinned path that `candidate_commit` leaves missing or changed. A
 /// slug with no recorded pins has nothing to violate. New files at
 /// `candidate_commit` that aren't in the pinned set are never violations,
-/// except a new suite fragment (`tests.d/*.toml`) on a non-spike task: the
-/// suite is the director's, so adding a check to it is as off-limits as
-/// editing `tests.toml`.
+/// except a new suite file under `architecture/Tests/` on a non-spike task:
+/// the suite is the director's and the task agent's.
 pub fn check_pins(hub: &Git, slug: &str, candidate_commit: &str) -> Vec<String> {
     let pinned = match pinned_files(hub, slug) {
         Some(m) => m,
@@ -1040,9 +1060,9 @@ pub fn check_pins(hub: &Git, slug: &str, candidate_commit: &str) -> Vec<String> 
         .unwrap_or_default();
     if !is_spike_at(hub, &pins_commit, slug) && !is_test_speedup_at(hub, &pins_commit, slug) {
         let added = hub
-            .ls_tree_files(candidate_commit, &format!("{}/", config::SUITE_DIR))
+            .ls_tree_files(candidate_commit, "architecture/Tests/")
             .into_iter()
-            .filter(|p| config::is_suite_fragment(p) && !pinned.contains_key(p));
+            .filter(|p| !pinned.contains_key(p));
         violations.extend(added);
     }
     violations

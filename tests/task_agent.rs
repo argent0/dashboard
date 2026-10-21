@@ -126,8 +126,8 @@ fn agent_post(repo: &DirectorRepo) -> String {
             ),
             ("tasks/s/task.toml", &format!("{PLAN}{CHECK}")),
             (
-                "tests.d/s.toml",
-                "[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n",
+                &*tests_file("s"),
+                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n"),
             ),
         ],
         "post: s",
@@ -284,8 +284,8 @@ fn a_director_post_is_ownership_when_task_agents_are_on() {
     write_file(repo.path(), "tasks/s/task.toml", &format!("{PLAN}{CHECK}"));
     write_file(
         repo.path(),
-        "tests.d/s.toml",
-        "[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n",
+        &*tests_file("s"),
+        &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
     commit(repo.path(), "post: s");
     let report = player.tick().expect("tick");
@@ -389,8 +389,8 @@ fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
                 ),
             ),
             (
-                "tests.d/s.toml",
-                "[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n",
+                &*tests_file("s"),
+                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n"),
             ),
         ],
         "post with a new title",
@@ -480,8 +480,8 @@ fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
             ("tasks/s/prompt.md", "make feature.txt\n"),
             ("tasks/s/task.toml", &format!("{PLAN}{CHECK}")),
             (
-                "tests.d/s.toml",
-                "[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n",
+                &*tests_file("s"),
+                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n"),
             ),
         ],
         "post: s",
@@ -547,8 +547,8 @@ fn the_task_agents_send_back_is_imported_and_relayed_to_the_worker() {
         &[
             ("tasks/s/reviews/r1.md", "also feature2.txt\n"),
             (
-                "tests.d/s.toml",
-                "[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n",
+                &*tests_file("s"),
+                &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
             ),
         ],
         "send back: s r1",
@@ -1036,8 +1036,8 @@ fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalat
     write_file(repo.path(), "tasks/s/task.toml", &format!("{PLAN}{CHECK}"));
     write_file(
         repo.path(),
-        "tests.d/s.toml",
-        "[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n",
+        &*tests_file("s"),
+        &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
     commit(repo.path(), "post: s");
     player.tick().expect("post tick");
@@ -1058,8 +1058,8 @@ fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalat
     director_pull_task_branch(repo.path(), "s");
     write_file(
         repo.path(),
-        "tests.d/s.toml",
-        "[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\nruns = 1\n",
+        &*tests_file("s"),
+        &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f feature.txt\"\nruns = 1\n"),
     );
     commit(repo.path(), "a reply without a reply file");
     let report = player.tick().expect("tick");
@@ -1148,8 +1148,8 @@ fn another_tasks_agent_commits_merged_in_from_main_still_ask_for_a_rebase() {
     );
     write_file(
         &t_dir,
-        "tests.d/t.toml",
-        "[[check]]\nname = \"t-check\"\ncmd = \"test -f t.txt\"\n",
+        &*tests_file("t"),
+        &*task_suite_lean("[[check]]\nname = \"t-check\"\ncmd = \"test -f t.txt\"\n"),
     );
     commit(&t_dir, "post: t");
     let report = player.tick().expect("tick");
@@ -1168,7 +1168,7 @@ fn another_tasks_agent_commits_merged_in_from_main_still_ask_for_a_rebase() {
 #[test]
 fn a_lock_file_under_test_paths_is_refused_at_init() {
     let repo = repo_with_lock_files();
-    write_file(repo.path(), "tests.toml", "test_paths = [\"Cargo.lock\"]\n");
+    write_file(repo.path(), TESTS_LEAN, &*suite_lean("test_paths = [\"Cargo.lock\"]\n"));
     commit(repo.path(), "pin the lock file");
     let home_dir = temp_home();
     let err = init::init(
@@ -1294,20 +1294,11 @@ fn a_worker_push_while_contested_is_ignored_not_struck() {
 fn a_task_agent_may_commit_api_files_but_never_the_manifest() {
     for (target, ownership) in [
         ("api/ab.rs", false),
-        ("architecture.toml", true),
         ("architecture/Apis/ab.lean", false),
         ("architecture/Architecture.lean", true),
     ] {
         let repo = repo_with_task_agents();
-        if target.starts_with("architecture/") {
-            write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
-        } else {
-            write_file(
-                repo.path(),
-                "architecture.toml",
-                "[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n[[module]]\nname = \"b\"\nlang = \"rust\"\npaths = [\"b\"]\n[[api]]\nname = \"ab\"\ngenerator = \"a\"\nconsumer = \"b\"\npaths = [\"api\"]\n",
-            );
-        }
+        write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
         commit(repo.path(), "add architecture");
         let (_home_dir, home) = init_hub(&repo);
         let mut player = open_player(&home);

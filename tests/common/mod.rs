@@ -1,5 +1,6 @@
 // Shared fixtures for dashboard's integration tests: a throwaway director
-// repo with a minimal roadmap.toml/tests.toml, small helpers for writing
+// repo with a minimal roadmap.toml and Lean package (architecture/ with
+// its Tests.lean suite), small helpers for writing
 // files and committing (including marker commits), and a helper to invoke
 // the built `dashboard` binary. Reused across tests/init.rs and later steps'
 // test files.
@@ -12,8 +13,9 @@ use tempfile::TempDir;
 
 /// A throwaway director clone: `git init -b main` with a committer identity
 /// and gpg signing disabled, and a minimal `roadmap.toml` (title + one
-/// phase) plus `tests.toml` (one deterministic check, `cmd = "true"`)
-/// committed on `main`.
+/// phase) plus the starter Lean package (no modules; `Tests.lean` with one
+/// deterministic check, `unit`, `cmd = "true"`, `covers = all`) committed
+/// on `main`.
 pub struct DirectorRepo {
     pub dir: TempDir,
 }
@@ -51,11 +53,7 @@ pub fn director_repo() -> DirectorRepo {
             "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"
         ),
     );
-    write_file(
-        dir.path(),
-        "tests.toml",
-        "[[check]]\nname = \"unit\"\ncmd = \"true\"\n",
-    );
+    write_starter(dir.path(), &suite_lean("[[check]]\nname = \"unit\"\ncmd = \"true\"\n"));
     commit(dir.path(), "initial roadmap and test suite");
 
     DirectorRepo { dir }
@@ -278,4 +276,87 @@ pub fn lean_check(name: &str, cmd: &str, covers: &str) -> String {
 /// check.
 pub fn lean_task_tests(name: &str, cmd: &str, covers: &str) -> String {
     format!("import Architecture\nopen Dashboard\n\n{}", lean_check(name, cmd, covers))
+}
+
+/// `architecture/Tests.lean`.
+pub const TESTS_LEAN: &str = "architecture/Tests.lean";
+
+/// `architecture/Tests/<slug>.lean`, a task's post.
+pub fn tests_file(slug: &str) -> String {
+    format!("architecture/Tests/{slug}.lean")
+}
+
+/// The starter package of `dashboard arch gen` (no modules) with `tests`
+/// as `Tests.lean`.
+pub fn write_starter(repo: &Path, tests: &str) {
+    for (rel, text) in dashboard::lean::starter() {
+        write_file(repo, &rel, &text);
+    }
+    dashboard::lean::write_vendored(repo).expect("vendor the dashboard library");
+    write_file(repo, TESTS_LEAN, tests);
+}
+
+/// A Lean string literal.
+pub fn lean_str(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"))
+}
+
+fn lean_strs(xs: &[String]) -> String {
+    format!("[{}]", xs.iter().map(|x| lean_str(x)).collect::<Vec<_>>().join(", "))
+}
+
+/// The checks of a TOML suite text (`test_paths`, `list_cmd`, `[[check]]`
+/// tables, as the fixtures wrote them before the suite moved to Lean) as
+/// Lean declarations; a check without `covers` gets `covers = all`.
+fn lean_checks(toml_text: &str, with_block: bool) -> String {
+    let t: toml::Table = toml::from_str(toml_text).expect("fixture suite TOML");
+    let mut out = String::from("import Architecture\nopen Dashboard\n\n");
+    if with_block {
+        let paths: Vec<String> = t
+            .get("test_paths")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        out.push_str(&format!("suite where\n  test_paths = {}\n", lean_strs(&paths)));
+        if let Some(l) = t.get("list_cmd").and_then(|v| v.as_str()) {
+            out.push_str(&format!("  list_cmd = some {}\n", lean_str(l)));
+        }
+        out.push('\n');
+    }
+    for c in t.get("check").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+        let c = c.as_table().expect("check table");
+        out.push_str(&format!("check {} where\n", dashboard::lean::ident(c["name"].as_str().unwrap())));
+        for (k, v) in c {
+            let val = match (k.as_str(), v) {
+                ("name", _) => continue,
+                ("covers", toml::Value::String(s)) if s == "all" => "all".to_string(),
+                ("covers", toml::Value::Array(a)) => {
+                    format!("[{}]", a.iter().map(|x| dashboard::lean::ident(x.as_str().unwrap())).collect::<Vec<_>>().join(", "))
+                }
+                (_, toml::Value::String(s)) => lean_str(s),
+                (_, toml::Value::Integer(i)) => i.to_string(),
+                (_, toml::Value::Array(a)) => {
+                    lean_strs(&a.iter().map(|x| x.as_str().unwrap().to_string()).collect::<Vec<_>>())
+                }
+                (_, v) => v.to_string(),
+            };
+            out.push_str(&format!("  {k} = {val}\n"));
+        }
+        if !c.contains_key("covers") {
+            out.push_str("  covers = all\n");
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `Tests.lean` from a TOML suite text (its `[[check]]`s, `test_paths`
+/// and `list_cmd`).
+pub fn suite_lean(toml_text: &str) -> String {
+    lean_checks(toml_text, true)
+}
+
+/// A per-task suite file (`Tests/<slug>.lean`) from `[[check]]` TOML.
+pub fn task_suite_lean(toml_text: &str) -> String {
+    lean_checks(toml_text, false)
 }

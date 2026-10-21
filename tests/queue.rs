@@ -22,8 +22,8 @@ fn queued_repo() -> DirectorRepo {
     );
     write_file(
         repo.path(),
-        "tests.toml",
-        "[[check]]\nname = \"flag\"\ncmd = \"echo checking-the-flag; test -f ok.flag\"\n",
+        TESTS_LEAN,
+        &*suite_lean("[[check]]\nname = \"flag\"\ncmd = \"echo checking-the-flag; test -f ok.flag\"\n"),
     );
     commit(repo.path(), "queued runs");
     repo

@@ -276,7 +276,7 @@ fn post_launches_with_a_base_pin_and_a_spike_prompt_and_no_suite_pins() {
         "{pinned:?}"
     );
     assert!(
-        !pinned.contains_key("tests.toml"),
+        !pinned.contains_key(TESTS_LEAN),
         "a spike doesn't pin the project suite: {pinned:?}"
     );
 
@@ -396,8 +396,8 @@ fn a_valid_finish_is_tested_and_the_player_records_the_verified_answer() {
     let mut files = good_finish_files("probe");
     // The suite is not required: the worker may break the project's tests.
     files.push((
-        "tests.toml".to_string(),
-        "[[check]]\nname = \"unit\"\ncmd = \"false\"\n".to_string(),
+        TESTS_LEAN.to_string(),
+        suite_lean("[[check]]\nname = \"unit\"\ncmd = \"false\"\n"),
     ));
     // Claims may report measurements.
     files.push((

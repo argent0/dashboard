@@ -514,7 +514,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("worker.launch is 1205 bytes, over its max-bytes 1000"),
+            err.contains("worker.launch is 1210 bytes, over its max-bytes 1000"),
             "{err}"
         );
         let err = Prompts::parse(&replace(

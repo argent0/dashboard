@@ -96,7 +96,7 @@ fn plan_and_post(
 
     write_file(repo.path(), "tasks/fix/prompt.md", "make it stable\n");
     write_file(repo.path(), "tests/inventory.txt", "keep\nflaky\n");
-    write_file(repo.path(), "tests.toml", tests_toml);
+    write_file(repo.path(), TESTS_LEAN, &*suite_lean(tests_toml));
     commit(repo.path(), "post: fix");
     let report = player.tick().expect("post tick");
     (player, report)
@@ -114,7 +114,7 @@ fn a_reproduced_flake_posts_launches_and_unpins_only_fix_paths() {
     assert_eq!(status_of(&hub, "fix"), Status::Posted);
 
     let pinned = records::pinned_files(&hub, "fix").unwrap();
-    assert!(pinned.contains_key("tests.toml"));
+    assert!(pinned.contains_key(TESTS_LEAN));
     assert!(pinned.contains_key("tasks/fix/task.toml"));
     assert!(
         !pinned.contains_key("tests/inventory.txt"),

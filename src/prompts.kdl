@@ -24,10 +24,10 @@ worker max-bytes=512 {
         You are the worker for task `{slug}` in project `{project}`. Your clone's `origin` remote
         is the hub: fetch from it, and never push anywhere else.
 
-        Commit only when you believe the whole project suite (every [[check]] in tests.toml and
-        tests.d/*.toml) passes. Leave work in progress uncommitted.
+        Commit only when you believe the whole project suite (every check in
+        architecture/Tests.lean and architecture/Tests/) passes. Leave work in progress uncommitted.
 
-        You may add new tests, but you must not modify, delete, or add to tests.toml or tests.d/,
+        You may add new tests, but you must not modify, delete, or add to architecture/,
         touch anything under its test_paths, or touch tasks/{slug}/. The pinned files, which must
         stay byte-for-byte identical, are:
         {pinned}
@@ -70,8 +70,8 @@ worker max-bytes=512 {
         This is a test-speedup task. The suite is over its time budget; make these checks faster:
         {slow}
 
-        The test tree and the checks' `cmd` / `retry_failed` / `retry_on` in tests.toml and
-        tests.d/ are yours to change; nothing else is: no production code, no other field of a
+        The test tree and the checks' `cmd` / `retry_failed` / `retry_on` in architecture/Tests.lean
+        and architecture/Tests/ are yours to change; nothing else is: no production code, no other field of a
         check, no roadmap.toml. Faster by what the tests do (less setup, shared fixtures, narrower
         work), not by what they check: removing tests is allowed, but the player lists every
         removed test and rewired `cmd` for the director, who decides at `accept`. A check must
@@ -243,11 +243,11 @@ task-agent max-bytes=512 {
         - Every test you write or send back must be pure: no effects outside its own sandbox, no
           shared state, no network, real clock or unseeded randomness, no dependence on test order.
           The prompt.md you write passes this rule on to the worker in one line.
-        - Write only tests, tests.toml, tests.d/ and files under tasks/{slug}/, never product code.
+        - Write only tests, architecture/Tests/{slug}.lean and files under tasks/{slug}/, never code.
           In task.toml only [check] is yours; the rest is the director's plan.
         - Never commit accept:, retire: or any other marker: you recommend, the director decides.
         - Trim only when the director asks: ONE commit on a tested task that deletes (or edits)
-          test files this task added and removes their [[check]] entries from tests.d/{slug}.toml,
+          test files this task added and removes their checks from architecture/Tests/{slug}.lean,
           adding no review note. The suite must still pass.
 
         The task, as the director planned it (phase {phase}):
@@ -307,16 +307,16 @@ task-agent max-bytes=512 {
     // {slug}
     post-check-task #"""
         - its [check] in tasks/{slug}/task.toml (unless the plan already has one) and the same check
-          in tests.d/{slug}.toml (same name, cmd, runs and min_pass; check names are unique across
-          the whole suite);
+          in architecture/Tests/{slug}.lean (same name, cmd, runs and min_pass; check names are
+          unique across the whole suite);
         """#
     post-check-speedup #"""
-        - nothing in tests.d/: this is a test-speedup (spec §15.1), whose [[slow]] checks are
+        - nothing in architecture/Tests/: this is a test-speedup (spec §15.1), whose [[slow]] checks are
           already in its plan and which adds no test. Your post is prompt.md alone: say which
           checks are slow, what in them is likely slow, and what the worker may safely trim;
         """#
     post-check-flaky #"""
-        - nothing in tests.d/: this is a flaky-test-fix (spec §15), whose [check] and [[evidence]]
+        - nothing in architecture/Tests/: this is a flaky-test-fix (spec §15), whose [check] and [[evidence]]
           are already in its plan and stay out of the suite. Your post is prompt.md, plus any test
           files its check needs that don't exist yet;
         """#
@@ -372,7 +372,7 @@ task-agent max-bytes=512 {
         collaborator's feedback on your tests, not an attack on them: judge it from the task and the
         tests, still without writing any implementation. Then reply in ONE commit adding
         tasks/{slug}/contests/c{n}.md, your answer to the worker, and, if it's right, the fixed
-        tests (tests and tests.d/ only). If the test is right, the reply alone explains how it can be
+        tests (tests and architecture/Tests/ only). If the test is right, the reply alone explains how it can be
         met. A reply spends no review round; the worker may contest {remaining} more time(s) before
         the task escalates. Then write your report (step: contest c{n}, verdict: replied).
         """#

@@ -57,8 +57,10 @@ enum ArchAction {
         root: PathBuf,
     },
     /// Regenerate every API's bindings from its IDL, and for a Lean
-    /// architecture the vendored `architecture/Dashboard.lean` library. With
-    /// --check, write nothing and exit 1 if anything is stale.
+    /// architecture the vendored `architecture/Dashboard.lean` library. On a
+    /// root without `architecture/`, write a starter package (no modules,
+    /// one `covers = all` check). With --check, write nothing and exit 1 if
+    /// anything is stale.
     Gen {
         #[arg(long, default_value = ".")]
         root: PathBuf,
@@ -791,7 +793,15 @@ fn run_arch_gen(root: &std::path::Path, check: bool) {
     // The vendored library first: a Lean package can't be loaded through a
     // stale copy of it.
     let mut vendored = Vec::new();
-    if !check && dashboard::lean::present(root) {
+    if !check && !root.join(dashboard::config::ARCH_DIR).exists() && !root.join(dashboard::config::ARCH_FILE).exists() {
+        match dashboard::lean::write_starter(root) {
+            Ok(w) => vendored = w,
+            Err(e) => {
+                eprintln!("dashboard: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else if !check && dashboard::lean::present(root) {
         match dashboard::lean::write_vendored(root) {
             Ok(w) => vendored = w,
             Err(e) => {

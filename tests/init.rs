@@ -187,8 +187,8 @@ fn missing_roadmap_toml_errors() {
     init_git_identity(dir.path());
     write_file(
         dir.path(),
-        "tests.toml",
-        "[[check]]\nname = \"unit\"\ncmd = \"true\"\n",
+        TESTS_LEAN,
+        &*suite_lean("[[check]]\nname = \"unit\"\ncmd = \"true\"\n"),
     );
     commit(dir.path(), "no roadmap.toml here");
 
@@ -202,11 +202,7 @@ fn invalid_check_threshold_errors() {
     let dir = TempDir::new().unwrap();
     init_git_identity(dir.path());
     write_file(dir.path(), "roadmap.toml", "title = \"X\"\n");
-    write_file(
-        dir.path(),
-        "tests.toml",
-        "[[check]]\nname = \"bad\"\ncmd = \"true\"\nruns = 3\nmin_pass = 4\n",
-    );
+    write_starter(dir.path(), &suite_lean("[[check]]\nname = \"bad\"\ncmd = \"true\"\nruns = 3\nmin_pass = 4\n"));
     commit(dir.path(), "bad threshold");
 
     let home_dir = temp_home();

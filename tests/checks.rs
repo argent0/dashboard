@@ -186,15 +186,15 @@ fn notes_merge_keeps_other_checks() {
 // --------------------------------------------------------------------------
 
 #[test]
-fn suite_with_missing_tests_toml_fails_with_error() {
+fn suite_with_missing_tests_lean_fails_with_error() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let runner = Runner::new(&home);
 
-    // The initial commit (seeded by director_repo()) has tests.toml; commit
+    // The initial commit (seeded by director_repo()) has Tests.lean; commit
     // a removal on top and check *that* commit specifically.
-    std::fs::remove_file(repo.path().join("tests.toml")).unwrap();
-    let commit = commit(repo.path(), "drop tests.toml");
+    std::fs::remove_file(repo.path().join(TESTS_LEAN)).unwrap();
+    let commit = commit(repo.path(), "drop Tests.lean");
     push_main_to_hub(repo.path());
 
     let result = runner.run_suite(&commit);
@@ -202,7 +202,7 @@ fn suite_with_missing_tests_toml_fails_with_error() {
     assert!(result.error.is_some());
     assert!(result.checks.is_empty());
     assert!(
-        result.summary().contains("tests.toml"),
+        result.summary().contains("Tests.lean"),
         "unexpected summary: {}",
         result.summary()
     );
@@ -215,7 +215,7 @@ fn suite_passes_when_every_check_passes() {
     let runner = Runner::new(&home);
     let commit = repo.git().rev_parse("HEAD").unwrap();
 
-    // director_repo()'s tests.toml has a single `cmd = "true"` check.
+    // director_repo()'s Tests.lean has a single `cmd = "true"` check.
     let result = runner.run_suite(&commit);
     assert!(result.pass, "unexpected: {}", result.summary());
     assert_eq!(result.checks.len(), 1);

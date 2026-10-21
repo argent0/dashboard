@@ -27,8 +27,8 @@ fn budget_repo(budget: &str) -> DirectorRepo {
     );
     write_file(
         repo.path(),
-        "tests.toml",
-        "[[check]]\nname = \"slow\"\ncmd = \"if test -f slow.flag; then sleep 3; fi\"\n",
+        TESTS_LEAN,
+        &*suite_lean("[[check]]\nname = \"slow\"\ncmd = \"if test -f slow.flag; then sleep 3; fi\"\n"),
     );
     commit(repo.path(), "budget");
     repo
@@ -92,7 +92,7 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task
 
 /// Posts `slug` (already planned and `ready`) with a task check
 /// `test -f feature.txt` (fails until the "worker" creates that file) and
-/// the matching `tests.toml` entry. Ticks (which also launches the worker,
+/// the matching check in `architecture/Tests/<slug>.lean`. Ticks (which also launches the worker,
 /// per step 6) and returns the report so callers can inspect `launched`/
 /// `errors` too.
 fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> player::TickReport {
@@ -111,8 +111,8 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
     );
     write_file(
         repo.path(),
-        &format!("tests.d/{slug}.toml"),
-        &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*tests_file(&slug),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");

@@ -1,4 +1,4 @@
-// roadmap.toml / tests.toml / task.toml schemas (spec.md §6.2, §8.2, §10),
+// roadmap.toml / task.toml schemas and the Lean suite's checks (spec.md §6.2, §8.2, §10),
 // with serde defaults so every section and field is optional.
 
 use serde::{Deserialize, Serialize};
@@ -49,7 +49,7 @@ impl BudgetConfig {
 }
 
 /// `[sandbox]`: the jail every check runs in (`src/sandbox.rs`). It's in
-/// `roadmap.toml`, not `tests.toml`, because task agents may edit the
+/// `roadmap.toml`, not the Lean suite, because task agents may edit the
 /// suite but must never be able to loosen the jail it runs in.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -329,13 +329,13 @@ impl FromStr for Reason {
 }
 
 // --------------------------------------------------------------------------
-// Checks (spec §6.1) — shared by tests.toml and task.toml
+// Checks (spec §6.1) — shared by the Lean suite and task.toml
 // --------------------------------------------------------------------------
 
 // `pub` (not `pub(crate)` like the rest of this module): src/checks.rs's
 // public `Runner::run_check` takes `&Check` directly, and integration tests
 // outside this crate build `Check` literals to drive it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Check {
     pub name: String,
     pub cmd: String,
@@ -495,100 +495,6 @@ impl Suite {
         }
         out
     }
-}
-
-// --------------------------------------------------------------------------
-// tests.toml (spec §6.2)
-// --------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub(crate) struct TestsConfig {
-    pub(crate) check: Vec<Check>,
-    pub(crate) test_paths: Vec<String>,
-    /// Prints the project's test inventory, one test per line (e.g. `cargo
-    /// test -- --list`). Only a `flaky-test-fix` task needs it.
-    pub(crate) list_cmd: Option<String>,
-}
-
-impl TestsConfig {
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        for c in &self.check {
-            c.validate()?;
-        }
-        Ok(())
-    }
-}
-
-/// The directory of per-task suite fragments (spec §6.2): each post adds its
-/// task check as `tests.d/<slug>.toml` instead of appending to `tests.toml`,
-/// so parallel tasks never edit the same file.
-pub const SUITE_DIR: &str = "tests.d";
-
-/// `tests.d/<slug>.toml`: where a task's post puts its task check.
-pub fn suite_fragment_path(slug: &str) -> String {
-    format!("{SUITE_DIR}/{slug}.toml")
-}
-
-/// Whether `path` is a suite fragment: a `.toml` file directly in `tests.d/`.
-pub fn is_suite_fragment(path: &str) -> bool {
-    path.strip_prefix(SUITE_DIR)
-        .and_then(|rest| rest.strip_prefix('/'))
-        .is_some_and(|name| !name.contains('/') && name.ends_with(".toml"))
-}
-
-/// A `tests.d/*.toml` fragment: only `[[check]]` entries. `test_paths` and
-/// `list_cmd` stay project-wide, in `tests.toml`.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct TestsFragment {
-    check: Vec<Check>,
-}
-
-/// The whole project suite: `tests.toml` (`base`) plus every fragment, in
-/// path order, as `(path, text)`. Check names must be unique across all of
-/// them, since results are keyed by name.
-pub(crate) fn suite_from_parts(
-    base: &str,
-    fragments: &[(String, String)],
-) -> Result<TestsConfig, String> {
-    let mut cfg = tests_config_from_str(base).map_err(|e| format!("tests.toml: {e}"))?;
-    let mut sorted: Vec<&(String, String)> = fragments.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
-    for (path, text) in sorted {
-        let frag: TestsFragment = toml::from_str(text).map_err(|e| format!("{path}: {e}"))?;
-        for c in &frag.check {
-            c.validate().map_err(|e| format!("{path}: {e}"))?;
-        }
-        cfg.check.extend(frag.check);
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for c in &cfg.check {
-        if !seen.insert(c.name.as_str()) {
-            return Err(format!(
-                "check name {:?} is declared more than once across tests.toml and tests.d/",
-                c.name
-            ));
-        }
-    }
-    Ok(cfg)
-}
-
-/// The project suite at `rev`: `tests.toml` plus every `tests.d/*.toml`.
-pub(crate) fn suite_at(git: &crate::git::Git, rev: &str) -> Result<TestsConfig, String> {
-    let base = git
-        .show_file(rev, "tests.toml")
-        .ok_or_else(|| format!("tests.toml not found at {rev}"))?;
-    let fragments: Vec<(String, String)> = git
-        .ls_tree_files(rev, &format!("{SUITE_DIR}/"))
-        .into_iter()
-        .filter(|p| is_suite_fragment(p))
-        .map(|p| {
-            let text = git.show_file(rev, &p).unwrap_or_default();
-            (p, text)
-        })
-        .collect();
-    suite_from_parts(&base, &fragments)
 }
 
 // --------------------------------------------------------------------------
@@ -770,9 +676,9 @@ impl TaskConfig {
                         "fix_paths entry {p:?} must be a plain file path, never a directory or a wildcard"
                     ));
                 }
-                if p == "tests.toml" || p.starts_with("tasks/") {
+                if p.starts_with("architecture/") || p.starts_with("tasks/") {
                     return Err(format!(
-                        "fix_paths entry {p:?} may not be tests.toml or under tasks/"
+                        "fix_paths entry {p:?} may not be under architecture/ or tasks/"
                     ));
                 }
             }
@@ -1448,12 +1354,6 @@ pub fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> {
     Ok(cfg)
 }
 
-pub(crate) fn tests_config_from_str(s: &str) -> Result<TestsConfig, String> {
-    let cfg: TestsConfig = toml::from_str(s).map_err(|e| e.to_string())?;
-    cfg.validate()?;
-    Ok(cfg)
-}
-
 pub(crate) fn task_config_from_str(s: &str) -> Result<TaskConfig, String> {
     let cfg: TaskConfig = toml::from_str(s).map_err(|e| e.to_string())?;
     cfg.validate()?;
@@ -1549,104 +1449,47 @@ mod tests {
         assert!(Reason::from_str("bogus").is_err());
     }
 
-    #[test]
-    fn tests_config_parses_checks() {
-        let toml = r#"
-            test_paths = ["tests/"]
-
-            [[check]]
-            name = "unit"
-            cmd = "cargo test"
-
-            [[check]]
-            name = "flaky"
-            cmd = "pytest tests/llm"
-            runs = 10
-            min_pass = 8
-        "#;
-        let cfg = tests_config_from_str(toml).unwrap();
-        assert_eq!(cfg.test_paths, vec!["tests/".to_string()]);
-        assert_eq!(cfg.check.len(), 2);
-        assert_eq!(cfg.check[0].runs, 1);
-        assert_eq!(cfg.check[0].min_pass, 1);
-        assert_eq!(cfg.check[1].runs, 10);
-        assert_eq!(cfg.check[1].min_pass, 8);
+    fn check_from_str(s: &str) -> Result<Check, String> {
+        let c: Check = toml::from_str(s).map_err(|e| e.to_string())?;
+        c.validate()?;
+        Ok(c)
     }
 
     #[test]
-    fn tests_config_rejects_bad_threshold() {
-        let toml = r#"
-            [[check]]
-            name = "bad"
-            cmd = "true"
-            runs = 3
-            min_pass = 4
-        "#;
-        let err = tests_config_from_str(toml).unwrap_err();
+    fn checks_default_and_validate() {
+        let c = check_from_str("name = \"unit\"\ncmd = \"true\"\n").unwrap();
+        assert_eq!((c.runs, c.min_pass, c.all), (1, 1, false));
+        let err = check_from_str("name = \"b\"\ncmd = \"true\"\nruns = 3\nmin_pass = 4\n").unwrap_err();
         assert!(err.contains("min_pass"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn suite_merges_fragments_in_path_order() {
-        let base = "test_paths = [\"tests/\"]\n[[check]]\nname = \"unit\"\ncmd = \"true\"\n";
-        let frags = vec![
-            (
-                "tests.d/b.toml".to_string(),
-                "[[check]]\nname = \"b\"\ncmd = \"true\"\n".to_string(),
-            ),
-            (
-                "tests.d/a.toml".to_string(),
-                "[[check]]\nname = \"a\"\ncmd = \"true\"\n".to_string(),
-            ),
-        ];
-        let cfg = suite_from_parts(base, &frags).unwrap();
-        let names: Vec<&str> = cfg.check.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["unit", "a", "b"]);
-        assert_eq!(cfg.test_paths, ["tests/"]);
-    }
-
-    #[test]
-    fn suite_rejects_duplicate_names_and_bad_fragments() {
-        let base = "[[check]]\nname = \"unit\"\ncmd = \"true\"\n";
-        let dup = vec![(
-            "tests.d/a.toml".to_string(),
-            "[[check]]\nname = \"unit\"\ncmd = \"false\"\n".to_string(),
-        )];
-        assert!(
-            suite_from_parts(base, &dup)
-                .unwrap_err()
-                .contains("more than once")
-        );
-        let bad = vec![(
-            "tests.d/a.toml".to_string(),
-            "[[check]]\nname = \"x\"\ncmd = \"true\"\nruns = 0\n".to_string(),
-        )];
-        assert!(
-            suite_from_parts(base, &bad)
-                .unwrap_err()
-                .starts_with("tests.d/a.toml")
-        );
-    }
-
-    #[test]
-    fn suite_fragment_paths() {
-        assert_eq!(suite_fragment_path("foo"), "tests.d/foo.toml");
-        assert!(is_suite_fragment("tests.d/foo.toml"));
-        assert!(!is_suite_fragment("tests.d/sub/foo.toml"));
-        assert!(!is_suite_fragment("tests.d/README.md"));
-        assert!(!is_suite_fragment("tests.dx/foo.toml"));
-    }
-
-    #[test]
-    fn tests_config_rejects_zero_runs() {
-        let toml = r#"
-            [[check]]
-            name = "bad"
-            cmd = "true"
-            runs = 0
-        "#;
-        let err = tests_config_from_str(toml).unwrap_err();
+        let err = check_from_str("name = \"b\"\ncmd = \"true\"\nruns = 0\n").unwrap_err();
         assert!(err.contains("runs"), "unexpected error: {err}");
+        let err = check_from_str("name = \"b\"\ncmd = \"true\"\nall = true\ncovers = [\"a\"]\n").unwrap_err();
+        assert!(err.contains("either all or a list"), "{err}");
+        for bad in ["../x", "/abs", "a/../b", ""] {
+            let err = check_from_str(&format!("name = \"b\"\ncmd = \"true\"\ncovers = [\"a\"]\nfiles = [{bad:?}]\n")).unwrap_err();
+            assert!(err.contains("relative path"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn suite_helpers() {
+        let mk = |name: &str, source: &str, files: &[&str]| Check {
+            name: name.into(),
+            cmd: "true".into(),
+            files: files.iter().map(|f| f.to_string()).collect(),
+            source: Some(source.into()),
+            ..Check::default()
+        };
+        let suite = Suite {
+            checks: vec![mk("u", TESTS_LEAN, &["t/u"]), mk("w", &worker_tests_file("x"), &["t/w", "t/u"])],
+            ..Suite::default()
+        };
+        assert_eq!(suite.check("w").unwrap().files.len(), 2);
+        assert_eq!(suite.from_file(&worker_tests_file("x")).len(), 1);
+        assert_eq!(suite.files_of(&["u", "w"]), ["t/u", "t/w"]);
+        assert_eq!(tests_file("x"), "architecture/Tests/x.lean");
+        assert!(is_tests_path("architecture/Tests.lean") && is_tests_path("architecture/Tests/x.worker.lean"));
+        assert!(!is_tests_path("architecture/Architecture.lean") && !is_tests_path("architecture/TestsX.lean"));
     }
 
     #[test]
@@ -1765,28 +1608,12 @@ mod tests {
 
     #[test]
     fn retry_policy_is_parsed_and_validated() {
-        let ok = tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_failed = 2\nretry_on = [\"Text file busy\", \"os error \\\\d+\"]\n").unwrap();
-        assert_eq!(ok.check[0].retry_failed, 2);
-        assert_eq!(ok.check[0].retry_on.len(), 2);
-        assert_eq!(
-            tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\n")
-                .unwrap()
-                .check[0]
-                .retry_failed,
-            0
-        );
-        assert!(
-            tests_config_from_str(
-                "[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_failed = 1\nretry_on = [\"(\"]\n"
-            )
-            .is_err(),
-            "bad regex"
-        );
-        assert!(
-            tests_config_from_str("[[check]]\nname = \"u\"\ncmd = \"x\"\nretry_on = [\"a\"]\n")
-                .is_err(),
-            "retry_on alone"
-        );
+        let ok = check_from_str("name = \"u\"\ncmd = \"x\"\nretry_failed = 2\nretry_on = [\"Text file busy\", \"os error \\\\d+\"]\n").unwrap();
+        assert_eq!(ok.retry_failed, 2);
+        assert_eq!(ok.retry_on.len(), 2);
+        assert_eq!(check_from_str("name = \"u\"\ncmd = \"x\"\n").unwrap().retry_failed, 0);
+        assert!(check_from_str("name = \"u\"\ncmd = \"x\"\nretry_failed = 1\nretry_on = [\"(\"]\n").is_err(), "bad regex");
+        assert!(check_from_str("name = \"u\"\ncmd = \"x\"\nretry_on = [\"a\"]\n").is_err(), "retry_on alone");
     }
 
     #[test]

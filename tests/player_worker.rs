@@ -79,7 +79,7 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, task
 
 /// Posts `slug` (already planned and `ready`) with a task check
 /// `test -f feature.txt` (fails until the "worker" creates that file) and
-/// the matching `tests.toml` entry. Ticks (which also launches the worker,
+/// the matching check in `architecture/Tests/<slug>.lean`. Ticks (which also launches the worker,
 /// per step 6) and returns the report so callers can inspect `launched`/
 /// `errors` too.
 fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> player::TickReport {
@@ -98,8 +98,8 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
     );
     write_file(
         repo.path(),
-        &format!("tests.d/{slug}.toml"),
-        &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*tests_file(&slug),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");
@@ -303,8 +303,8 @@ fn launch_skipped_with_an_error_when_the_clone_dir_already_exists() {
     );
     write_file(
         repo.path(),
-        "tests.d/leftover.toml",
-        "[[check]]\nname = \"leftover-check\"\ncmd = \"test -f feature.txt\"\n",
+        &*tests_file("leftover"),
+        &*task_suite_lean("[[check]]\nname = \"leftover-check\"\ncmd = \"test -f feature.txt\"\n"),
     );
     commit(repo.path(), "post: leftover");
 
@@ -530,8 +530,8 @@ fn finish_adding_a_suite_fragment_is_rejected_with_pins() {
     commit_in_clone(
         &repo,
         "frag",
-        "tests.d/extra.toml",
-        "[[check]]\nname = \"extra\"\ncmd = \"true\"\n",
+        &*tests_file("extra"),
+        &*task_suite_lean("[[check]]\nname = \"extra\"\ncmd = \"true\"\n"),
         "add a suite check",
     );
 
@@ -539,7 +539,7 @@ fn finish_adding_a_suite_fragment_is_rejected_with_pins() {
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Pins);
     assert!(
-        report.rejected[0].message.contains("tests.d/extra.toml"),
+        report.rejected[0].message.contains("architecture/Tests/extra.lean"),
         "{}",
         report.rejected[0].message
     );
@@ -665,8 +665,8 @@ fn worker_commit_built_on_a_stale_pre_send_back_tip_is_diverged_history() {
     director_pull_task_branch(repo.path(), "d");
     write_file(
         repo.path(),
-        "tests.d/d.toml",
-        "[[check]]\nname = \"d-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n",
+        &*tests_file("d"),
+        &*task_suite_lean("[[check]]\nname = \"d-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
     );
     write_file(
         repo.path(),
@@ -810,8 +810,8 @@ fn full_loop_post_finish_send_back_fix_finish_accept() {
     director_pull_task_branch(repo.path(), "full");
     write_file(
         repo.path(),
-        "tests.d/full.toml",
-        "[[check]]\nname = \"full-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n",
+        &*tests_file("full"),
+        &*task_suite_lean("[[check]]\nname = \"full-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
     );
     write_file(
         repo.path(),
@@ -1128,8 +1128,8 @@ fn progress_on_the_task_branch_starts_the_relaunch_count_over() {
     director_pull_task_branch(repo.path(), "p");
     write_file(
         repo.path(),
-        "tests.d/p.toml",
-        "[[check]]\nname = \"p-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n",
+        &*tests_file("p"),
+        &*task_suite_lean("[[check]]\nname = \"p-check\"\ncmd = \"test -f feature.txt && test -f feature2.txt\"\n"),
     );
     write_file(repo.path(), "tasks/p/reviews/r1.md", "add feature2.txt\n");
     commit(repo.path(), "send-back: p r1");
@@ -1191,17 +1191,9 @@ fn tmux_smoke_test() {
 
 #[test]
 fn finish_touching_an_api_file_or_the_manifest_is_rejected_with_pins() {
-    for target in ["api/ab.rs", "architecture.toml", "architecture/Apis/ab.lean", "architecture/Architecture.lean"] {
+    for target in ["api/ab.rs", "architecture/Apis/ab.lean", "architecture/Architecture.lean"] {
         let repo = director_repo();
-        if target.starts_with("architecture/") {
-            write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
-        } else {
-            write_file(
-                repo.path(),
-                "architecture.toml",
-                "[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n[[module]]\nname = \"b\"\nlang = \"rust\"\npaths = [\"b\"]\n[[api]]\nname = \"ab\"\ngenerator = \"a\"\nconsumer = \"b\"\npaths = [\"api\"]\n",
-            );
-        }
+        write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
         write_file(repo.path(), "api/ab.rs", "pub enum Ab { X }\n");
         commit(repo.path(), "add architecture");
         let (_home_dir, home) = init_hub(&repo);

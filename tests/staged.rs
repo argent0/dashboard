@@ -250,7 +250,7 @@ fn a_dependent_task_waits_ready_after_its_dependency_is_accepted() {
     g.run(&["config", "commit.gpgsign", "false"]).unwrap();
     write_file(&adir, "tasks/s/prompt.md", "p\n");
     write_file(&adir, "tasks/s/task.toml", &format!("{PLAN}\n[check]\nname = \"sc\"\ncmd = \"test -f f.txt\"\n"));
-    write_file(&adir, "tests.d/s.toml", "[[check]]\nname = \"sc\"\ncmd = \"test -f f.txt\"\n");
+    write_file(&adir, &*tests_file("s"), &*task_suite_lean("[[check]]\nname = \"sc\"\ncmd = \"test -f f.txt\"\n"));
     commit(&adir, "post: s");
     let r = tick(&mut player);
     assert!(r.rejected.is_empty(), "{r}");

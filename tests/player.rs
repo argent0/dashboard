@@ -113,8 +113,8 @@ fn main_commit_whose_suite_fails_is_rejected_with_suite() {
     let repo = director_repo();
     write_file(
         repo.path(),
-        "tests.toml",
-        "[[check]]\nname = \"unit\"\ncmd = \"false\"\n",
+        TESTS_LEAN,
+        &*suite_lean("[[check]]\nname = \"unit\"\ncmd = \"false\"\n"),
     );
     commit(repo.path(), "make the suite fail");
     let (_home_dir, home) = init_hub(&repo);
@@ -738,44 +738,13 @@ fn player_once_via_binary_prints_a_report() {
 }
 
 #[test]
-fn main_commit_of_architecture_toml_is_imported_and_a_bad_one_rejected() {
-    let repo = director_repo();
-    let (_home_dir, home) = init_hub(&repo);
-    let hub = Git::new(home.hub());
-    let mut player = open_player(&home);
-
-    write_file(
-        repo.path(),
-        "architecture.toml",
-        "max_modules = 2\n[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n",
-    );
-    commit(repo.path(), "add architecture");
-    let report = player.tick().expect("tick should succeed");
-    assert_eq!(report.imported.len(), 1, "{report}");
-    let good = repo.git().rev_parse("HEAD").unwrap();
-    assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(good.as_str()));
-
-    // An unparsable manifest (unknown module in an API) is an ownership rejection.
-    write_file(
-        repo.path(),
-        "architecture.toml",
-        "[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\n[[api]]\nname = \"x\"\ngenerator = \"a\"\nconsumer = \"nope\"\npaths = [\"api\"]\n",
-    );
-    commit(repo.path(), "break architecture");
-    let report = player.tick().expect("tick should succeed");
-    assert_eq!(report.rejected.len(), 1, "{report}");
-    assert_eq!(report.rejected[0].reason, Reason::Ownership);
-    assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(good.as_str()));
-}
-
-#[test]
 fn a_budget_raise_needs_a_reason_and_a_small_step_and_is_noted_and_shown() {
     use dashboard::{render, state};
     let manifest = |ast: u32| {
-        format!("max_modules = 3\n[[module]]\nname = \"a\"\nlang = \"rust\"\npaths = [\"a\"]\nmax_ast = {ast}\n")
+        format!("import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\nmodule a where\n  lang = rust\n  paths = [\"a\"]\n  max_ast = {ast}\n")
     };
     let repo = director_repo();
-    write_file(repo.path(), "architecture.toml", &manifest(100));
+    write_file(repo.path(), "architecture/Architecture.lean", &manifest(100));
     commit(repo.path(), "add architecture");
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
@@ -783,7 +752,7 @@ fn a_budget_raise_needs_a_reason_and_a_small_step_and_is_noted_and_shown() {
     let base = repo.git().rev_parse("HEAD").unwrap();
 
     // No `raise:` reason: ownership.
-    write_file(repo.path(), "architecture.toml", &manifest(110));
+    write_file(repo.path(), "architecture/Architecture.lean", &manifest(110));
     commit(repo.path(), "make room");
     let report = player.tick().expect("tick");
     assert_eq!(report.rejected.len(), 1, "{report}");
@@ -793,21 +762,21 @@ fn a_budget_raise_needs_a_reason_and_a_small_step_and_is_noted_and_shown() {
 
     // Past the step cap (+25%): ownership.
     repo.git().run(&["reset", "--hard", &base]).unwrap();
-    write_file(repo.path(), "architecture.toml", &manifest(126));
+    write_file(repo.path(), "architecture/Architecture.lean", &manifest(126));
     commit(repo.path(), "raise: too much");
     let report = player.tick().expect("tick");
     assert!(report.rejected[0].message.contains("step cap"), "{}", report.rejected[0].message);
 
     // Lowering needs nothing.
     repo.git().run(&["reset", "--hard", &base]).unwrap();
-    write_file(repo.path(), "architecture.toml", &manifest(90));
+    write_file(repo.path(), "architecture/Architecture.lean", &manifest(90));
     commit(repo.path(), "tighten");
     let report = player.tick().expect("tick");
     assert_eq!(report.imported.len(), 1, "{report}");
     assert!(records::budget_raises(&hub).is_empty());
 
     // A reasoned raise within the cap is imported and noted.
-    write_file(repo.path(), "architecture.toml", &manifest(110));
+    write_file(repo.path(), "architecture/Architecture.lean", &manifest(110));
     commit(repo.path(), "raise(parser): the parser grew; operator agreed");
     let report = player.tick().expect("tick");
     assert_eq!(report.imported.len(), 1, "{report}");

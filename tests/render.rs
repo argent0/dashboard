@@ -74,8 +74,8 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
     );
     write_file(
         repo.path(),
-        &format!("tests.d/{slug}.toml"),
-        &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n"),
+        &*tests_file(&slug),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"test -f feature.txt\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick should succeed");

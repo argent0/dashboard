@@ -55,7 +55,7 @@ fn transitions(report: &TickReport) -> Vec<Transition> {
 }
 
 /// Plans `slug` and posts it with the task check `cmd`, in its own
-/// `tests.d/<slug>.toml`: parallel posts never touch the same suite file.
+/// `architecture/Tests/<slug>.lean`: parallel posts never touch the same suite file.
 fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, cmd: &str) {
     director_commit_on_branch(
         repo.path(),
@@ -77,8 +77,8 @@ fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &
     );
     write_file(
         repo.path(),
-        &format!("tests.d/{slug}.toml"),
-        &format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"{cmd}\"\n"),
+        &*tests_file(&slug),
+        &*task_suite_lean(&format!("[[check]]\nname = \"{slug}-check\"\ncmd = \"{cmd}\"\n")),
     );
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick");
@@ -209,12 +209,12 @@ fn the_player_merges_main_in_and_lands_the_accept() {
     assert_eq!(task_status(&hub, "b"), Status::Accepted);
     // Both posts' checks reach main without either touching the other's file.
     assert!(
-        hub.show_file("refs/heads/main", "tests.d/a.toml")
+        hub.show_file("refs/heads/main", &tests_file("a"))
             .unwrap()
             .contains("a-check")
     );
     assert!(
-        hub.show_file("refs/heads/main", "tests.d/b.toml")
+        hub.show_file("refs/heads/main", &tests_file("b"))
             .unwrap()
             .contains("b-check")
     );
