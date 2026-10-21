@@ -273,7 +273,10 @@ A task runs only the checks that can see its change.
 - **Modules.** `task.toml` declares `modules = [...]`, the modules and roots
   the task changes. The director sets it at plan and may change it by
   replan until the post; from the post on it is pinned. A worker that needs
-  another module blocks (§7), and the director replans.
+  another module blocks (§7), and the director replans. An ordinary task
+  always names its modules. A spike (§14), a flaky-test-fix (§15) and a
+  test-speedup (§15.1) need none: the last two work on the suite itself and
+  run the whole of it, and a spike runs no suite.
 - **Run set.** The player computes it in Lean: a generated runner applies
   `Dashboard.impacted` to the task's `modules`, so an undeclared name is a
   `plan` rejection. The run set is every check whose `covers` meets
@@ -290,8 +293,8 @@ A task runs only the checks that can see its change.
   changed since the branch last saw it)` on the merge result (§11).
 - **Where the whole suite runs.** At player start, on `main` (the
   `verify_main` run, §20), and on every director commit to `main`. A
-  failure at start holds work like an over-budget `main` (§20) until a task
-  fixes it.
+  failing `main` holds work like an over-budget one until it is fixed
+  (§20).
 - **Why a run set is enough.** Scope (§8.3) keeps a task's changes inside
   its modules, and each check's view (§6.2) keeps its test inside its
   `covers`, so a check outside the run set sees the same files before and
@@ -299,8 +302,11 @@ A task runs only the checks that can see its change.
   host) is what the start run catches.
 - **Tools.** In any clone, `dashboard scope` prints the task's modules,
   the paths its author may write (§8.3), and its run set; `dashboard test`
-  runs that run set in the player's views and jail, so an agent sees the
-  player's verdict before committing.
+  runs that run set the way the player does (views, jail, the hub's check
+  cache), so an agent sees the player's verdict before committing. With
+  `[player] runs = "queued"` the player runs it in its queue; otherwise the
+  command runs it itself, in its own worktree and views beside the
+  player's. A branch with no plan runs the whole suite.
 
 ## 7. Worker commits
 
@@ -390,7 +396,7 @@ failed validation is a rejection with the listed reason (§10).
 
 | Transition | Commit (author) | Player checks | Rejection reason |
 |---|---|---|---|
-| **plan** | new branch `task/<slug>` from `main`, adding `tasks/<slug>/task.toml` (director) | slug unused (incl. retired); `depends_on` slugs exist and aren't retired; no cycles; `modules` non-empty, each declared in `main`'s architecture (§6.6) | `plan` |
+| **plan** | new branch `task/<slug>` from `main`, adding `tasks/<slug>/task.toml` (director) | slug unused (incl. retired); `depends_on` slugs exist and aren't retired; no cycles; `modules` non-empty for an ordinary task, each a module or root of `main`'s architecture (§6.6) | `plan` |
 | **replan** | edits `tasks/<slug>/task.toml` on a not-yet-posted branch (director) | same as plan | `plan` |
 | **post** | adds `prompt.md`, the task check and its test files, `architecture/Tests/<slug>.lean`, stale-test updates (director, or its task agent §17) | all `depends_on` accepted and merged into the branch (§11); every new check's `covers` within `modules`; task check **fails** | `post` |
 | **launch** | — (player) | task check still **fails** at the tip; records pins; starts `tmux` session running `claude` in a fresh worker clone with `prompt.md` | — |
@@ -526,7 +532,8 @@ retired ones counted separately), per-phase breakdown (from
 in-flight tasks with their per-reason strike counts and review round (and,
 for a conflicted one, the conflict),
 escalated (with cause), orphaned, recent rejections, and retired tasks with
-their post-mortems.
+their post-mortems. A task's latest check results show as its run set
+(`run set (N): …`).
 
 ## 13. Parking lot
 
@@ -719,8 +726,9 @@ the slow checks, `[[slow]] check = "<suite check name>"`, and has no `[check]`
   `architecture/`, the named checks' `files` and the `test_paths` tree are
   unpinned. The worker may change those paths, and in the
   suite definition only a check's `cmd`, `retry_failed` and `retry_on`.
-  Changing `runs`, `min_pass`, `test_paths`, `list_cmd`, adding or removing a
-  check, any non-test path or `roadmap.toml` (so `[budget]`) is a `pins` strike.
+  Changing `runs`, `min_pass`, `covers`, `files`, `test_paths`, `list_cmd`,
+  adding or removing a check, any non-test path or `roadmap.toml` (so
+  `[budget]`) is a `pins` strike.
 - **Finish.** The suite must pass: a check still killed is a `budget` strike,
   and this kind is never held (it is the fix, not the held work). If the
   branch's suite is still over `suite_fail` while `main` is over budget, a
@@ -828,7 +836,7 @@ fetch is validated, as one cumulative change from the hub tip:
 | `tested` | adds `reviews/r<N>.md` + new/updated tests | the send-back row of §9 | `review` |
 | `tested` | leaves `tasks/<slug>/` alone: removes tests the task added | the trim row of §9, only when the director asks | `accept` |
 | `contested` | adds `contests/c<N>.md` + optionally fixed tests | the reply row of §18 | `ownership` |
-| any | touches a path outside its scope: `architecture/Tests/<slug>.lean`, the `files` of checks in the task's run set, the APIs whose both ends are in `modules`, the hub's `test_paths` and `tasks/<slug>/`; changes `task.toml` beyond `[check]`; any other status | — | `ownership` |
+| any | touches a path outside its scope: `architecture/Tests/<slug>.lean`, the `files` of checks in the task's run set, the APIs whose both ends are in `modules`, the hub's `test_paths`, `[player] lock_files` and `tasks/<slug>/`; changes `task.toml` beyond `[check]`; any other status | — | `ownership` |
 | any | an empty (marker) commit | — | `ownership` |
 | any | merge commit, or rewrites a commit imported from it | — | `history` |
 
@@ -932,8 +940,10 @@ guarantee.
   that writes outside its sandbox or reaches the network just fails, like any
   failing check.
 - **A clean worktree.** After each run the player looks at `git status` in
-  the worktree; a changed tracked file or a new untracked one (ignored build
-  output aside) means the check is impure. It fails whatever its exit code,
+  the worktree, and for a check that runs in a view (§6.2) in the view too
+  (a throwaway git repo carrying the worktree's `.gitignore` files); a
+  changed tracked file or a new untracked one (ignored build output aside)
+  means the check is impure. It fails whatever its exit code,
   its remaining runs are skipped, and it isn't retried. An impure check can
   never stand in for a required failure: a post whose task check is impure is
   a `post` strike, a send-back whose suite fails only impurely a `review`
@@ -990,6 +1000,16 @@ held finish is released, as for impurity, once the new policy has `main` under
 budget (one tick after the director's commit, as `[budget]` is read from
 `main`'s tip). A `test-speedup` (§15.1) is judged by its ratchet, not held.
 Checks are matched by name.
+
+**A failing `main`.** The same rule covers a check that fails on `main`
+(a check whose run set never ran it, a change in the toolchain or host).
+`verify_main` records the failing checks; a failing `main` is reported once
+per main tip (`main_failing`) and shown in `status` ("Failing on main"). A
+suite that fails *only* on checks that also fail on `main` is held like an
+impure one: a director commit on `main` imports (it may be the fix), a
+finish or accept is held with no strike, and a send-back on such a failure
+is no evidence. A commit that adds a failure of its own is judged as usual.
+Held work is released once those checks pass on `main`.
 
 Not enforced: determinism and order independence (a clock, unseeded
 randomness, state shared through a `writable` path). The task agent's review
