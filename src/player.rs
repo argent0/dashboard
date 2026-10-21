@@ -613,6 +613,8 @@ pub struct TickReport {
     /// `main`'s suite is over its `[budget]` (a check killed, or the total
     /// past `suite_fail`), when newly found: one line.
     pub main_over_budget: Vec<String>,
+    /// `main`'s suite fails, when newly found on a tip: its summary.
+    pub main_failing: Vec<String>,
     /// Finishes and accepts held because they fail only on checks already
     /// impure or over budget on `main`: (slug, message).
     pub held: Vec<(String, String)>,
@@ -637,6 +639,7 @@ impl TickReport {
             && self.agent_reports.is_empty()
             && self.main_impure.is_empty()
             && self.main_over_budget.is_empty()
+            && self.main_failing.is_empty()
             && self.held.is_empty()
             && self.speedups.is_empty()
             && self.slow.is_empty()
@@ -684,6 +687,9 @@ impl fmt::Display for TickReport {
         }
         for line in &self.main_over_budget {
             lines.push(format!("main over budget: {line}"));
+        }
+        for line in &self.main_failing {
+            lines.push(format!("main failing: {}", first_line(line)));
         }
         for (slug, msg) in &self.held {
             lines.push(format!("held {slug}: {msg}"));
@@ -763,6 +769,12 @@ pub struct Player<S: Sessions> {
     /// `suite_fail`) as of this tick's `verify_main`: work failing only on
     /// these, or only through the total, is held.
     main_over: Option<checks::Overrun>,
+    /// The checks failing on `main` as of this tick's `verify_main`: work
+    /// failing only on these is held, like on an impure check.
+    main_failed: BTreeSet<String>,
+    /// `main`'s failing suite (tip, summary), and the tip last reported.
+    main_failing: Option<(String, String)>,
+    failing_told: Option<String>,
     /// The main tip whose overrun was last reported.
     over_told: Option<String>,
     /// The main tip whose slowness was last reported.
@@ -815,6 +827,9 @@ impl<S: Sessions> Player<S> {
             main_impure: BTreeMap::new(),
             main_slow: None,
             main_over: None,
+            main_failed: BTreeSet::new(),
+            main_failing: None,
+            failing_told: None,
             over_told: None,
             slow_told: None,
             main_verified: String::new(),
@@ -844,6 +859,8 @@ impl<S: Sessions> Player<S> {
             .slow(&self.runner.budget())
             .map(|msg| (main_tip.clone(), msg));
         self.main_over = suite.budget_overrun(&self.runner.budget());
+        self.main_failed = suite.checks.iter().filter(|c| !c.pass).map(|c| c.name.clone()).collect();
+        self.main_failing = (!suite.pass).then(|| (main_tip.clone(), suite.summary()));
         self.main_verified = main_tip;
         Ok(&self.main_impure)
     }
@@ -856,6 +873,14 @@ impl<S: Sessions> Player<S> {
                 self.slow_told = Some(tip.clone());
                 report.slow.push(("_main".to_string(), msg.clone()));
             }
+        }
+        match &self.main_failing {
+            Some((tip, summary)) if self.failing_told.as_ref() != Some(tip) => {
+                self.failing_told = Some(tip.clone());
+                report.main_failing.push(summary.clone());
+            }
+            Some(_) => {}
+            None => self.failing_told = None,
         }
         match &self.main_over {
             Some(over) if self.over_told.as_ref() != Some(&self.main_verified) => {
@@ -886,10 +911,11 @@ impl<S: Sessions> Player<S> {
     }
 
     /// Whether failing check `c` is the same failure `main` already has:
-    /// impure there too, or killed for its timeout there too (matched by
-    /// name).
+    /// impure there too, killed for its timeout there too, or failing there
+    /// (matched by name).
     fn bad_on_main(&self, c: &checks::CheckResult) -> bool {
-        (c.impurity().is_some() && self.main_impure.contains_key(&c.name))
+        (!c.pass && self.main_failed.contains(&c.name))
+            || (c.impurity().is_some() && self.main_impure.contains_key(&c.name))
             || (c.timed_out
                 && self
                     .main_over
@@ -950,10 +976,8 @@ impl<S: Sessions> Player<S> {
             let Some(candidate) = records::held_commit(&self.hub, &slug) else {
                 continue;
             };
-            if self
-                .held_reason(&self.runner.run_suite(&candidate))
-                .is_some()
-            {
+            let tip = self.hub.rev_parse(&format!("refs/heads/task/{slug}"));
+            if self.held_reason(&self.run_task_set(&slug, &candidate, tip.as_deref())).is_some() {
                 continue;
             }
             let hub_ref = format!("refs/heads/task/{slug}");
@@ -1182,6 +1206,9 @@ impl<S: Sessions> Player<S> {
         }
         for line in &report.main_over_budget {
             events::append(&self.home, EventKind::MainOverBudget, None, line)?;
+        }
+        for line in &report.main_failing {
+            events::append(&self.home, EventKind::MainFailing, None, line)?;
         }
         for (slug, msg) in &report.held {
             events::append(&self.home, EventKind::Held, Some(slug), msg)?;
@@ -1707,6 +1734,23 @@ impl<S: Sessions> Player<S> {
     /// The suite at `commit` (`records::suite_at`), exported on a miss.
     fn suite_at(&self, commit: &str) -> Result<config::Suite, String> {
         records::suite_at(&self.hub, commit, Some(self.runner.exporter()))
+    }
+
+    /// The run set of `slug` at `commit` (spec §6.6): the modules of its
+    /// plan (task.toml at the hub tip, pinned since the post), through
+    /// `Runner::run_set_for`.
+    fn run_set_for(&self, slug: &str, commit: &str, diff_from: Option<&str>) -> Result<checks::RunSet, String> {
+        let tip = self.hub.rev_parse(&format!("refs/heads/task/{slug}")).unwrap_or_else(|| commit.to_string());
+        let modules = records::task_config_at(&self.hub, &tip, slug).map(|c| c.modules).unwrap_or_default();
+        self.runner.run_set_for(commit, &modules, diff_from)
+    }
+
+    /// Runs `slug`'s run set at `commit`; a set that can't be built fails.
+    fn run_task_set(&self, slug: &str, commit: &str, diff_from: Option<&str>) -> checks::SuiteResult {
+        match self.run_set_for(slug, commit, diff_from) {
+            Ok(set) => self.runner.run_set(commit, &set),
+            Err(e) => checks::SuiteResult::failing(e),
+        }
     }
 
     /// The suite's `test_paths` at `commit`; none when it doesn't load.
@@ -2714,6 +2758,15 @@ impl<S: Sessions> Player<S> {
                 ));
             }
         } else {
+            // A task's checks test what it changes: within its modules.
+            for c in &own {
+                if c.all {
+                    return Err(format!("post: task/{slug}: check {} in {tests_path} covers all; a task's checks cover its modules ({})", c.name, cfg.modules.join(", ")));
+                }
+                if let Some(n) = c.covers.iter().find(|n| !cfg.modules.contains(n)) {
+                    return Err(format!("post: task/{slug}: check {} in {tests_path} covers {n}, outside the task's modules ({})", c.name, cfg.modules.join(", ")));
+                }
+            }
             // The check must live in the task's own file, not Tests.lean, so
             // parallel posts never edit the same file.
             if !own.iter().any(|c| {
@@ -2821,11 +2874,11 @@ impl<S: Sessions> Player<S> {
             return Ok(());
         }
 
-        let suite = self.runner.run_suite(candidate);
+        let suite = self.run_task_set(slug, candidate, Some(tip));
         self.note_ledgers(slug, candidate, &suite);
         if suite.pass {
             let msg = format!(
-                "send-back: task/{slug}: send-back without evidence: the project suite still passes"
+                "send-back: task/{slug}: send-back without evidence: the task's run set still passes"
             );
             return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
@@ -2941,11 +2994,11 @@ impl<S: Sessions> Player<S> {
             return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
         }
 
-        let suite = self.runner.run_suite(candidate);
+        let suite = self.run_task_set(slug, candidate, Some(tip));
         self.note_ledgers(slug, candidate, &suite);
         if !suite.pass {
             let msg = format!(
-                "trim: task/{slug}: the suite fails without the trimmed tests\n{}",
+                "trim: task/{slug}: the run set fails without the trimmed tests\n{}",
                 suite.summary()
             );
             return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
@@ -3149,6 +3202,37 @@ impl<S: Sessions> Player<S> {
     /// into `main` (`--no-ff`, `Task: <slug>` trailer) once the suite passes
     /// on the result. A suite that fails only because of the merge sends the
     /// task back to the worker (`sync_revision`, no review round spent).
+    /// What landing `slug` runs on `merge_sha` (spec §11): the run set of
+    /// the task's modules plus every module whose paths `main` changed since
+    /// the merge base; the whole suite when either side touched `shared`.
+    fn landing_set(&self, slug: &str, candidate: &str, main_tip: &str, merge_sha: &str) -> Result<checks::RunSet, String> {
+        let tip = self.hub.rev_parse(&format!("refs/heads/task/{slug}")).unwrap_or_else(|| candidate.to_string());
+        let mut modules = records::task_config_at(&self.hub, &tip, slug).map(|c| c.modules).unwrap_or_default();
+        if modules.is_empty() {
+            return self.runner.run_set_for(merge_sha, &[], None);
+        }
+        let base = self.hub.run(&["merge-base", main_tip, candidate]).map_err(|e| e.to_string())?;
+        let e = records::exported_at(&self.hub, merge_sha, Some(self.runner.exporter()))?
+            .ok_or_else(|| format!("no {} at {merge_sha}", config::ARCH_LEAN_MANIFEST))?;
+        let main_diff: Vec<String> = self.hub.diff_names(&base, main_tip).into_iter().map(|(_, p)| p).collect();
+        for m in &e.arch.modules {
+            if !modules.contains(&m.name) && main_diff.iter().any(|p| path_under_test_paths(p, &m.paths)) {
+                modules.push(m.name.clone());
+            }
+        }
+        let task_diff = self.hub.diff_names(&base, candidate);
+        if let Some(p) = main_diff
+            .iter()
+            .chain(task_diff.iter().map(|(_, p)| p))
+            .find(|p| path_under_test_paths(p, &e.arch.shared))
+        {
+            return Ok(checks::RunSet::whole(e.suite.checks, &format!("the whole suite ({p} is shared)")));
+        }
+        let mut set = self.runner.run_set_for(merge_sha, &modules, None)?;
+        set.why = format!("the run set of {}", modules.join(", "));
+        Ok(set)
+    }
+
     fn land(
         &mut self,
         slug: &str,
@@ -3244,7 +3328,12 @@ impl<S: Sessions> Player<S> {
             .commit_tree(&tree, &[&main_tip, &head], &message)
             .map_err(|e| e.to_string())?;
 
-        let suite = self.runner.run_suite(&merge_sha);
+        let set = self.landing_set(slug, candidate, &main_tip, &merge_sha);
+        let suite = match &set {
+            Ok(set) => self.runner.run_set(&merge_sha, set),
+            Err(e) => checks::SuiteResult::failing(e.clone()),
+        };
+        let why = set.map(|s| s.why).unwrap_or_default();
         self.note_ledgers(slug, &merge_sha, &suite);
         if !suite.pass {
             // Not the work's fault, nor the merge's: leave the marker
@@ -3255,7 +3344,7 @@ impl<S: Sessions> Player<S> {
                     report.held.push((
                         slug.to_string(),
                         format!(
-                            "{} {} fails only on checks already bad on main (impure or killed): {}",
+                            "{} {} fails only on checks already bad on main (failing, impure or killed): {}",
                             transition.as_str(),
                             short(candidate),
                             names.join(", ")
@@ -3315,7 +3404,7 @@ impl<S: Sessions> Player<S> {
             report.merge_failed.push((
                 slug.to_string(),
                 format!(
-                    "the suite fails with main merged into task/{slug}; back to the worker\n{}",
+                    "{why} fails with main merged into task/{slug}; back to the worker\n{}",
                     suite.summary()
                 ),
             ));
@@ -4747,7 +4836,7 @@ impl<S: Sessions> Player<S> {
             }
         }
 
-        let suite = self.runner.run_suite(candidate);
+        let suite = self.run_task_set(slug, candidate, Some(hub_tip));
         self.note_ledgers(slug, candidate, &suite);
         if !suite.pass {
             // Failing only where main already fails (impurely, or killed for
@@ -4879,7 +4968,7 @@ impl<S: Sessions> Player<S> {
             report.held.push((
                 slug.to_string(),
                 format!(
-                    "finish {} fails only where main already does (impure or over budget): {checks}",
+                    "finish {} fails only where main already does (failing, impure or over budget): {checks}",
                     short(candidate)
                 ),
             ));

@@ -108,7 +108,7 @@ fn accept(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) ->
 }
 
 /// `a` and `b` both posted at once and finished; `a` accepted first, so
-/// `main` moved under `b`. With `conflict`, both also wrote `shared.txt`
+/// `main` moved under `b`. With `conflict`, both also wrote `src/shared.txt`
 /// differently, so `b` can't take `main` in cleanly.
 fn a_accepted_beside_b(
     repo: &DirectorRepo,
@@ -119,10 +119,10 @@ fn a_accepted_beside_b(
     conflict: bool,
 ) {
     plan_and_post(repo, player, "a", a_cmd);
-    plan_and_post(repo, player, "b", "test -f b.txt");
+    plan_and_post(repo, player, "b", "test -f src/b.txt");
     let shared = |who: &'static str| {
         if conflict {
-            vec![("shared.txt", who)]
+            vec![("src/shared.txt", who)]
         } else {
             Vec::new()
         }
@@ -131,13 +131,13 @@ fn a_accepted_beside_b(
         home,
         hub,
         "a",
-        &[shared("from a\n"), vec![("a.txt", "done\n")]].concat(),
+        &[shared("from a\n"), vec![("src/a.txt", "done\n")]].concat(),
     );
     finish(
         home,
         hub,
         "b",
-        &[shared("from b\n"), vec![("b.txt", "done\n")]].concat(),
+        &[shared("from b\n"), vec![("src/b.txt", "done\n")]].concat(),
     );
     let report = accept(repo, player, "a");
     assert!(report.rejected.is_empty(), "{report}");
@@ -145,7 +145,7 @@ fn a_accepted_beside_b(
 }
 
 /// The director's resolution of `b`'s conflict: merges `main_commit` into
-/// its branch and resolves shared.txt by keeping both lines, plus any
+/// its branch and resolves src/shared.txt by keeping both lines, plus any
 /// `extra` edits. Doesn't tick.
 fn resolve_b(repo: &DirectorRepo, main_commit: &str, extra: &[(&str, &str)]) -> String {
     director_pull_task_branch(repo.path(), "b");
@@ -153,9 +153,9 @@ fn resolve_b(repo: &DirectorRepo, main_commit: &str, extra: &[(&str, &str)]) -> 
     git.run(&["fetch", "-q", "hub"]).expect("fetch hub");
     assert!(
         git.run(&["merge", "-q", "--no-edit", main_commit]).is_err(),
-        "shared.txt should conflict"
+        "src/shared.txt should conflict"
     );
-    write_file(repo.path(), "shared.txt", "from a\nfrom b\n");
+    write_file(repo.path(), "src/shared.txt", "from a\nfrom b\n");
     for (path, content) in extra {
         write_file(repo.path(), path, content);
     }
@@ -175,8 +175,8 @@ fn two_tasks_can_be_in_flight_at_once() {
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
 
-    plan_and_post(&repo, &mut player, "a", "test -f a.txt");
-    plan_and_post(&repo, &mut player, "b", "test -f b.txt");
+    plan_and_post(&repo, &mut player, "a", "test -f src/a.txt");
+    plan_and_post(&repo, &mut player, "b", "test -f src/b.txt");
     assert_eq!(
         player
             .sessions()
@@ -194,7 +194,7 @@ fn the_player_merges_main_in_and_lands_the_accept() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", false);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f src/a.txt", false);
 
     let report = accept(&repo, &mut player, "b");
     assert!(report.rejected.is_empty(), "{report}");
@@ -232,7 +232,7 @@ fn a_merge_that_fails_the_suite_goes_back_to_the_worker() {
         &home,
         &hub,
         &mut player,
-        "test -f a.txt && test ! -f b.txt",
+        "test -f src/a.txt && test ! -f src/b.txt",
         false,
     );
     let main_before = hub.rev_parse("refs/heads/main");
@@ -276,7 +276,7 @@ fn a_conflict_stops_the_accept_and_a_targeted_resolution_lands_it() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f src/a.txt", true);
     let main_tip = hub.rev_parse("refs/heads/main").unwrap();
 
     let report = accept(&repo, &mut player, "b");
@@ -289,11 +289,11 @@ fn a_conflict_stops_the_accept_and_a_targeted_resolution_lands_it() {
     assert_eq!(b.status, Status::Conflicted);
     let conflict = b.conflict.expect("conflict recorded");
     assert_eq!(conflict.main, main_tip);
-    assert_eq!(conflict.paths, vec!["shared.txt".to_string()]);
+    assert_eq!(conflict.paths, vec!["src/shared.txt".to_string()]);
     let ev = events_of(&home, EventKind::Conflict);
     assert_eq!(ev.len(), 1);
     assert!(
-        ev[0].message.contains(&main_tip) && ev[0].message.contains("shared.txt"),
+        ev[0].message.contains(&main_tip) && ev[0].message.contains("src/shared.txt"),
         "{}",
         ev[0].message
     );
@@ -318,7 +318,7 @@ fn declare_lock_regen(repo: &DirectorRepo, regen: &str) {
         repo.path(),
         "roadmap.toml",
         &format!(
-            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}\n[player.lock_regen]\n\"shared.txt\" = \"{regen}\"\n"
+            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}\n[player.lock_regen]\n\"src/shared.txt\" = \"{regen}\"\n"
         ),
     );
     commit(repo.path(), "declare lock_regen");
@@ -327,17 +327,17 @@ fn declare_lock_regen(repo: &DirectorRepo, regen: &str) {
 #[test]
 fn a_conflict_only_in_a_lock_regen_file_is_resolved_by_the_player() {
     let repo = director_repo();
-    declare_lock_regen(&repo, "cat shared.txt > /dev/null; printf 'regenerated\\n' > shared.txt");
+    declare_lock_regen(&repo, "cat src/shared.txt > /dev/null; printf 'regenerated\\n' > src/shared.txt");
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f src/a.txt", true);
 
     let report = accept(&repo, &mut player, "b");
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(task_status(&hub, "b"), Status::Accepted, "{report}");
     assert!(events_of(&home, EventKind::Conflict).is_empty());
-    let shared = hub.show_file("refs/heads/main", "shared.txt").unwrap();
+    let shared = hub.show_file("refs/heads/main", "src/shared.txt").unwrap();
     assert_eq!(shared.trim(), "regenerated");
 }
 
@@ -348,7 +348,7 @@ fn a_failing_lock_regen_leaves_the_conflict_to_the_director() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f src/a.txt", true);
 
     let report = accept(&repo, &mut player, "b");
     assert_eq!(task_status(&hub, "b"), Status::Conflicted, "{report}");
@@ -372,7 +372,7 @@ fn a_resolution_must_merge_the_recorded_main_commit() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f src/a.txt", true);
     let conflicted_with = hub.rev_parse("refs/heads/main").unwrap();
     accept(&repo, &mut player, "b");
     assert_eq!(task_status(&hub, "b"), Status::Conflicted);
@@ -424,7 +424,7 @@ fn a_resolution_may_not_change_paths_git_merged_cleanly() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f src/a.txt", true);
     let main_tip = hub.rev_parse("refs/heads/main").unwrap();
     accept(&repo, &mut player, "b");
     let tip_before = hub.rev_parse("refs/heads/task/b");
@@ -432,13 +432,13 @@ fn a_resolution_may_not_change_paths_git_merged_cleanly() {
     resolve_b(
         &repo,
         &main_tip,
-        &[("a.txt", "the director rewriting a's code\n")],
+        &[("src/a.txt", "the director rewriting a's code\n")],
     );
     let report = player.tick().expect("resolve tick");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Ownership);
     assert!(
-        report.rejected[0].message.contains("a.txt"),
+        report.rejected[0].message.contains("src/a.txt"),
         "{}",
         report.rejected[0].message
     );
@@ -452,14 +452,14 @@ fn a_director_merge_without_a_recorded_conflict_is_history() {
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
-    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f a.txt", true);
+    a_accepted_beside_b(&repo, &home, &hub, &mut player, "test -f src/a.txt", true);
 
     // b is tested and behind main, but merging main in is the player's job.
     director_pull_task_branch(repo.path(), "b");
     let git = Git::new(repo.path());
     git.run(&["fetch", "-q", "hub"]).unwrap();
     assert!(git.run(&["merge", "-q", "--no-edit", "hub/main"]).is_err());
-    write_file(repo.path(), "shared.txt", "from a\nfrom b\n");
+    write_file(repo.path(), "src/shared.txt", "from a\nfrom b\n");
     commit(repo.path(), "unasked merge");
 
     let report = player.tick().expect("tick");

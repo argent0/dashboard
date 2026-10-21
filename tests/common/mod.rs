@@ -318,8 +318,8 @@ fn lean_strs(xs: &[String]) -> String {
 
 /// The checks of a TOML suite text (`test_paths`, `list_cmd`, `[[check]]`
 /// tables, as the fixtures wrote them before the suite moved to Lean) as
-/// Lean declarations; a check without `covers` gets `covers = all`.
-fn lean_checks(toml_text: &str, with_block: bool) -> String {
+/// Lean declarations; a check without `covers` gets `default_covers`.
+fn lean_checks(toml_text: &str, with_block: bool, default_covers: &str) -> String {
     let t: toml::Table = toml::from_str(toml_text).expect("fixture suite TOML");
     let mut out = String::from("import Architecture\nopen Dashboard\n\n");
     if with_block {
@@ -354,7 +354,7 @@ fn lean_checks(toml_text: &str, with_block: bool) -> String {
             out.push_str(&format!("  {k} = {val}\n"));
         }
         if !c.contains_key("covers") {
-            out.push_str("  covers = all\n");
+            out.push_str(&format!("  covers = {default_covers}\n"));
         }
         out.push('\n');
     }
@@ -364,10 +364,11 @@ fn lean_checks(toml_text: &str, with_block: bool) -> String {
 /// `Tests.lean` from a TOML suite text (its `[[check]]`s, `test_paths`
 /// and `list_cmd`).
 pub fn suite_lean(toml_text: &str) -> String {
-    lean_checks(toml_text, true)
+    lean_checks(toml_text, true, "all")
 }
 
-/// A per-task suite file (`Tests/<slug>.lean`) from `[[check]]` TOML.
+/// A per-task suite file (`Tests/<slug>.lean`) from `[[check]]` TOML;
+/// its checks cover the fixture tasks' module, `app`.
 pub fn task_suite_lean(toml_text: &str) -> String {
-    lean_checks(toml_text, false)
+    lean_checks(toml_text, false, "[app]")
 }

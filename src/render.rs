@@ -539,6 +539,13 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
         out.push(String::new());
     }
 
+    // ---- main failing ----
+    if !state.main_failing.is_empty() {
+        out.push(style("Failing on main — work failing only on these is held", &[c::BOLD, c::RED], color));
+        out.push(format!("  {}", truncate(&state.main_failing.join(", "), width.saturating_sub(4).max(10))));
+        out.push(String::new());
+    }
+
     // ---- main over its budget ----
     if !state.main_over_budget.is_empty() {
         out.push(style(
@@ -867,7 +874,8 @@ fn render_in_flight(
                 out.push(format!("  claims: {}", format_suite(&claims)));
             }
         } else {
-            out.push(format!("  suite: {}", format_suite(suite)));
+            // What the player ran at the tip: the task's run set (spec §6.6).
+            out.push(format!("  run set ({}): {}", suite.checks.len(), format_suite(suite)));
         }
     }
 
@@ -1015,6 +1023,7 @@ mod tests {
             impurities: vec![],
             main_impure: vec![],
             main_over_budget: vec![],
+            main_failing: vec![],
             budget_raises: vec![],
             held: vec![],
             project: "widget".to_string(),

@@ -312,11 +312,12 @@ FAKE_TASK_AGENT_EOF
 # --------------------------------------------------------------------------
 
 # A Lean suite file at $1 holding one check named $2 running $3, covering
-# the whole project.
+# $4 (default `[app]`, the tasks' root; `all` for the whole project) with
+# the extra lines $5.
 task_tests() {
   mkdir -p "$(dirname "$1")"
   esc=$(printf '%s' "$3" | sed 's/\\/\\\\/g; s/"/\\"/g')
-  printf 'import Architecture\nopen Dashboard\n\ncheck «%s» where\n  cmd = "%s"\n  covers = all\n' "$2" "$esc" >"$1"
+  printf 'import Architecture\nopen Dashboard\n\ncheck «%s» where\n  cmd = "%s"\n  covers = %s\n%s' "$2" "$esc" "${4:-[app]}" "${5:-}" >"$1"
 }
 
 mkdir -p "$AGENT_LOGS"
@@ -345,7 +346,7 @@ EOF
 # The Lean package every project has: the starter of `dashboard arch gen`,
 # with a suite of one check.
 "$BIN" arch gen --root "$DIR_REPO" >/dev/null
-task_tests "$DIR_REPO/architecture/Tests.lean" baseline true
+task_tests "$DIR_REPO/architecture/Tests.lean" baseline true all
 # One root, `app`, for the tasks to name in `modules`: it owns the files
 # the fake workers write (a worker writes only inside its task's modules).
 APP_ROOT='
@@ -861,11 +862,12 @@ arch_cmd="mkdir -p cache && echo ok > cache/built && $BIN arch check --root ."
 mkdir -p "$TA_TEMPLATES/zeta/tasks/zeta"
 echo "Create zeta/lib.rs and zeta/zeta.txt." >"$TA_TEMPLATES/zeta/tasks/zeta/prompt.md"
 printf '#!/bin/sh\nmkdir -p zeta\necho "pub fn z() {}" > zeta/lib.rs\necho ok > zeta/zeta.txt\n' >"$TA_TEMPLATES/zeta/tasks/zeta/agent.sh"
-task_tests "$TA_TEMPLATES/zeta/architecture/Tests/zeta.lean" zeta-arch "$arch_cmd"
+task_tests "$TA_TEMPLATES/zeta/architecture/Tests/zeta.lean" zeta-arch "$arch_cmd" "[zeta, app]" '  files = ["architecture"]
+'
 
 git -C "$DIR_REPO" checkout -q -b task/zeta main
 mkdir -p "$DIR_REPO/tasks/zeta"
-printf 'title = "zeta"\nphase = "p1"\nmodules = ["zeta"]\nbrief = "a module test in a view with a linked cache"\n\n[check]\nname = "zeta-arch"\ncmd = "%s"\n' "$arch_cmd" >"$DIR_REPO/tasks/zeta/task.toml"
+printf 'title = "zeta"\nphase = "p1"\nmodules = ["zeta", "app"]\nbrief = "a module test in a view with a linked cache"\n\n[check]\nname = "zeta-arch"\ncmd = "%s"\n' "$arch_cmd" >"$DIR_REPO/tasks/zeta/task.toml"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: zeta"
 wait_until "zeta is ready" task_status_is zeta ready

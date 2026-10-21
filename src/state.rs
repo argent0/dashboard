@@ -152,6 +152,9 @@ pub struct HubState {
     /// for its timeout, or the total past `suite_fail`), one line each;
     /// empty when it isn't. Work failing only there is held too.
     pub main_over_budget: Vec<String>,
+    /// Checks failing on `main` (cached under the current policy), beyond
+    /// the impure and killed ones: work failing only on them is held.
+    pub main_failing: Vec<String>,
     /// Every budget raise the director committed (architect-v3.md), oldest first.
     pub budget_raises: Vec<crate::raise::Raise>,
     /// Tasks whose finish is held on those checks (`refs/dashboard/held/*`).
@@ -193,6 +196,11 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
             let evidence = r.impure_evidence();
             (r.name, evidence)
         })
+        .collect();
+    let main_failing = checks::cached(hub, &main_tip)
+        .into_iter()
+        .filter(|r| !r.pass && r.isolation == isolation && r.impurity().is_none() && !r.timed_out)
+        .map(|r| r.name)
         .collect();
     let main_over_budget = {
         let results: Vec<checks::CheckResult> = checks::cached(hub, &main_tip)
@@ -298,6 +306,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         impurities,
         main_impure,
         main_over_budget,
+        main_failing,
         budget_raises: records::budget_raises(hub),
         held: records::held_slugs(hub),
         project,

@@ -1197,28 +1197,41 @@ check story where\n  cmd = \"sh stories/s.sh\"\n  covers = [a, b]\n  files = [\"
 /// A hub on the `a`/`b` architecture with `slug` planned on `modules =
 /// ["a"]` and posted (task check `test -f a/feature.txt`, covering `a`).
 fn scoped(slug: &str) -> (DirectorRepo, TempDir, Home, Player<NullSessions>) {
+    scoped_with(slug, &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), AB_SUITE)
+}
+
+/// `scoped` with another manifest and main suite.
+fn scoped_with(slug: &str, manifest: &str, suite: &str) -> (DirectorRepo, TempDir, Home, Player<NullSessions>) {
     let repo = director_repo();
-    write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[("Tests", AB_SUITE)]);
+    write_lean_arch(repo.path(), manifest, &[("ab", LEAN_AB_IDL)], &[("Tests", suite)]);
     for (f, t) in [("a/lib.rs", "pub fn f() {}\n"), ("b/lib.rs", "pub fn g() {}\n"), ("api/.keep", ""), ("stories/s.sh", "true\n")] {
         write_file(repo.path(), f, t);
     }
     commit(repo.path(), "modules a and b");
     let (home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
-    let plan_toml = format!("title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"a\"]\n");
-    plan(&repo, &mut player, slug, &plan_toml);
+    plan_and_post_on(&repo, &mut player, slug, "a");
+    (repo, home_dir, home, player)
+}
+
+/// Plans `slug` on `modules = [module]` and posts it (task check `test -f
+/// <module>/feature.txt`, covering `module`), asserting the launch.
+fn plan_and_post_on(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str, module: &str) {
+    let plan_toml = format!("title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"{module}\"]\n");
+    checkout_branch(repo.path(), "main");
+    plan(repo, player, slug, &plan_toml);
     checkout_branch(repo.path(), &format!("task/{slug}"));
     write_file(repo.path(), &format!("tasks/{slug}/prompt.md"), "do the thing\n");
+    let cmd = format!("test -f {module}/feature.txt");
     write_file(
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
-        &format!("{plan_toml}\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f a/feature.txt\"\n"),
+        &format!("{plan_toml}\n[check]\nname = \"{slug}-check\"\ncmd = \"{cmd}\"\n"),
     );
-    write_file(repo.path(), &tests_file(slug), &lean_task_tests(&format!("{slug}-check"), "test -f a/feature.txt", "[a]"));
+    write_file(repo.path(), &tests_file(slug), &lean_task_tests(&format!("{slug}-check"), &cmd, &format!("[{module}]")));
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick");
     assert_eq!(report.launched, vec![slug.to_string()], "{report}");
-    (repo, home_dir, home, player)
 }
 
 fn worker_file(slug: &str) -> String {
@@ -1286,4 +1299,111 @@ fn the_post_and_pinned_check_files_stay_pinned() {
         assert_eq!(report.rejected.len(), 1, "{what}: {report}");
         assert_eq!(report.rejected[0].reason, Reason::Pins, "{what}: {report}");
     }
+}
+
+// --------------------------------------------------------------------------
+// Run sets (spec §6.6, §11)
+// --------------------------------------------------------------------------
+
+/// `LEAN_AB_MANIFEST` with `shared = ["Cargo.toml"]`.
+fn ab_shared() -> String {
+    format!("{}{APP_ROOT}", LEAN_AB_MANIFEST.replace("max_modules = 2\n", "max_modules = 2\n  shared = [\"Cargo.toml\"]\n"))
+}
+
+/// Main's suite: `unit` (all) and `b_only` covering `b`, which fails
+/// once `a/feature.txt` and `b/moved.txt` both exist in the tree.
+const RUN_SET_SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+check unit where\n  cmd = \"true\"\n  covers = all\n\n\
+check b_only where\n  cmd = \"test ! -e \\\"$DASHBOARD_ROOT/a/feature.txt\\\" || test ! -e b/moved.txt\"\n  covers = [b]\n";
+
+#[test]
+fn a_post_check_covers_only_the_task_modules() {
+    let repo = director_repo();
+    write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[("Tests", AB_SUITE)]);
+    for (f, t) in [("a/lib.rs", ""), ("b/lib.rs", ""), ("api/.keep", ""), ("stories/s.sh", "true\n")] {
+        write_file(repo.path(), f, t);
+    }
+    commit(repo.path(), "modules a and b");
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    let plan_toml = "title = \"o\"\nphase = \"p1\"\nmodules = [\"a\"]\n";
+    plan(&repo, &mut player, "o", plan_toml);
+    write_file(repo.path(), "tasks/o/prompt.md", "x\n");
+    write_file(repo.path(), "tasks/o/task.toml", &format!("{plan_toml}\n[check]\nname = \"o-check\"\ncmd = \"test -f b/x\"\n"));
+    write_file(repo.path(), &tests_file("o"), &lean_task_tests("o-check", "test -f b/x", "[b]"));
+    commit(repo.path(), "post: o");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Post);
+    assert!(report.rejected[0].message.contains("covers b, outside the task's modules"), "{report}");
+}
+
+#[test]
+fn a_finish_runs_its_run_set_unless_it_touches_shared() {
+    // b_only fails on this branch (it has a/feature.txt), outside the run
+    // set of an `a` task: the finish is tested.
+    let fails_with_a = RUN_SET_SUITE.replace(" || test ! -e b/moved.txt", "");
+    let (repo, _home_dir, home, mut player) = scoped_with("rs", &ab_shared(), &fails_with_a);
+    let hub = Git::new(home.hub());
+    commit_multi_in_clone(&repo, "rs", &[("a/feature.txt", "x\n")], "finish");
+    let report = player.tick().expect("tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(task_status(&hub, "rs"), Status::Tested);
+    let st = state::derive(&hub, &|_| false).unwrap();
+    let text = dashboard::render::render(&st, &[], false, 200);
+    assert!(text.contains("run set (2): "), "{text}");
+    let tip = hub.rev_parse("refs/heads/task/rs").unwrap();
+    let ran: Vec<String> = dashboard::checks::cached(&hub, &tip).into_iter().map(|r| r.name).collect();
+    assert!(!ran.contains(&"b_only".to_string()), "{ran:?}");
+
+    // Touching `shared` runs the whole suite: b_only fails it.
+    let (repo, _home_dir, _home, mut player) = scoped_with("sh", &ab_shared(), RUN_SET_SUITE);
+    commit_multi_in_clone(&repo, "sh", &[("a/feature.txt", "x\n"), ("b/moved.txt", "")], "finish, b too");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected[0].reason, Reason::Scope, "{report}");
+    let (repo, _home_dir, _home, mut player) = scoped_with("sh", &ab_shared(), &RUN_SET_SUITE.replace("test ! -e b/moved.txt", "test ! -e Cargo.toml"));
+    commit_multi_in_clone(&repo, "sh", &[("a/feature.txt", "x\n"), ("Cargo.toml", "[package]\n")], "finish with a shared file");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Suite, "{report}");
+    assert!(report.rejected[0].message.contains("b_only"), "{report}");
+}
+
+#[test]
+fn landing_adds_the_modules_main_changed() {
+    // `bt` (on b) lands b/moved.txt first; `at` (on a) then lands on a main
+    // that moved in b, so its landing runs b_only, which fails on the merge.
+    let (repo, _home_dir, home, mut player) = scoped_with("at", &ab_shared(), RUN_SET_SUITE);
+    let hub = Git::new(home.hub());
+    plan_and_post_on(&repo, &mut player, "bt", "b");
+    commit_multi_in_clone(&repo, "bt", &[("b/feature.txt", "x\n"), ("b/moved.txt", "")], "finish b");
+    commit_multi_in_clone(&repo, "at", &[("a/feature.txt", "x\n")], "finish a");
+    let report = player.tick().expect("tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    for slug in ["bt", "at"] {
+        assert_eq!(task_status(&hub, slug), Status::Tested, "{slug}");
+        director_pull_task_branch(repo.path(), slug);
+        commit_empty(repo.path(), &format!("accept: {slug}"));
+        player.tick().expect("accept tick");
+    }
+    assert_eq!(task_status(&hub, "bt"), Status::Accepted);
+    assert_eq!(task_status(&hub, "at"), Status::InRevision);
+    let relayed = player.sessions().sent.iter().filter(|(k, _)| k == "at").map(|(_, m)| m.clone()).collect::<Vec<_>>().join("\n");
+    assert!(relayed.contains("b_only"), "{relayed}");
+}
+
+#[test]
+fn a_finish_failing_only_where_main_fails_is_held() {
+    let suite = RUN_SET_SUITE.replace("check unit where\n  cmd = \"true\"", "check unit where\n  cmd = \"false\"");
+    let (repo, _home_dir, home, mut player) = scoped_with("mf", &ab_shared(), &suite);
+    let hub = Git::new(home.hub());
+    let report = player.tick().expect("tick");
+    assert!(report.main_failing.is_empty(), "reported on the first tick already");
+    let failing = dashboard::events::read_all(&home).into_iter().filter(|e| e.kind == dashboard::events::EventKind::MainFailing).count();
+    assert_eq!(failing, 1);
+    commit_multi_in_clone(&repo, "mf", &[("a/feature.txt", "x\n")], "finish");
+    let report = player.tick().expect("tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(report.held.len(), 1, "{report}");
+    assert!(records::held_commit(&hub, "mf").is_some());
 }

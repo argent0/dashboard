@@ -44,6 +44,9 @@ pub enum EventKind {
     /// `main`'s suite is over its `[budget]`: a check killed for its
     /// timeout, or the total past `suite_fail`.
     MainOverBudget,
+    /// `main`'s suite fails at its tip: work failing only on those checks
+    /// is held until it passes.
+    MainFailing,
     /// A finish or accept held, not judged, because it fails only on checks
     /// that are already impure or over budget on `main`.
     Held,
@@ -84,6 +87,7 @@ impl EventKind {
             EventKind::Contested => "contested",
             EventKind::MainImpure => "main_impure",
             EventKind::MainOverBudget => "main_over_budget",
+            EventKind::MainFailing => "main_failing",
             EventKind::Held => "held",
             EventKind::SpeedupFinish => "speedup_finish",
             EventKind::SuiteSlow => "suite_slow",
@@ -169,8 +173,11 @@ impl Event {
             EventKind::MainOverBudget => Some(
                 "plan a `test-speedup` task naming the slow checks ([[slow]] check = \"<name>\"), or raise [budget] in roadmap.toml; until it lands, work failing only on them (or slow only because main is) is held".to_string(),
             ),
+            EventKind::MainFailing => Some(
+                "fix main (a director commit, or a task on the failing checks' modules); until it passes, work failing only on those checks is held".to_string(),
+            ),
             EventKind::Held => Some(
-                "nothing to do on this task: it's re-judged once main's impure or over-budget checks are fixed".to_string(),
+                "nothing to do on this task: it's re-judged once main's failing, impure or over-budget checks are fixed".to_string(),
             ),
             EventKind::SpeedupFinish => Some(
                 "read what it removed before accepting: removing tests is allowed, but it's your call at `accept`".to_string(),

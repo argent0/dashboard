@@ -109,7 +109,7 @@ fn main_doc_commit_is_imported_and_non_doc_path_is_rejected_as_ownership() {
 }
 
 #[test]
-fn main_commit_whose_suite_fails_is_rejected_with_suite() {
+fn a_failing_main_is_reported_once_and_only_new_failures_reject() {
     let repo = director_repo();
     write_file(
         repo.path(),
@@ -119,9 +119,16 @@ fn main_commit_whose_suite_fails_is_rejected_with_suite() {
     commit(repo.path(), "make the suite fail");
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
-    let hub_main_before = hub.rev_parse("refs/heads/main").unwrap();
     let mut player = open_player(&home);
 
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.main_failing.len(), 1, "{report}");
+    assert!(report.main_failing[0].contains("unit"), "{report}");
+    assert!(player.tick().expect("tick").main_failing.is_empty(), "once per tip");
+    let st = dashboard::state::derive(&hub, &|_| false).unwrap();
+    assert_eq!(st.main_failing, ["unit"]);
+
+    // Failing only where main already fails: the director's commit lands.
     write_file(
         repo.path(),
         "roadmap.toml",
@@ -129,14 +136,22 @@ fn main_commit_whose_suite_fails_is_rejected_with_suite() {
             "title = \"Updated Title\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"
         ),
     );
-    commit(repo.path(), "update title");
+    let titled = commit(repo.path(), "update title");
+    let report = player.tick().expect("tick should succeed");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(titled.as_str()));
+
+    // A new failure is the commit's own: rejected with suite.
+    write_file(
+        repo.path(),
+        TESTS_LEAN,
+        &*suite_lean("[[check]]\nname = \"unit\"\ncmd = \"false\"\n\n[[check]]\nname = \"more\"\ncmd = \"false\"\n"),
+    );
+    commit(repo.path(), "another failing check");
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Suite);
-    assert_eq!(
-        hub.rev_parse("refs/heads/main").as_deref(),
-        Some(hub_main_before.as_str())
-    );
+    assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(titled.as_str()));
 }
 
 #[test]
