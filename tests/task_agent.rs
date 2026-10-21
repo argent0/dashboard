@@ -1290,23 +1290,61 @@ fn a_worker_push_while_contested_is_ignored_not_struck() {
     assert_eq!(task(&hub, "s").status, Status::Contested);
 }
 
+/// Main's suite on the `a`/`b` architecture: `unit` (all) and `story`
+/// covering `b` with its own file `stories/b.sh`.
+const AB_SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+check unit where\n  cmd = \"true\"\n  covers = all\n\n\
+check story where\n  cmd = \"sh stories/b.sh\"\n  covers = [b]\n  files = [\"stories/b.sh\"]\n";
+
+/// A task-agent repo on the `a`/`b` architecture with `s` planned on
+/// `modules` and staged; the task agent then commits its post plus
+/// `extra` (path, content). Returns the post tick's report.
+fn post_with(modules: &str, extra: &[(&str, &str)]) -> TickReport {
+    let repo = repo_with_task_agents();
+    write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[("Tests", AB_SUITE)]);
+    for (f, t) in [("a/lib.rs", ""), ("b/lib.rs", ""), ("api/ab.rs", "pub enum Ab { X }\n"), ("stories/b.sh", "true\n")] {
+        write_file(repo.path(), f, t);
+    }
+    commit(repo.path(), "modules a and b");
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    let plan_toml = format!("title = \"s\"\nphase = \"p1\"\nmodules = {modules}\n");
+    director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", &plan_toml, "plan: s");
+    commit_empty(repo.path(), "stage: go");
+    let report = player.tick().expect("plan tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    let mut files: Vec<(String, String)> = vec![
+        ("tasks/s/prompt.md".into(), "make a/feature.txt\n".into()),
+        ("tasks/s/task.toml".into(), format!("{plan_toml}\n[check]\nname = \"s-check\"\ncmd = \"test -f a/feature.txt\"\n")),
+        (tests_file("s"), lean_task_tests("s-check", "test -f a/feature.txt", "[a]")),
+    ];
+    files.extend(extra.iter().map(|(p, t)| (p.to_string(), t.to_string())));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+    agent_commit(&repo, &refs, "post: s");
+    player.tick().expect("post tick")
+}
+
 #[test]
-fn a_task_agent_may_commit_api_files_but_never_the_manifest() {
-    for (target, ownership) in [
-        ("api/ab.rs", false),
-        ("architecture/Apis/ab.lean", false),
-        ("architecture/Architecture.lean", true),
+fn a_task_agent_writes_apis_and_test_files_inside_its_scope() {
+    let ownership = |r: &TickReport| r.rejected.iter().any(|x| x.reason == Reason::Ownership);
+    // Its own Tests file (in every post) is its to write.
+    let r = post_with("[\"a\"]", &[]);
+    assert!(r.rejected.is_empty(), "{r}");
+    // An API whose consumer is outside the task's modules, the manifest, and
+    // the files of a check outside its run set are not.
+    for (path, text) in [
+        ("api/ab.rs", "pub enum Ab { X, Y }\n"),
+        ("architecture/Apis/ab.lean", "-- changed\n"),
+        ("architecture/Architecture.lean", "-- changed\n"),
+        ("stories/b.sh", "false\n"),
     ] {
-        let repo = repo_with_task_agents();
-        write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[]);
-        commit(repo.path(), "add architecture");
-        let (_home_dir, home) = init_hub(&repo);
-        let mut player = open_player(&home);
-        plan(&repo, &mut player);
-        agent_post(&repo);
-        agent_commit(&repo, &[(target, "changed\n")], "touch the architecture");
-        let report = player.tick().expect("tick");
-        let rejected = report.rejected.iter().any(|r| r.reason == Reason::Ownership);
-        assert_eq!(rejected, ownership, "{target}: {report}");
+        let r = post_with("[\"a\"]", &[(path, text)]);
+        assert!(ownership(&r), "{path}: {r}");
+        assert!(r.rejected.iter().any(|x| x.message.contains(path)), "{path}: {r}");
+    }
+    // With both ends of `ab` in its modules, the API and `story`'s file are.
+    for (path, text) in [("api/ab.rs", "pub enum Ab { X, Y }\n"), ("stories/b.sh", "true # still\n")] {
+        let r = post_with("[\"a\", \"b\"]", &[(path, text)]);
+        assert!(!ownership(&r), "{path}: {r}");
     }
 }

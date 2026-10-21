@@ -2848,13 +2848,9 @@ impl<S: Sessions> Player<S> {
             return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
 
-        let test_paths = self.test_paths_at(candidate);
-        let task_prefix = format!("tasks/{slug}/");
+        let scope = self.agent_scope(slug, tip);
         for (_, path) in diffs {
-            if config::is_tests_path(path)
-                || path.starts_with(&task_prefix)
-                || path_under_test_paths(path, &test_paths)
-            {
+            if path_under_test_paths(path, &scope) {
                 continue;
             }
             let msg = format!(
@@ -3115,13 +3111,8 @@ impl<S: Sessions> Player<S> {
             let msg = format!("ownership: task/{slug} is contested: the reply must add {expected}");
             return self.reject_by(actor, slug, candidate, Reason::Ownership, msg, report);
         }
-        let test_paths = self.test_paths_at(tip);
-        let task_prefix = format!("tasks/{slug}/");
-        if let Some((_, path)) = diffs.iter().find(|(_, p)| {
-            !(config::is_tests_path(p)
-                || p.starts_with(&task_prefix)
-                || path_under_test_paths(p, &test_paths))
-        }) {
+        let scope = self.agent_scope(slug, tip);
+        if let Some((_, path)) = diffs.iter().find(|(_, p)| !path_under_test_paths(p, &scope)) {
             let msg = format!(
                 "ownership: task/{slug}: a contest reply may only add the reply and fix tests, not {path:?}"
             );
@@ -5415,12 +5406,33 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
-    /// Where a task agent may write: the suite files (`Tests.lean`,
-    /// `Tests/`), API files, the hub's
-    /// `test_paths` (read at `tip`, so a commit can't widen them for itself)
-    /// and `tasks/<slug>/`; and in `task.toml` only `[check]`, the rest
-    /// being the director's plan. Also the roadmap's `[player] lock_files`,
-    /// read at `tip` like `test_paths`.
+    /// Where a task agent (or the director's send-back and contest reply)
+    /// may write on `slug`, read at `tip` so a commit can't widen it for
+    /// itself: its own `Tests/<slug>.lean`, the `files` of the checks in the
+    /// task's run set, the APIs whose generator and consumer are both in
+    /// its modules (their Lean file and paths), `test_paths`, `tasks/<slug>/`
+    /// and the roadmap's `[player] lock_files`. Paths and directory prefixes.
+    fn agent_scope(&self, slug: &str, tip: &str) -> Vec<String> {
+        let mut out = vec![config::tests_file(slug), format!("tasks/{slug}/")];
+        let modules = records::task_config_at(&self.hub, tip, slug).map(|c| c.modules).unwrap_or_default();
+        if let Ok(set) = self.runner.run_set_for(tip, &modules, None) {
+            for c in &set.checks {
+                out.extend(c.files.iter().cloned());
+            }
+        }
+        if let Some(arch) = records::arch_at(&self.hub, tip) {
+            for a in arch.apis.iter().filter(|a| modules.contains(&a.generator) && modules.contains(&a.consumer)) {
+                out.push(crate::lean::api_file(&a.name));
+                out.extend(a.paths.iter().cloned());
+            }
+        }
+        out.extend(self.test_paths_at(tip));
+        out.extend(self.roadmap_at(tip).map(|r| r.player.lock_files).unwrap_or_default());
+        out
+    }
+
+    /// Where a task agent may write (`agent_scope`); and in `task.toml`
+    /// only `[check]`, the rest being the director's plan.
     fn agent_paths_ok(
         &self,
         slug: &str,
@@ -5428,28 +5440,11 @@ impl<S: Sessions> Player<S> {
         candidate: &str,
         diffs: &[(char, String)],
     ) -> Result<(), String> {
-        let test_paths = self.test_paths_at(tip);
-        let lock_files = self
-            .roadmap_at(tip)
-            .map(|r| r.player.lock_files)
-            .unwrap_or_default();
-        // API files (read at `tip`, so a commit can't widen them for itself):
-        // an API change is the failing-at-post step of an inter-module change.
-        // The manifest itself stays the director's.
-        let api_paths = records::arch_at(&self.hub, tip)
-            .map(|a| a.api_paths())
-            .unwrap_or_default();
-        let task_prefix = format!("tasks/{slug}/");
+        let scope = self.agent_scope(slug, tip);
         for (_, path) in diffs {
-            if !(config::is_tests_path(path)
-                || path_under_test_paths(path, &api_paths)
-                || config::is_arch_api_file(path)
-                || path.starts_with(&task_prefix)
-                || lock_files.contains(path)
-                || path_under_test_paths(path, &test_paths))
-            {
+            if !path_under_test_paths(path, &scope) {
                 return Err(format!(
-                    "ownership: task/{slug}: a task agent writes tests, the prompt and reviews, never {path:?}: the code is the worker's"
+                    "ownership: task/{slug}: a task agent writes its task's tests, the prompt, reviews and the APIs inside its modules, never {path:?}: the code is the worker's"
                 ));
             }
         }

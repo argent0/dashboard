@@ -1170,3 +1170,20 @@ fn a_plan_names_modules_main_declares() {
     let note = hub.notes_show(records::RUNSETS_NOTES, &tree).expect("run set noted");
     assert_eq!(note.trim(), "{\"app\":[\"unit\"]}");
 }
+
+#[test]
+fn a_send_back_stays_inside_the_task_scope() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    post_and_finish(&repo, &hub, &home, &mut player, "sb");
+    director_pull_task_branch(repo.path(), "sb");
+    write_file(repo.path(), "tasks/sb/reviews/r1.md", "more\n");
+    write_file(repo.path(), "architecture/Architecture.lean", &format!("{STARTER_MANIFEST}-- note\n"));
+    commit(repo.path(), "send-back: sb r1");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Review, "{report}");
+    assert!(report.rejected[0].message.contains("architecture/Architecture.lean"), "{report}");
+}
