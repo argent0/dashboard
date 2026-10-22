@@ -121,6 +121,9 @@ fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &
     let report = post_spike_with(repo, player, slug, &[(&bpath, &bcontent)]);
     assert_eq!(report.launched, vec![slug.to_string()], "{report}");
     assert!(report.errors.is_empty(), "{report}");
+    let dir = paths::worker_clone(&repo.director_path(), slug);
+    // A spike keeps a full working tree (spec §21).
+    assert!(!Git::new(&dir).is_sparse() && dir.join("roadmap.toml").exists());
     report
 }
 

@@ -1145,7 +1145,8 @@ pub struct Workspace {
     /// against `scope.paths`: `architecture`, `tasks/<slug>`, `api <name>`
     /// (paths and impl files of every API a node in `modules` generates,
     /// consumes or refs), `files of <check>` for each run-set check,
-    /// `test_paths`, `.gitignore`.
+    /// `test_paths`, `.gitignore`, and the agent config (`.claude/`,
+    /// `CLAUDE.md`) the worker's agent reads.
     pub readonly: Vec<(String, String)>,
 }
 
@@ -1172,6 +1173,9 @@ pub fn workspace_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::l
     }
     e.suite.test_paths.iter().for_each(|p| add(p, "test_paths".into()));
     add(&".gitignore".to_string(), ".gitignore".into());
+    for p in [".claude/", "CLAUDE.md"] {
+        add(&p.to_string(), "agent config".into());
+    }
     Ok(Workspace { scope, readonly })
 }
 

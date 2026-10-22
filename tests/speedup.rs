@@ -354,6 +354,8 @@ fn a_speedup_post_imports_while_main_is_over_and_unproven_evidence_retires_it() 
         "the test side is unpinned: {pinned:?}"
     );
     let clone = paths::worker_clone(&repo.director_path(), "speed");
+    // A test-speedup keeps a full working tree (spec §21).
+    assert!(!Git::new(&clone).is_sparse() && clone.join("roadmap.toml").exists());
     let git_dir = Git::new(&clone).run(&["rev-parse", "--absolute-git-dir"]).unwrap();
     let prompt = std::fs::read_to_string(Path::new(&git_dir).join("dashboard-prompt.md")).unwrap();
     assert!(prompt.contains("test-speedup") && prompt.contains("- slow"), "{prompt}");

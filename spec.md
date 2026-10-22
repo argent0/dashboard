@@ -1038,7 +1038,8 @@ is the boundary, and the boundary is what the worker's tools see.
   the same Lean package the player reads; `tasks/<slug>/`; the files of
   the APIs of each of `modules` (generated or consumed, every API they
   ref, with their `impl` files); the `files` of the checks in the task's
-  run set; `test_paths`; every `.gitignore`.
+  run set; `test_paths`; every `.gitignore`; the agent config the worker's
+  agent reads, `.claude/` and `CLAUDE.md`.
 - *Absent*: other modules' and roots' sources, and so their inline tests,
   and the `files` of every check outside the run set. An inline test
   outside the scope stays out of every run because its source is out of

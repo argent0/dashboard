@@ -84,10 +84,12 @@ pub fn write_file(repo: &Path, rel: &str, content: &str) {
     std::fs::write(path, content).expect("write file");
 }
 
-/// `git add -A && git commit -m <msg>`, returning the new commit's SHA.
+/// `git add --sparse -A && git commit -m <msg>`, returning the new commit's
+/// SHA. `--sparse` stages a file outside a worker's sparse tree too (spec
+/// §21), as a misbehaving worker would; absent files stay as they are.
 pub fn commit(repo: &Path, msg: &str) -> String {
     let git = Git::new(repo);
-    git.run(&["add", "-A"]).expect("git add");
+    git.run(&["add", "--sparse", "-A"]).expect("git add");
     git.run(&["commit", "-q", "-m", msg]).expect("git commit");
     git.rev_parse("HEAD").expect("HEAD after commit")
 }

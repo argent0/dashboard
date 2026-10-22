@@ -542,13 +542,16 @@ fn install_stop_hook(clone_dir: &Path, git_dir: &Path) -> Result<(), String> {
 /// Keeps the settings file out of anything the agent could commit: an
 /// untracked one goes in the repository's `info/exclude` (shared by every
 /// worktree of the workspace), a tracked one is marked `--skip-worktree` in
-/// this worktree's index. Either way `git status` and `git add -A` never
-/// see it, and nothing the player validates (commits only) does either.
+/// this worktree's index, or `--assume-unchanged` in a sparse one (spec
+/// §21), where git clears the skip bit of every file present. Either way
+/// `git status` and `git add -A` never see it, and nothing the player
+/// validates (commits only) does either.
 fn hide_from_git(clone_dir: &Path) -> Result<(), String> {
     let git = Git::new(clone_dir);
     if git.run_ok(&["ls-files", "--error-unmatch", "--", SETTINGS_FILE]) {
+        let flag = if git.is_sparse() { "--assume-unchanged" } else { "--skip-worktree" };
         return git
-            .run(&["update-index", "--skip-worktree", "--", SETTINGS_FILE])
+            .run(&["update-index", flag, "--", SETTINGS_FILE])
             .map(|_| ())
             .map_err(|e| e.to_string());
     }
@@ -1022,7 +1025,7 @@ impl<S: Sessions> Player<S> {
                 Transition::SyncRevision,
                 Some(&slug),
             )?;
-            records::set_pins(&self.hub, &slug, &sync)?;
+            self.pin(&slug, &sync, report)?;
             records::release_held(&self.hub, &slug, true)?;
             report
                 .imported
@@ -2920,7 +2923,7 @@ impl<S: Sessions> Player<S> {
             .imported
             .push((hub_ref, candidate.to_string(), Transition::SendBack));
 
-        records::set_pins(&self.hub, slug, candidate)?;
+        self.pin(slug, candidate, report)?;
         let review_body = self
             .hub
             .show_file(candidate, &expected_path)
@@ -3019,7 +3022,7 @@ impl<S: Sessions> Player<S> {
         report
             .imported
             .push((hub_ref, candidate.to_string(), Transition::Trim));
-        records::set_pins(&self.hub, slug, candidate)?;
+        self.pin(slug, candidate, report)?;
         // Already reviewed: the trim is the review's outcome, not new work.
         let agent = hub_state
             .tasks
@@ -3145,7 +3148,7 @@ impl<S: Sessions> Player<S> {
             .imported
             .push((hub_ref, candidate.to_string(), Transition::ContestReply));
 
-        records::set_pins(&self.hub, slug, candidate)?;
+        self.pin(slug, candidate, report)?;
         let reply = self.hub.show_file(candidate, &expected).unwrap_or_default();
         let text = self.prompts()?.render(
             "worker.contest-reply",
@@ -3402,7 +3405,7 @@ impl<S: Sessions> Player<S> {
                     ));
                 }
             }
-            records::set_pins(&self.hub, slug, &head)?;
+            self.pin(slug, &head, report)?;
             report.merge_failed.push((
                 slug.to_string(),
                 format!(
@@ -3539,7 +3542,7 @@ impl<S: Sessions> Player<S> {
             return self.reject(slug, candidate, Reason::Ownership, msg, report);
         }
 
-        records::set_pins(&self.hub, slug, candidate)?;
+        self.pin(slug, candidate, report)?;
         self.land(slug, tip, candidate, Transition::Resolve, report)
     }
 
@@ -4226,7 +4229,7 @@ impl<S: Sessions> Player<S> {
 
         // Pins are taken before anything else can fail, so a launch that
         // goes wrong from here on is never silently retried next tick.
-        records::set_pins(&self.hub, slug, tip)?;
+        self.pin(slug, tip, report)?;
         if is_spike {
             records::set_base(&self.hub, slug, tip)?;
         }
@@ -4236,7 +4239,7 @@ impl<S: Sessions> Player<S> {
             report.errors.push(format!("launch: task/{slug}: {} already exists — refusing to touch a leftover agent clone (spec §5)", clone_dir.display()));
             return Ok(());
         }
-        if let Err(e) = self.create_worker_clone(slug, &clone_dir) {
+        if let Err(e) = self.create_worker_clone(slug, tip, &clone_dir) {
             report.errors.push(format!("launch: task/{slug}: {e}"));
             return Ok(());
         }
@@ -4298,14 +4301,55 @@ impl<S: Sessions> Player<S> {
     /// contend for the same branch name. Parallel tasks (spec §4) each get their own worktree and
     /// branch; the player is the only process touching the workspace, one
     /// git command at a time.
-    fn create_worker_clone(&self, slug: &str, clone_dir: &Path) -> Result<(), String> {
-        self.add_worktree(&format!("task/{slug}"), slug, clone_dir)
+    /// An ordinary task's worktree is sparse from the start: it holds the
+    /// task's files only, the patterns of `records::workspace_at` at `tip`
+    /// (spec §21).
+    fn create_worker_clone(&self, slug: &str, tip: &str, clone_dir: &Path) -> Result<(), String> {
+        let patterns = match self.worker_tree_kind(slug, tip) {
+            TreeKind::Sparse => Some(self.worker_patterns(slug, tip)?),
+            TreeKind::Full => None,
+        };
+        self.add_worktree(&format!("task/{slug}"), slug, clone_dir, patterns.as_deref())
+    }
+
+    /// Whether `slug`'s worker gets a sparse tree (spec §21): a spike, a
+    /// flaky-test-fix and a test-speedup keep a full one.
+    fn worker_tree_kind(&self, slug: &str, tip: &str) -> TreeKind {
+        match records::task_config_at(&self.hub, tip, slug).map(|c| c.kind) {
+            Some(TaskKind::Spike | TaskKind::FlakyTestFix | TaskKind::TestSpeedup) => TreeKind::Full,
+            _ => TreeKind::Sparse,
+        }
+    }
+
+    /// The sparse patterns of `slug`'s worker tree at `tip`.
+    fn worker_patterns(&self, slug: &str, tip: &str) -> Result<Vec<String>, String> {
+        Ok(records::workspace_at(&self.hub, slug, tip, Some(self.runner.exporter()))?.patterns())
+    }
+
+    /// Records `slug`'s pins at `commit` (spec §8.3) and, for a sparse
+    /// worker tree that exists, recomputes its patterns from the same
+    /// commit (spec §21). The pins stand either way: a failure to rewrite
+    /// the patterns is reported, never a rejection.
+    fn pin(&self, slug: &str, commit: &str, report: &mut TickReport) -> Result<(), String> {
+        records::set_pins(&self.hub, slug, commit)?;
+        let clone_dir = paths::worker_clone(&self.director, slug);
+        if !clone_dir.exists() || self.worker_tree_kind(slug, commit) == TreeKind::Full {
+            return Ok(());
+        }
+        let set = self
+            .worker_patterns(slug, commit)
+            .and_then(|p| Git::new(&clone_dir).sparse_set(&p).map_err(|e| e.to_string()));
+        if let Err(e) = set {
+            report.errors.push(format!("task/{slug}: rewriting the worker's sparse patterns: {e}"));
+        }
+        Ok(())
     }
 
     /// `create_worker_clone`'s mechanics for any agent: a worktree of the
     /// shared workspace at `clone_dir`, on the local branch `branch`, started
-    /// at the hub's `task/<slug>`.
-    fn add_worktree(&self, branch: &str, slug: &str, clone_dir: &Path) -> Result<(), String> {
+    /// at the hub's `task/<slug>`; with `sparse`, a sparse checkout of those
+    /// patterns from the start (non-cone, per worktree).
+    fn add_worktree(&self, branch: &str, slug: &str, clone_dir: &Path, sparse: Option<&[String]>) -> Result<(), String> {
         let workspace_dir = paths::worker_workspace(&self.director);
         if !workspace_dir.join(".git").exists() {
             if let Some(parent) = workspace_dir.parent() {
@@ -4316,7 +4360,7 @@ impl<S: Sessions> Player<S> {
             let workspace_str = path_str(&workspace_dir)?;
             let cwd_git = Git::new(workspace_dir.parent().unwrap_or_else(|| Path::new(".")));
             cwd_git
-                .run(&["clone", "--quiet", hub_str, workspace_str])
+                .run(&["clone", "--quiet", "--no-checkout", hub_str, workspace_str])
                 .map_err(|e| format!("git clone (worker workspace): {e}"))?;
         }
 
@@ -4335,17 +4379,18 @@ impl<S: Sessions> Player<S> {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         let clone_str = path_str(clone_dir)?;
-        workspace
-            .run(&[
-                "worktree",
-                "add",
-                "--quiet",
-                "-B",
-                branch,
-                clone_str,
-                &format!("origin/task/{slug}"),
-            ])
-            .map_err(|e| format!("git worktree add: {e}"))?;
+        let start = format!("origin/task/{slug}");
+        let mut args = vec!["worktree", "add", "--quiet"];
+        if sparse.is_some() {
+            args.push("--no-checkout");
+        }
+        args.extend(["-B", branch, clone_str, &start]);
+        workspace.run(&args).map_err(|e| format!("git worktree add: {e}"))?;
+        if let Some(patterns) = sparse {
+            let wt = Git::new(clone_dir);
+            wt.sparse_set(patterns).map_err(|e| format!("git sparse-checkout set: {e}"))?;
+            wt.run(&["read-tree", "-mu", "HEAD"]).map_err(|e| format!("git read-tree: {e}"))?;
+        }
         Ok(())
     }
 
@@ -5519,7 +5564,7 @@ impl<S: Sessions> Player<S> {
             report.errors.push(format!("task agent: task/{slug}: {} already exists — refusing to touch a leftover agent clone", dir.display()));
             return Ok(());
         }
-        if let Err(e) = self.add_worktree(&format!("agent/{slug}"), slug, &dir) {
+        if let Err(e) = self.add_worktree(&format!("agent/{slug}"), slug, &dir, None) {
             report.errors.push(format!("task agent: task/{slug}: {e}"));
             return Ok(());
         }
@@ -6112,6 +6157,14 @@ fn pinned_block<'a>(paths: impl Iterator<Item = &'a str>) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// A worker's working tree (spec §21): its task's files only, or the
+/// whole tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeKind {
+    Sparse,
+    Full,
 }
 
 /// What a task agent is asked to do (spec §17).

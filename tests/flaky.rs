@@ -123,6 +123,8 @@ fn a_reproduced_flake_posts_launches_and_unpins_only_fix_paths() {
 
     // The worker is told which files are its to edit.
     let clone = paths::worker_clone(&repo.director_path(), "fix");
+    // A flaky-test-fix keeps a full working tree (spec §21).
+    assert!(!Git::new(&clone).is_sparse() && clone.join("roadmap.toml").exists());
     let git_dir = Git::new(&clone)
         .run(&["rev-parse", "--absolute-git-dir"])
         .unwrap();

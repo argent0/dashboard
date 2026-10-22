@@ -1407,3 +1407,95 @@ fn a_finish_failing_only_where_main_fails_is_held() {
     assert_eq!(report.held.len(), 1, "{report}");
     assert!(records::held_commit(&hub, "mf").is_some());
 }
+
+// --------------------------------------------------------------------------
+// The task workspace (spec §21)
+// --------------------------------------------------------------------------
+
+#[test]
+fn the_worker_tree_holds_only_the_tasks_files() {
+    let (repo, _home_dir, home, _player) = scoped("sp");
+    let clone = paths::worker_clone(&repo.director_path(), "sp");
+    for f in ["a/lib.rs", "architecture/Architecture.lean", "architecture/Tests.lean", "tasks/sp/task.toml", "api/.keep", "stories/s.sh"] {
+        assert!(clone.join(f).exists(), "{f} should be in the worker's tree");
+    }
+    for f in ["b/lib.rs", "roadmap.toml", "src/.keep"] {
+        assert!(!clone.join(f).exists(), "{f} should be absent from the worker's tree");
+    }
+    let git = Git::new(&clone);
+    assert_eq!(git.run(&["show", "HEAD:b/lib.rs"]).unwrap(), "pub fn g() {}");
+    assert!(git.is_sparse());
+    let hub = Git::new(home.hub());
+    let main = hub.rev_parse("refs/heads/main").unwrap();
+    if hub.show_file(&main, ".gitignore").is_some() {
+        assert!(clone.join(".gitignore").exists());
+    }
+    let workspace = paths::worker_workspace(&repo.director_path());
+    assert_eq!(Git::new(&workspace).config_get("extensions.worktreeConfig").as_deref(), Some("true"));
+    let entries: Vec<String> = std::fs::read_dir(&workspace)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, [".git"], "the workspace holds its repository only");
+}
+
+/// Main's suite with `b_story` too: a check outside `a`'s run set whose
+/// file, `stories/b.sh`, is absent from `a`'s worker tree.
+const AB_B_SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+check unit where\n  cmd = \"true\"\n  covers = all\n\n\
+check story where\n  cmd = \"sh stories/s.sh\"\n  covers = [a, b]\n  files = [\"stories/s.sh\"]\n\n\
+check b_story where\n  cmd = \"sh stories/b.sh\"\n  covers = [b]\n  files = [\"stories/b.sh\"]\n";
+
+/// `scoped` on `AB_B_SUITE`, finished (`tested`), then, after `before` runs
+/// on the worker's clone, sent back with a new check `r1` reading
+/// `stories/b.sh`. Returns the clone.
+fn sent_back_reading_b_story(before: impl FnOnce(&Path)) -> (DirectorRepo, TempDir, Home, Player<NullSessions>, PathBuf) {
+    let repo = director_repo();
+    write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[("Tests", AB_B_SUITE)]);
+    for (f, t) in [("a/lib.rs", "pub fn f() {}\n"), ("b/lib.rs", "pub fn g() {}\n"), ("api/.keep", ""), ("stories/s.sh", "true\n"), ("stories/b.sh", "true\n")] {
+        write_file(repo.path(), f, t);
+    }
+    commit(repo.path(), "modules a and b");
+    let (home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan_and_post_on(&repo, &mut player, "sp", "a");
+    let hub = Git::new(home.hub());
+    let clone = paths::worker_clone(&repo.director_path(), "sp");
+    assert!(!clone.join("stories/b.sh").exists());
+    commit_in_clone(&repo, "sp", "a/feature.txt", "x\n", "finish");
+    player.tick().expect("finish tick");
+    assert_eq!(task_status(&hub, "sp"), Status::Tested);
+    before(&clone);
+
+    director_pull_task_branch(repo.path(), "sp");
+    let r1 = "\ncheck r1 where\n  cmd = \"sh stories/b.sh && test -f a/feature2.txt\"\n  covers = [a]\n  files = [\"stories/b.sh\"]\n";
+    let tests = std::fs::read_to_string(repo.path().join(tests_file("sp"))).unwrap();
+    write_file(repo.path(), &tests_file("sp"), &(tests + r1));
+    write_file(repo.path(), "tasks/sp/reviews/r1.md", "add a/feature2.txt\n");
+    commit(repo.path(), "send-back: sp r1");
+    let report = player.tick().expect("send-back tick");
+    assert_eq!(task_status(&hub, "sp"), Status::InRevision, "{report}");
+    assert!(report.errors.is_empty(), "{report}");
+    (repo, home_dir, home, player, clone)
+}
+
+#[test]
+fn a_send_back_widens_the_worker_tree() {
+    let (_repo, _home_dir, _home, _player, clone) = sent_back_reading_b_story(|_| {});
+    let git = Git::new(&clone);
+    assert!(git.sparse_list().contains(&"/stories/b.sh".to_string()), "{:?}", git.sparse_list());
+    git.run(&["pull", "--quiet", "--ff-only", "origin", "task/sp"]).expect("pull");
+    assert!(clone.join("stories/b.sh").exists());
+    assert!(clone.join("tasks/sp/reviews/r1.md").exists());
+    assert!(!clone.join("b/lib.rs").exists());
+}
+
+#[test]
+fn a_re_pin_keeps_the_workers_uncommitted_work() {
+    let (_repo, _home_dir, _home, _player, clone) = sent_back_reading_b_story(|clone| {
+        write_file(clone, "a/wip.rs", "wip\n");
+        write_file(clone, "a/lib.rs", "pub fn f2() {}\n");
+    });
+    assert_eq!(std::fs::read_to_string(clone.join("a/wip.rs")).unwrap(), "wip\n");
+    assert_eq!(std::fs::read_to_string(clone.join("a/lib.rs")).unwrap(), "pub fn f2() {}\n");
+}

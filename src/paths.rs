@@ -104,20 +104,25 @@ pub fn workers_root(director: &Path) -> PathBuf {
     director.join(".dashboard").join("workers")
 }
 
+/// An ordinary task's worker worktree is a sparse checkout holding its
+/// task's files only (spec §21); a spike's, flaky-test-fix's and
+/// test-speedup's is full.
 pub fn worker_clone(director: &Path, slug: &str) -> PathBuf {
     workers_root(director).join(slug)
 }
 
 /// Where a task's task agent works (spec §17): another worktree of
 /// `worker_workspace`, for the same trust reason, on the local branch
-/// `agent/<slug>` (the worker's worktree has `task/<slug>`).
+/// `agent/<slug>` (the worker's worktree has `task/<slug>`), with a full
+/// working tree.
 pub fn agent_clone(director: &Path, slug: &str) -> PathBuf {
     director.join(".dashboard").join("agents").join(slug)
 }
 
 /// The one persistent clone of the hub every worker's worktree hangs off
-/// (see `workers_root`). Created lazily on first launch, trusted once by
-/// the operator, and never deleted.
+/// (see `workers_root`). Created lazily on first launch with
+/// `--no-checkout` (only its repository is used), trusted once by the
+/// operator, and never deleted.
 pub fn worker_workspace(director: &Path) -> PathBuf {
     director.join(".dashboard").join("workspace")
 }

@@ -273,6 +273,26 @@ fn the_task_agents_post_is_imported_and_launches_the_worker() {
 }
 
 #[test]
+fn the_task_agents_tree_is_full_beside_a_sparse_worker() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(&repo, &mut player);
+    agent_post(&repo);
+    let report = player.tick().expect("post tick");
+    assert_eq!(report.launched, vec!["s".to_string()], "{report}");
+    let worker = paths::worker_clone(&repo.director_path(), "s");
+    let agent = agent_dir(&repo);
+    for f in ["roadmap.toml", "prompts.kdl"] {
+        assert!(agent.join(f).exists(), "{f} in the task agent's tree");
+        assert!(!worker.join(f).exists(), "{f} absent from the worker's tree");
+    }
+    assert!(agent.join("src").exists() && worker.join("src").exists());
+    assert!(!Git::new(&agent).is_sparse());
+    assert!(Git::new(&worker).is_sparse());
+}
+
+#[test]
 fn a_director_post_is_ownership_when_task_agents_are_on() {
     let repo = repo_with_task_agents();
     let (_home_dir, home) = init_hub(&repo);

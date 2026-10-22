@@ -438,6 +438,33 @@ impl Git {
     pub fn config_set(&self, key: &str, val: &str) -> Result<(), GitError> {
         self.run(&["config", key, val]).map(|_| ())
     }
+
+    /// `git sparse-checkout set --no-cone`: this worktree's patterns become
+    /// `patterns` (spec §21). Git writes them to the worktree's own config,
+    /// so sibling worktrees keep theirs. A modified or untracked file whose
+    /// path leaves the patterns stays on disk.
+    pub fn sparse_set(&self, patterns: &[String]) -> Result<(), GitError> {
+        self.run_with_stdin(&["sparse-checkout", "set", "--no-cone", "--stdin"], &(patterns.join("\n") + "\n"))
+            .map(|_| ())
+    }
+
+    /// `git sparse-checkout add`: widens this worktree's patterns.
+    pub fn sparse_add(&self, patterns: &[String]) -> Result<(), GitError> {
+        self.run_with_stdin(&["sparse-checkout", "add", "--stdin"], &(patterns.join("\n") + "\n"))
+            .map(|_| ())
+    }
+
+    /// This worktree's sparse patterns, one per entry.
+    pub fn sparse_list(&self) -> Vec<String> {
+        self.run(&["sparse-checkout", "list"])
+            .map(|s| s.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether this worktree is a sparse checkout.
+    pub fn is_sparse(&self) -> bool {
+        self.config_get("core.sparseCheckout").as_deref() == Some("true")
+    }
 }
 
 // --------------------------------------------------------------------------
