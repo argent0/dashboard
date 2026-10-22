@@ -857,7 +857,8 @@ impl Idl {
                 }
             }
             o.push_str("}\n");
-            if t.display && matches!(t.kind, Kind::Repr(_)) {
+            // A ref forwards the wrapped type's `Display`.
+            if t.display {
                 let body = match t.kind {
                     Kind::Repr(Repr::Bytes) => "for b in &self.0 { write!(f, \"{b:02x}\")?; } Ok(())",
                     _ => "write!(f, \"{}\", self.0)",

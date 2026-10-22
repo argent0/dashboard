@@ -231,6 +231,26 @@ fn refinements_and_tokens_are_elaborated_exported_budgeted_and_linted() {
     assert!(problems.iter().any(|p| p == "api nutrition-db: tokens 3 exceeds budget 2"), "{problems:?}");
     assert!(problems.iter().any(|p| p == "nutrition/lib.rs:1: mints the evidence token ProductRef; only the generator of its api may"), "{problems:?}");
     assert!(!problems.iter().any(|p| p.starts_with("db/lib.rs")), "{problems:?}");
+    // A ref's `display` and `store` forward the wrapped type's, which must
+    // declare them.
+    write_file(r, "nutrition/lib.rs", "");
+    write_file(r, "db/lib.rs", "");
+    let web = PROOFS_WEB.replace("  sum Shown | Shown | Retired", "  type Label : ref «nutrition-db».Id display store\n  sum Shown | Shown : Label | Retired");
+    write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", PROOFS_IDL), ("nutrition-web", &web)], &[]);
+    let loaded = arch::load(r).expect("load");
+    let (_, errs) = sync_bindings(r, &loaded, true);
+    assert!(errs.is_empty(), "{errs:?}");
+    let binding = std::fs::read_to_string(r.join("apis/nutrition-web/gen/nutrition_web.rs")).unwrap();
+    assert!(binding.contains("impl std::fmt::Display for Label {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, \"{}\", self.0) }"), "{binding}");
+    assert!(binding.contains("impl rusqlite::ToSql for Label"), "{binding}");
+    let (problems, _) = report(r, &loaded);
+    assert!(!problems.iter().any(|p| p.contains("forwards")), "{problems:?}");
+    write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", PROOFS_IDL), ("nutrition-web", &web.replace("ref «nutrition-db».Id", "ref «nutrition-db».Grams"))], &[]);
+    let (problems, _) = report(r, &arch::load(r).unwrap());
+    for flag in ["display", "store"] {
+        let want = format!("api nutrition-web: type Label: {flag} forwards nutrition-db.Grams's, which declares no {flag}");
+        assert!(problems.contains(&want), "{problems:?}");
+    }
 }
 
 const REFS_MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\

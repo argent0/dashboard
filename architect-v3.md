@@ -225,7 +225,8 @@ serving `{"fn": …, "args": […]}` and a TypeScript `<Api>Client` over a
 `send` transport, so the root is wiring. Adding a `fn` breaks every generator,
 adding a constructor every consumer: both fail at post. `type Id : i64 store`
 generates the forwarding adapter (`rusqlite::ToSql`) so a callee can store a T
-without reading it. A `fn` taking a container (directly or inside an input sum) means the
+without reading it. A ref takes the same flags (`type Kind : ref «a».Kind
+display store`), forwarding the wrapped type's, which must declare them. A `fn` taking a container (directly or inside an input sum) means the
 generator folds it, so the generator module must consume the class API for
 that `Seq`; the caller builds it with `new` through the `ref`. A container
 only returned asks nothing of the generator. A TypeScript module gets a

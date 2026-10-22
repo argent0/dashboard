@@ -411,7 +411,7 @@ syntax "linear " "spent" "=" ident : idlTokenKind
 
 syntax "type " ident " : " sepBy1(idlPrim, " × ") ("display")? ("store")? (" where " idlPred)? : idlItem
 syntax "token " ident " : " idlPrim idlTokenKind ("store")? : idlItem
-syntax "type " ident " : " "ref " ident : idlItem
+syntax "type " ident " : " "ref " ident ("display")? ("store")? : idlItem
 syntax "element " ident many("|" ident (" : " sepBy1(idlPrim, " → "))?) : idlItem
 syntax "container " ident " : " sepBy1(ident, ", ") : idlItem
 syntax "container " ident " := " ident ident : idlItem
@@ -609,9 +609,12 @@ def addItem (acc : IdlAcc) : Lean.TSyntax `idlItem → Lean.MacroM IdlAcc
     let c1 ← `(opaque $fact : $ty → Prop)
     let c2 ← `(abbrev $n : Type := { id : $ty // $fact id })
     pure { acc with cmds := acc.cmds.push c1 |>.push c2, tokens := acc.tokens.push decl }
-  | `(idlItem| type $n:ident : ref $r:ident) => do
+  | `(idlItem| type $n:ident : ref $r:ident $[display%$d]? $[store%$s]?) => do
     let (a, t) ← splitRef r
-    let decl ← `(Dashboard.TypeDecl.mk $(strLit n) (Dashboard.TypeKind.refTo $(Lean.Syntax.mkStrLit a) $(Lean.Syntax.mkStrLit t)) false false none)
+    -- `display` and `store` forward the wrapped type's.
+    let d ← if d.isSome then `(true) else `(false)
+    let s ← if s.isSome then `(true) else `(false)
+    let decl ← `(Dashboard.TypeDecl.mk $(strLit n) (Dashboard.TypeKind.refTo $(Lean.Syntax.mkStrLit a) $(Lean.Syntax.mkStrLit t)) $d $s none)
     let cmd ← `(abbrev $n : Type := $r)
     pure { acc with cmds := acc.cmds.push cmd, types := acc.types.push decl }
   | `(idlItem| element $n:ident $[| $vs:ident $[: $[$fs:idlPrim]→*]?]*) => do

@@ -288,6 +288,20 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
                     errs.push(format!("{who}: ref {target}.{ty}: {target} declares no such type"))
                 }
                 Some(t) => {
+                    // `display` and `store` on a ref forward the wrapped
+                    // type's, so the wrapped type declares them too.
+                    let (shows, stores) = match (t.type_decl(ty), t.token(ty)) {
+                        (Some(d), _) => (d.display, d.store),
+                        (None, Some(k)) => (false, k.store),
+                        _ => (false, false),
+                    };
+                    for x in idl.types.iter().filter(|x| matches!(&x.kind, crate::idl::Kind::Ref(a, y) if a == target && y == ty)) {
+                        for (flag, set, has) in [("display", x.display, shows), ("store", x.store, stores)] {
+                            if set && !has {
+                                errs.push(format!("{who}: type {}: {flag} forwards {target}.{ty}'s, which declares no {flag}", x.name));
+                            }
+                        }
+                    }
                     // A re-exported token keeps its kind: a fn taking it
                     // still admits the stale/spent case.
                     if let Some(k) = t.token(ty)
