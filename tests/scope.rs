@@ -170,3 +170,61 @@ fn a_queued_run_takes_check_names() {
     let (pass, text) = queue::wait(&home, &req.id, Some(Duration::from_secs(1))).expect("result");
     assert!(!pass && text.contains("outside the run set"), "{text}");
 }
+
+/// `s`'s worker file declaring `s_own` (covering `a`), whose file is
+/// `stories/own.sh`, outside the worker's tree.
+const S_OWN: &str = "import Architecture\nopen Dashboard\n\n\
+check s_own where\n  cmd = \"sh stories/own.sh\"\n  covers = [a]\n  files = [\"stories/own.sh\"]\n";
+
+fn staged(clone: &PathBuf) -> String {
+    let git = Git::new(clone);
+    let _ = git.run(&["add", "-A"]);
+    let names = git.run(&["diff", "--cached", "--name-only"]).unwrap();
+    git.run(&["reset", "-q"]).unwrap();
+    names
+}
+
+#[test]
+fn declaring_a_check_opens_its_files_for_the_next_commit() {
+    let (_repo, _home_dir, home, mut player, clone) = launched("parallel");
+    let hub = Git::new(home.hub());
+    write_file(&clone, "architecture/Tests/s.worker.lean", S_OWN);
+    write_file(&clone, "stories/own.sh", "true\n");
+    write_file(&clone, "a/feature.txt", "x\n");
+    let names = staged(&clone);
+    assert!(names.contains("architecture/Tests/s.worker.lean") && names.contains("a/feature.txt"), "{names}");
+    assert!(!names.contains("stories/own.sh"), "outside the tree until declared: {names}");
+
+    let (code, text) = dash(&clone, &home, "test");
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("opened: stories/own.sh"), "{text}");
+    assert!(text.contains("ok   s_own"), "the second snapshot carries the file: {text}");
+    assert!(staged(&clone).contains("stories/own.sh"));
+
+    let git = Git::new(&clone);
+    for (k, v) in [("user.name", "w"), ("user.email", "w@example.com"), ("commit.gpgsign", "false")] {
+        git.run(&["config", k, v]).unwrap();
+    }
+    git.run(&["add", "-A"]).unwrap();
+    git.run(&["commit", "-q", "-m", "finish with s_own"]).unwrap();
+    let report = player.tick().expect("finish tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    let tip = hub.rev_parse("refs/heads/task/s").unwrap();
+    assert!(hub.show_file(&tip, "stories/own.sh").is_some(), "{report}");
+    let runner = dashboard::checks::Runner::for_cli(&home);
+    let scope = dashboard::records::scope_at(&hub, "s", &tip, Some(runner.exporter())).unwrap();
+    assert!(scope.run_set.contains(&"s_own".to_string()), "{:?}", scope.run_set);
+}
+
+#[test]
+fn a_full_tree_needs_no_widening() {
+    let (_repo, _home_dir, home, _player, clone) = launched("parallel");
+    Git::new(&clone).run(&["sparse-checkout", "disable"]).unwrap();
+    write_file(&clone, "architecture/Tests/s.worker.lean", S_OWN);
+    write_file(&clone, "stories/own.sh", "true\n");
+    write_file(&clone, "a/feature.txt", "x\n");
+    let (code, text) = dash(&clone, &home, "test");
+    assert_eq!(code, 0, "{text}");
+    assert!(!text.contains("opened:"), "{text}");
+    assert!(text.contains("ok   s_own"), "{text}");
+}

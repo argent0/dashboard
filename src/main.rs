@@ -667,19 +667,37 @@ fn run_scope(home: Option<PathBuf>) {
 
 /// The snapshot of `c`'s working tree (`queue::snapshot`), fetched into the
 /// hub under a temporary `refs/dashboard/test/*` ref: `(commit, hub ref)`.
-/// The caller deletes the ref once done with the commit.
-fn snapshot_for_run(c: &TaskClone, hub: &git::Git) -> (String, String) {
-    let commit = queue::snapshot(&c.worktree).unwrap_or_else(|e| fail(e));
+/// In a sparse tree the `files` of the worker's declared checks are opened
+/// first (`records::widen`, spec §21) and the tree snapshotted again, so the
+/// run sees the files the worker already wrote there. The caller deletes
+/// the ref once done with the commit.
+fn snapshot_for_run(c: &TaskClone, hub: &git::Git, runner: &dashboard::checks::Runner) -> (String, String) {
     let local = format!("refs/dashboard/test/{:016}-{}", now_millis(), c.slug);
+    let commit = fetch_snapshot(c, hub, &local);
+    let opened = dashboard::records::widen(hub, &c.worktree, &c.slug, &commit, Some(runner.exporter()))
+        .unwrap_or_else(|e| {
+            let _ = hub.delete_ref(&local);
+            fail(e)
+        });
+    if opened.is_empty() {
+        return (commit, local);
+    }
+    eprintln!("opened: {}", opened.join(", "));
+    (fetch_snapshot(c, hub, &local), local)
+}
+
+/// Snapshots `c`'s working tree and fetches it into the hub as `local`.
+fn fetch_snapshot(c: &TaskClone, hub: &git::Git, local: &str) -> String {
+    let commit = queue::snapshot(&c.worktree).unwrap_or_else(|e| fail(e));
     let repo = c
         .worktree
         .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .unwrap_or_else(|e| fail(e.to_string()));
-    c.worktree.update_ref(&local, &commit).unwrap_or_else(|e| fail(e.to_string()));
+    c.worktree.update_ref(local, &commit).unwrap_or_else(|e| fail(e.to_string()));
     let fetched = hub.run(&["fetch", "--quiet", &repo, &format!("+{local}:{local}")]);
-    let _ = c.worktree.delete_ref(&local);
+    let _ = c.worktree.delete_ref(local);
     fetched.unwrap_or_else(|e| fail(e.to_string()));
-    (commit, local)
+    commit
 }
 
 fn now_millis() -> u128 {
@@ -705,7 +723,7 @@ fn run_test(home: Option<PathBuf>, checks: &[String], no_wait: bool, timeout: Op
     let hub = git::Git::new(c.home.hub());
     let roadmap = hub_roadmap(&hub);
     let runner = cli_runner(&c.home, &roadmap);
-    let (commit, local) = snapshot_for_run(&c, &hub);
+    let (commit, local) = snapshot_for_run(&c, &hub, &runner);
     let (tip, modules) = task_modules(&hub, &c.slug);
     let queued = roadmap.player.runs == config::Runs::Queued;
     // The run set at the snapshot, so the worker's own checks count. The

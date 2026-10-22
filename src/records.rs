@@ -1196,6 +1196,41 @@ impl Workspace {
     }
 }
 
+/// Opens the `files` of the checks `slug`'s worker declared, read from
+/// `snapshot` of its working tree (spec §21): each one no sparse pattern of
+/// `worktree` covers yet is added, so the worker's next `git add -A`
+/// stages it. Returns the paths opened; a full tree needs none.
+pub fn widen(
+    hub: &Git,
+    worktree: &Git,
+    slug: &str,
+    snapshot: &str,
+    exporter: Option<&crate::lean::Exporter>,
+) -> Result<Vec<String>, String> {
+    if !worktree.is_sparse() {
+        return Ok(Vec::new());
+    }
+    let Some(e) = exported_at(hub, snapshot, exporter)? else { return Ok(Vec::new()) };
+    let open = worktree.sparse_list();
+    let covered = |path: &str| {
+        let pat = sparse_pattern(path);
+        open.iter().any(|o| pat == *o || pat.starts_with(&format!("{o}/")))
+    };
+    let mut paths: Vec<String> = Vec::new();
+    for c in e.suite.from_file(&config::worker_tests_file(slug)) {
+        for f in c.files.iter().filter(|f| !covered(f)) {
+            if !paths.contains(f) {
+                paths.push(f.clone());
+            }
+        }
+    }
+    if !paths.is_empty() {
+        let patterns: Vec<String> = paths.iter().map(|p| sparse_pattern(p)).collect();
+        worktree.sparse_add(&patterns).map_err(|e| e.to_string())?;
+    }
+    Ok(paths)
+}
+
 /// `path` as an anchored non-cone sparse pattern, glob characters escaped.
 pub fn sparse_pattern(path: &str) -> String {
     let mut out = String::from("/");
