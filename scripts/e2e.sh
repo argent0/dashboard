@@ -892,10 +892,13 @@ fi
 # --------------------------------------------------------------------------
 # 7g. Scoped runs (spec §6.6, §8.3): modules `a` and `b`; `b_only` covers
 #     `b` and fails once a/a.txt exists, so it is out of reach of task `a`
-#     (on modules ["a"]), whose finish imports. Its worker adds its own
-#     check in Tests/a.worker.lean; `dashboard scope` from its clone shows
-#     the scope. Then a docs change under b/ on main puts b in the landing
-#     run set: b_only fails on the merge and `a` goes back to its worker.
+#     (on modules ["a"]), whose finish imports. Its worker sees a sparse
+#     tree without b/ (spec §21), builds `a` in its view with `dashboard
+#     build`, and declares its own check in Tests/a.worker.lean on
+#     stories/a_own.sh, a path `dashboard test` opens in its tree;
+#     `dashboard scope` from its clone shows the scope and the working tree.
+#     Then a docs change under b/ on main puts b in the landing run set:
+#     b_only fails on the merge and `a` goes back to its worker.
 # --------------------------------------------------------------------------
 
 log "step 7g: scoped runs (task a on module a)"
@@ -912,6 +915,7 @@ cat >>"$DIR_REPO/architecture/Architecture.lean" <<'EOF'
 module a where
   lang = rust
   paths = ["a"]
+  build_cmd = "test ! -e b/README.md && echo built-a"
 
 module b where
   lang = rust
@@ -935,13 +939,23 @@ wait_until "modules a and b on main" hub_has_ab
 
 mkdir -p "$TA_TEMPLATES/a/tasks/a"
 echo "Create a/a.txt. Tests you add must be pure." >"$TA_TEMPLATES/a/tasks/a/prompt.md"
+# Runs once: records what the tree holds, builds `a`, then declares a_own
+# before `dashboard test` opens its file; the fake worker's `git add -A`
+# commits all three.
 cat >"$TA_TEMPLATES/a/tasks/a/agent.sh" <<'EOF'
 #!/bin/sh
+L=__LOGS__
+[ -e "$L/a.done" ] && exit 0
+if [ -e b/README.md ]; then echo full; elif [ -e architecture/Tests.lean ]; then echo partial; else echo empty; fi >"$L/a.tree"
+"__BIN__" build a --home "__HOME__" >"$L/a.build" 2>&1 || true
 echo ok > a/a.txt
-echo 'test -f a/a.txt' > a/t.sh
-mkdir -p architecture/Tests
-printf 'import Architecture\nopen Dashboard\n\ncheck a_own where\n  cmd = "sh a/t.sh"\n  covers = [a]\n  files = ["a/t.sh"]\n' > architecture/Tests/a.worker.lean
+mkdir -p architecture/Tests stories
+printf 'import Architecture\nopen Dashboard\n\ncheck a_own where\n  cmd = "sh stories/a_own.sh"\n  covers = [a]\n  files = ["stories/a_own.sh"]\n' > architecture/Tests/a.worker.lean
+echo 'test -f a/a.txt' > stories/a_own.sh
+"__BIN__" test --home "__HOME__" >"$L/a.test" 2>&1 || true
+touch "$L/a.done"
 EOF
+sed -i "s|__LOGS__|$AGENT_LOGS|; s|__BIN__|$BIN|; s|__HOME__|$HOME_DIR|" "$TA_TEMPLATES/a/tasks/a/agent.sh"
 task_tests "$TA_TEMPLATES/a/architecture/Tests/a.lean" a-check "test -f a/a.txt" "[a]"
 
 git -C "$DIR_REPO" checkout -q -b task/a main
@@ -959,11 +973,19 @@ scope_out=$(cd "$DIR_REPO/.dashboard/workers/a" && dash scope)
 assert_contains "$scope_out" "task/a  modules: a" "dashboard scope"
 assert_contains "$scope_out" "architecture/Tests/a.worker.lean" "dashboard scope"
 assert_contains "$scope_out" "a-check" "dashboard scope (run set)"
+assert_contains "$scope_out" "working tree:" "dashboard scope"
 case "$scope_out" in *b_only*) echo "e2e: b_only is in task a's run set" >&2; exit 1 ;; esac
 
 wait_until "task/a tested" task_status_is a tested
 a_tip=$(git --git-dir "$HOME_DIR/hub.git" rev-parse refs/heads/task/a)
 git --git-dir "$HOME_DIR/hub.git" cat-file -e "$a_tip:architecture/Tests/a.worker.lean" || { echo "e2e: a's worker check missing" >&2; exit 1; }
+# The sparse tree (spec §21): no b/, a build in a's view, the declared
+# check's file opened and committed.
+assert_contains "$(cat "$AGENT_LOGS/a.tree")" "partial" "a's worker tree"
+assert_contains "$(cat "$AGENT_LOGS/a.build")" "built-a" "dashboard build a"
+assert_contains "$(cat "$AGENT_LOGS/a.test")" "opened: stories/a_own.sh" "dashboard test"
+git --git-dir "$HOME_DIR/hub.git" cat-file -e "$a_tip:stories/a_own.sh" || { echo "e2e: stories/a_own.sh missing on task/a" >&2; exit 1; }
+[ -e "$DIR_REPO/.dashboard/agents/a/b/README.md" ] || { echo "e2e: a's task agent tree should be full" >&2; exit 1; }
 
 # main moves under b: the landing run set gains b's checks.
 git -C "$DIR_REPO" checkout -q main
