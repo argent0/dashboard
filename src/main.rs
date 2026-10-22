@@ -128,12 +128,11 @@ enum Command {
     /// player waits on (spec.md §17). The player fills in slug, step and
     /// commit. A review closes with accept (with --suite) or unsure, a
     /// question with answer or unsure, a post or contest with unsure; a
-    /// step closed by a commit (post, send-back, contest reply, trim)
-    /// takes its verdict from the player's import, so leave it out then.
+    /// step closed by a commit (post, send-back, contest reply) takes its verdict from the player's import, so leave it out then.
     /// Exits 1, naming the verdicts allowed, on any other.
     Report {
-        /// accept | unsure | answer, or posted | sent-back | replied |
-        /// trimmed, implied after an import.
+        /// accept | unsure | answer, or posted | sent-back | replied,
+        /// implied after an import.
         verdict: Option<String>,
         /// Two or three sentences: why this verdict.
         #[arg(long)]
@@ -141,12 +140,28 @@ enum Command {
         /// What the task's check asserts and why it fails / now passes.
         #[arg(long)]
         check: Option<String>,
-        /// With accept: each test this task added, keep or drop, and why.
+        /// With accept: each check this task added, by name, keep or drop,
+        /// and why.
         #[arg(long)]
         suite: Option<String>,
         /// Anything cross-task the director should know.
         #[arg(long)]
         concerns: Option<String>,
+    },
+    /// From the director clone: trim a tested task before its accept
+    /// (spec.md §6.5). Fetches the hub and commits on task/<slug>, on top
+    /// of the hub's tip, the removal of the named checks from
+    /// architecture/Tests/<slug>.lean and <slug>.worker.lean (a file left
+    /// with none goes whole) and the deletion of the test files only they
+    /// own; a file another check also lists, under test_paths or already
+    /// on main stays, named with its reason. The player imports it on its
+    /// next tick and runs the run set.
+    Trim {
+        /// The task's slug.
+        slug: String,
+        /// The checks to drop, each declared in the task's own Lean files.
+        #[arg(required = true, num_args = 1..)]
+        checks: Vec<String>,
     },
     /// Print the task's scope from a worker's or task agent's clone: its
     /// modules, the paths it may write, what else its working tree holds
@@ -220,6 +235,7 @@ fn main() {
             args.home,
             dashboard::report::Draft { verdict, why, check, suite, concerns },
         ),
+        Some(Command::Trim { slug, checks }) => run_trim(args.home, &slug, &checks),
         Some(Command::Scope) => run_scope(args.home),
         Some(Command::Test { checks, no_wait, timeout }) => run_test(args.home, &checks, no_wait, timeout),
         Some(Command::Build { nodes }) => run_build(args.home, &nodes),
@@ -633,6 +649,47 @@ fn run_report(home: Option<PathBuf>, draft: dashboard::report::Draft) {
         ),
         Err(e) => fail(e),
     }
+}
+
+// --------------------------------------------------------------------------
+// dashboard trim
+// --------------------------------------------------------------------------
+
+fn run_trim(home: Option<PathBuf>, slug: &str, checks: &[String]) {
+    let cwd = std::env::current_dir().unwrap_or_else(|e| fail(format!("cannot read current directory: {e}")));
+    let home = paths::resolve_home(home, &cwd).unwrap_or_else(|e| fail(e));
+    let hub = git::Git::new(home.hub());
+    let director = hub
+        .config_get("dashboard.director")
+        .unwrap_or_else(|| fail("hub is missing dashboard.director — run `dashboard init`".into()));
+    let here = git::Git::new(&cwd)
+        .run(&["rev-parse", "--show-toplevel"])
+        .unwrap_or_else(|e| fail(e.to_string()));
+    let same = |a: &str, b: &str| {
+        std::fs::canonicalize(a).ok().is_some_and(|a| std::fs::canonicalize(b).ok() == Some(a))
+    };
+    if !same(&here, &director) {
+        fail(format!("dashboard trim runs in the director clone ({director})"));
+    }
+    let runner = cli_runner(&home, &hub_roadmap(&hub));
+    let out = dashboard::trim::run(&hub, &git::Git::new(&director), slug, checks, runner.exporter())
+        .unwrap_or_else(|e| fail(e));
+    let plan = &out.plan;
+    println!(
+        "trim {} on task/{slug}: dropped {}",
+        &out.commit[..out.commit.len().min(12)],
+        plan.dropped.join(", ")
+    );
+    for (file, text) in &plan.lean {
+        println!("  {} {file}", if text.is_some() { "edited " } else { "deleted" });
+    }
+    for path in &plan.deleted {
+        println!("  deleted {path}");
+    }
+    for (path, why) in &plan.kept {
+        println!("  kept    {path} ({why})");
+    }
+    println!("the player imports it on its next tick and runs the run set; then commit accept:");
 }
 
 /// `dashboard test`: see `queue.rs`.

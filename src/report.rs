@@ -1,7 +1,7 @@
 // The task agent's report (spec §17). The player notes in the agent's
 // worktree git dir which step waits for a report (`Owed`): the step it
 // pasted (post, review, contest), the commit it imported from the agent
-// (posted, sent-back, replied, trimmed) or the director's question.
+// (posted, sent-back, replied) or the director's question.
 // `dashboard report` checks the agent's verdict against it and writes the
 // report there atomically; the player collects it, fills in slug, step and
 // commit from its own note, and turns it into a note and an event.
@@ -24,18 +24,16 @@ pub enum Verdict {
     Accept,
     SentBack,
     Replied,
-    Trimmed,
     Unsure,
     Answer,
 }
 
 impl Verdict {
-    pub const ALL: [Verdict; 7] = [
+    pub const ALL: [Verdict; 6] = [
         Verdict::Posted,
         Verdict::Accept,
         Verdict::SentBack,
         Verdict::Replied,
-        Verdict::Trimmed,
         Verdict::Unsure,
         Verdict::Answer,
     ];
@@ -46,7 +44,6 @@ impl Verdict {
             Verdict::Accept => "accept",
             Verdict::SentBack => "sent-back",
             Verdict::Replied => "replied",
-            Verdict::Trimmed => "trimmed",
             Verdict::Unsure => "unsure",
             Verdict::Answer => "answer",
         }
@@ -61,7 +58,7 @@ impl Verdict {
 /// imported, and the verdicts that close it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Owed {
-    /// `post`, `review r<N>`, `contest c<N>`, `trim` or `question`.
+    /// `post`, `review r<N>`, `contest c<N>` or `question`.
     pub step: String,
     /// The agent's commit the player imported for this step.
     pub commit: Option<String>,
@@ -158,11 +155,6 @@ pub fn set_question(git_dir: &Path) -> Result<(), String> {
     write_owed(git_dir, QUESTION_FILE, &Owed::question())
 }
 
-/// Closes the director's question without a report (a trim answers it).
-pub fn clear_question(git_dir: &Path) {
-    let _ = std::fs::remove_file(git_dir.join(QUESTION_FILE));
-}
-
 /// What waits for a report: the question first, then the step.
 fn pending(git_dir: &Path) -> Vec<Owed> {
     [QUESTION_FILE, STEP_FILE]
@@ -197,7 +189,7 @@ fn check(pending: &[Owed], draft: &Draft) -> Result<Filed, String> {
                 .ok_or_else(|| {
                     let hint = if matches!(
                         verdict,
-                        Verdict::Posted | Verdict::SentBack | Verdict::Replied | Verdict::Trimmed
+                        Verdict::Posted | Verdict::SentBack | Verdict::Replied
                     ) {
                         "; that verdict follows from your commit: report it once the player pastes that it imported it"
                     } else {

@@ -78,7 +78,6 @@ const TEMPLATES: &[(&str, &[&str])] = &[
     ("task-agent.imported-post", &["commit"]),
     ("task-agent.imported-send-back", &["commit"]),
     ("task-agent.imported-reply", &["commit"]),
-    ("task-agent.imported-trim", &["commit"]),
     ("task-agent.escalated", &["slug", "cause"]),
     ("task-agent.question", &["question"]),
     ("task-agent.report-dropped", &["message"]),

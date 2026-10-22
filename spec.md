@@ -282,14 +282,28 @@ every later task runs them. The rest (scaffolding for one step, a case a
 broader test now covers) cost suite time for nothing once the task lands.
 
 The director decides which stay. The task agent's review report recommends
-keep or drop for each check the task added, the worker's included (§17);
-before `accept:` the director (or the task agent, at its request) makes a
-**trim** commit on the `tested` task that:
+keep or drop for each check the task added, by name, the worker's included
+(§17); before `accept:` the director makes a **trim** commit on the
+`tested` task that:
 
 - deletes or edits the `files` of the dropped checks (absent on `main`),
   and
 - removes their entries from `architecture/Tests/<slug>.lean` and
   `architecture/Tests/<slug>.worker.lean` (or a whole file).
+
+`dashboard trim <slug> <check>…`, run in the director clone, builds it:
+it fetches the hub, takes a `tested` task and names of checks declared in
+the task's two files (anything else it refuses), and commits on
+`task/<slug>`, on top of the hub's tip, one commit that removes each named
+`check` block (with the comment lines right above it; a file left with no
+check goes whole) and deletes the files only those checks own. A file
+another remaining check also lists, one under `test_paths` and one already
+on `main` stays; the command prints each with its reason and the commit
+body lists them. Before committing, the suite exported from the trimmed
+tree must equal the tip's minus exactly the named checks. The player
+imports the commit like any director commit. A trim that edits a test file
+(drops one case of a shared file) is a hand-written commit of the same
+shape.
 
 Everything else stays: tests already on `main`, `tasks/<slug>/task.toml`,
 and the dropped tests themselves (with the post's task check, the record of
@@ -437,7 +451,7 @@ failed validation is a rejection with the listed reason (§10).
 | **block** | `block:` marker (worker) | — | — (escalates) |
 | **contest** / **reply** | `contest:` marker (worker); the reply (task agent or director) | §18 | §18 |
 | **send back** | adds `reviews/r<N>.md` + new/updated tests (director, or its task agent §17) | task is `tested`; run set now **fails**; re-pins; relays the note | `review` |
-| **trim** | deletes/edits the `files` of checks the task added, removes their entries from `architecture/Tests/<slug>.lean` and `<slug>.worker.lean`; leaves `tasks/<slug>/` alone (director, or its task agent §17) | task is `tested`; touches nothing else; both files only lose entries; run set **passes**; re-pins; stays `tested` (§6.5) | `accept` |
+| **trim** | deletes/edits the `files` of checks the task added, removes their entries from `architecture/Tests/<slug>.lean` and `<slug>.worker.lean`; leaves `tasks/<slug>/` alone (director: `dashboard trim`) | task is `tested`; touches nothing else; both files only lose entries; run set **passes**; re-pins; stays `tested` (§6.5) | `accept` |
 | **accept** | `accept:` marker (director) | task is `tested`; the player lands it (§11), merging `main` in first if it moved: a conflict leaves it `conflicted`, a suite failure caused by the merge sends it back to the worker | `accept` |
 | **resolve** | merge of the recorded `main` commit into the task tip (director) | task is `conflicted`; merges exactly the `main` commit the conflict was recorded against; differs from git's own merge only on the recorded paths; re-pins; the player then lands the accept (§11) | `history`, `ownership` |
 | **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is conflicted, contested or escalated; player moves the branch to `refs/retired/<slug>` and ends the worker session | `retire` |
@@ -869,7 +883,6 @@ fetch is validated, as one cumulative change from the hub tip:
 |---|---|---|---|
 | `ready` | adds `prompt.md`, the test files, `architecture/Tests/<slug>.lean` (the task check) | the post row of §9 | `post`, `evidence` |
 | `tested` | adds `reviews/r<N>.md` + new/updated tests | the send-back row of §9 | `review` |
-| `tested` | leaves `tasks/<slug>/` alone: removes tests the task added | the trim row of §9, only when the director asks | `accept` |
 | `contested` | adds `contests/c<N>.md` + optionally fixed tests | the reply row of §18 | `ownership` |
 | any | touches a path outside its scope: `architecture/Tests/<slug>.lean`, the `files` of checks in the task's run set, the APIs whose both ends are in `modules`, the hub's `test_paths`, `[player] lock_files` and `tasks/<slug>/`; changes `task.toml` (the director's plan); any other status | — | `ownership` |
 | any | an empty (marker) commit | — | `ownership` |
@@ -907,13 +920,12 @@ question) and which verdicts close it:
 | `review r<N>` + commit | its send-back is imported | `sent-back` |
 | `contest c<N>` | the contest is pasted | `unsure` |
 | `contest c<N>` + commit | its reply is imported | `replied` |
-| `trim` + commit | its trim is imported (it answers the question) | `trimmed` |
 | `question` | `dashboard ask` | `answer`, `unsure` |
 
 A step closed by a commit takes its verdict from the import, so the agent
 leaves it out; a named verdict closes the question first, then the step.
-Any other verdict, an empty `--why`, `accept` without `--suite` (each test
-the task added, keep or drop, §6.5) or `--suite` on another verdict exits 1
+Any other verdict, an empty `--why`, `accept` without `--suite` (each check
+the task added, by name, keep or drop, §6.5) or `--suite` on another verdict exits 1
 naming what waits. The command writes `dashboard-report.json` atomically;
 the player takes it, closes the step it names, and renders the block the
 director reads (`slug`, `step`, `commit`, `check`, `verdict`, `why`,
@@ -922,7 +934,7 @@ no waiting step allows (written by hand, or overtaken by a new step) is
 dropped and the agent told. The player notes the block on the task tip
 (`refs/notes/dashboard-agent-reports`, a list) and emits an `agent_report`
 event carrying it. `status` shows each task agent's session, liveness and
-latest verdict. The director trims what it drops (§6.5) and accepts on an
+latest verdict. The director drops what it marks drop (`dashboard trim`, §6.5) and accepts on an
 `accept` verdict, asks (`dashboard ask`) or takes an `unsure` to the
 operator; the decision stays the director's.
 

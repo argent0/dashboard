@@ -424,17 +424,6 @@ pub fn screen_tail(screen: Option<&str>) -> String {
 
 /// Wraps `s` in single quotes for safe interpolation into a `sh -c` string,
 /// escaping any single quote in `s` itself (`'` -> `'\''`).
-/// The first check of the task's own suite files (`own`) at the trim that
-/// the tip lacks verbatim, or `None` when the trim only removed checks.
-fn trim_additions(before: &config::Suite, after: &config::Suite, own: &[String]) -> Option<String> {
-    after
-        .checks
-        .iter()
-        .filter(|c| c.source.as_ref().is_some_and(|s| own.contains(s)))
-        .find(|c| before.check(&c.name) != Some(*c))
-        .map(|c| c.name.clone())
-}
-
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
@@ -2341,7 +2330,6 @@ impl<S: Sessions> Player<S> {
                         candidate,
                         &diffs,
                         &hub_state,
-                        Actor::Director,
                         report,
                     ),
                     Some(Verdict::Reject(reason)) => {
@@ -3042,8 +3030,9 @@ impl<S: Sessions> Player<S> {
 
     // ---- trim (spec §6.5) ----
 
-    /// A commit on a `tested` task that drops tests the task added from the
-    /// suite: the director keeps only those that matter to the application.
+    /// A director commit on a `tested` task that drops tests the task added
+    /// from the suite (`dashboard trim` builds it, `crate::trim`): the
+    /// director keeps only those that matter to the application.
     /// It may delete or edit test files the task added (absent on `main`)
     /// and remove checks from `architecture/Tests/<slug>.lean` and
     /// `<slug>.worker.lean` (with their `files`); the suite
@@ -3056,7 +3045,6 @@ impl<S: Sessions> Player<S> {
         candidate: &str,
         diffs: &[(char, String)],
         hub_state: &state::HubState,
-        actor: Actor,
         report: &mut TickReport,
     ) -> Result<(), String> {
         let main_tip = self
@@ -3068,15 +3056,15 @@ impl<S: Sessions> Player<S> {
             (Ok(b), Ok(a)) => (b, a),
             (_, Err(e)) | (Err(e), _) => {
                 let msg = format!("trim: task/{slug}: {e}");
-                return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
+                return self.reject(slug, candidate, Reason::Accept, msg, report);
             }
         };
-        if let Some(extra) = trim_additions(&before, &after, &own) {
+        if let Some(extra) = crate::trim::additions(&before, &after, &own) {
             let msg = format!(
                 "trim: task/{slug}: {} and {} may only lose checks; {extra:?} is new or changed",
                 own[0], own[1]
             );
-            return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
+            return self.reject(slug, candidate, Reason::Accept, msg, report);
         }
         // The files of the checks the trim removed are its to delete too.
         let dropped: Vec<&str> = before
@@ -3101,7 +3089,7 @@ impl<S: Sessions> Player<S> {
                 "trim: task/{slug}: a trim only deletes or edits test files this task added and removes checks from {}, not {path:?} (a send-back adds tasks/{slug}/reviews/r<N>.md)",
                 own[0]
             );
-            return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
+            return self.reject(slug, candidate, Reason::Accept, msg, report);
         }
 
         let suite = self.run_task_set(slug, candidate, Some(tip));
@@ -3111,14 +3099,14 @@ impl<S: Sessions> Player<S> {
                 "trim: task/{slug}: the run set fails without the trimmed tests\n{}",
                 suite.summary()
             );
-            return self.reject_by(actor, slug, candidate, Reason::Accept, msg, report);
+            return self.reject(slug, candidate, Reason::Accept, msg, report);
         }
 
         let hub_ref = format!("refs/heads/task/{slug}");
         self.hub
             .update_ref_cas(&hub_ref, candidate, tip)
             .map_err(|e| e.to_string())?;
-        records::record_import(&self.hub, candidate, actor, Transition::Trim, Some(slug))?;
+        records::record_import(&self.hub, candidate, Actor::Director, Transition::Trim, Some(slug))?;
         report
             .imported
             .push((hub_ref, candidate.to_string(), Transition::Trim));
@@ -5443,7 +5431,6 @@ impl<S: Sessions> Player<S> {
 
         let mv = match status {
             Status::Staged => Move::Post,
-            Status::Tested if is_trim(slug, &diffs) => Move::Trim,
             Status::Tested => Move::SendBack,
             Status::Contested => Move::ContestReply,
             _ => Move::Post,
@@ -5495,18 +5482,6 @@ impl<S: Sessions> Player<S> {
                 )?;
                 "send-back"
             }
-            (Verdict::Allow, Move::Trim) => {
-                self.try_trim(
-                    slug,
-                    tip,
-                    candidate,
-                    &diffs,
-                    &hub_state,
-                    Actor::TaskAgent,
-                    report,
-                )?;
-                "trim"
-            }
             (Verdict::Allow, Move::ContestReply) => {
                 self.try_contest_reply(
                     slug,
@@ -5555,15 +5530,10 @@ impl<S: Sessions> Player<S> {
             let (template, name, verdict) = match step {
                 "post" => ("task-agent.imported-post", "post".to_string(), report::Verdict::Posted),
                 "send-back" => ("task-agent.imported-send-back", review_step, report::Verdict::SentBack),
-                "trim" => ("task-agent.imported-trim", "trim".to_string(), report::Verdict::Trimmed),
                 _ => ("task-agent.imported-reply", contest_step, report::Verdict::Replied),
             };
             if let Some(git_dir) = self.session_git_dir(&key) {
                 report::set_step(&git_dir, &report::Owed::imported(name, candidate, verdict))?;
-                if verdict == report::Verdict::Trimmed {
-                    // The director asked for the trim: it is the answer.
-                    report::clear_question(&git_dir);
-                }
             }
             let text = self
                 .prompts()?

@@ -5,7 +5,7 @@
 # worker, and drives the whole director/player/worker loop by hand:
 #
 #   plan alpha -> post alpha -> tmux launch -> tested -> send-back -> tested
-#   -> accept -> plan+post beta (depends on alpha) -> block -> escalated
+#   -> `dashboard trim` -> accept -> plan+post beta (depends on alpha) -> block -> escalated
 #   -> retire -> a spike (answer, send back, conclude) -> two tasks in
 #   parallel, a conflicting accept, its resolution -> a worker that keeps
 #   dying: relaunch, the relaunch cap, --reset -> task agents on: a
@@ -479,14 +479,19 @@ case "$alpha_pastes" in
 esac
 
 # --------------------------------------------------------------------------
-# 5. Accept alpha. Tick -> hub main has a merge with Task: alpha, the tmux
+# 5. Trim alpha's check with `dashboard trim`, then accept alpha. Tick ->
+#    hub main has a merge with Task: alpha, the tmux
 #    session is gone, and status shows accepted.
 # --------------------------------------------------------------------------
 
-log "step 5: accept alpha"
-git -C "$DIR_REPO" fetch -q hub
+log "step 5: trim and accept alpha"
 git -C "$DIR_REPO" checkout -q task/alpha
-git -C "$DIR_REPO" merge -q --ff-only hub/task/alpha
+trim_out=$(cd "$DIR_REPO" && dash trim alpha alpha-check)
+assert_contains "$trim_out" "deleted architecture/Tests/alpha.lean" "dashboard trim's output"
+alpha_trimmed() {
+  [ "$(git --git-dir "$HOME_DIR/hub.git" rev-parse refs/heads/task/alpha)" = "$(git -C "$DIR_REPO" rev-parse task/alpha)" ]
+}
+wait_until "alpha's trim imported" alpha_trimmed
 git -C "$DIR_REPO" commit -q --allow-empty -m "accept: alpha"
 
 wait_until "task/alpha accepted" task_status_is alpha accepted

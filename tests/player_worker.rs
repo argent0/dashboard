@@ -1585,3 +1585,130 @@ fn a_re_pin_keeps_the_workers_uncommitted_work() {
     assert_eq!(std::fs::read_to_string(clone.join("a/wip.rs")).unwrap(), "wip\n");
     assert_eq!(std::fs::read_to_string(clone.join("a/lib.rs")).unwrap(), "pub fn f2() {}\n");
 }
+
+// --------------------------------------------------------------------------
+// `dashboard trim` (spec §6.5)
+// --------------------------------------------------------------------------
+
+/// A tested task `slug` on module `a`: its post declares `<slug>-check` and
+/// `tr_one` / `tr_two`, which share `a/tests/shared.sh`; its worker adds
+/// `wk_own` (file `a/tests/t.sh`) in its worker file.
+fn tested_for_trim(slug: &str) -> (DirectorRepo, TempDir, Home, Player<NullSessions>) {
+    let repo = director_repo();
+    write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[("Tests", AB_SUITE)]);
+    for (f, t) in [("a/lib.rs", "pub fn f() {}\n"), ("b/lib.rs", "pub fn g() {}\n"), ("api/.keep", ""), ("stories/s.sh", "true\n")] {
+        write_file(repo.path(), f, t);
+    }
+    commit(repo.path(), "modules a and b");
+    let (home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(&repo, &mut player, slug, &format!("title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"a\"]\n"));
+    checkout_branch(repo.path(), &format!("task/{slug}"));
+    write_file(repo.path(), &format!("tasks/{slug}/prompt.md"), "do the thing\n");
+    let tests = format!(
+        "{}\n-- Scaffolding: the first step.\n{}  files = [\"a/tests/one.sh\", \"a/tests/shared.sh\"]\n\n{}  files = [\"a/tests/two.sh\", \"a/tests/shared.sh\"]\n",
+        lean_task_tests(&format!("{slug}-check"), "test -f a/feature.txt", "[a]"),
+        lean_check("tr_one", "sh a/tests/one.sh", "[a]"),
+        lean_check("tr_two", "sh a/tests/two.sh", "[a]"),
+    );
+    write_file(repo.path(), &tests_file(slug), &tests);
+    write_file(repo.path(), "a/tests/one.sh", "sh a/tests/shared.sh\n");
+    write_file(repo.path(), "a/tests/two.sh", "sh a/tests/shared.sh\n");
+    write_file(repo.path(), "a/tests/shared.sh", "test -f a/feature.txt\n");
+    commit(repo.path(), &format!("post: {slug}"));
+    let report = player.tick().expect("post tick");
+    assert_eq!(report.launched, vec![slug.to_string()], "{report}");
+    finish_with_own_check(&repo, slug, "[a]");
+    let report = player.tick().expect("finish tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    (repo, home_dir, home, player)
+}
+
+fn trim(repo: &DirectorRepo, home: &Home, slug: &str, names: &[&str]) -> Result<dashboard::trim::Outcome, String> {
+    let scratch = TempDir::new().unwrap();
+    let exporter = dashboard::lean::Exporter::new(scratch.path().to_path_buf(), dashboard::sandbox::Sandbox::off());
+    let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    dashboard::trim::run(&Git::new(home.hub()), &repo.git(), slug, &names, &exporter)
+}
+
+/// The player imports `out`'s commit as a trim and the task stays tested.
+fn assert_trim_imported(player: &mut Player<NullSessions>, hub: &Git, slug: &str, out: &dashboard::trim::Outcome) {
+    let report = player.tick().expect("trim tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(report.imported.len(), 1, "{report}");
+    assert_eq!(report.imported[0].2, Transition::Trim, "{report}");
+    assert_eq!(hub.rev_parse(&format!("refs/heads/task/{slug}")).as_deref(), Some(out.commit.as_str()));
+    assert_eq!(task_status(hub, slug), Status::Tested);
+}
+
+#[test]
+fn trim_keeps_a_file_another_check_still_lists() {
+    let (repo, _home_dir, home, mut player) = tested_for_trim("ts");
+    let hub = Git::new(home.hub());
+
+    let out = trim(&repo, &home, "ts", &["tr_one"]).expect("trim tr_one");
+    assert_eq!(out.plan.deleted, vec!["a/tests/one.sh".to_string()]);
+    assert_eq!(
+        out.plan.kept,
+        vec![("a/tests/shared.sh".to_string(), "also in the files of check tr_two".to_string())]
+    );
+    // The checked-out branch moved with its tree.
+    assert_eq!(repo.git().rev_parse("HEAD").as_deref(), Some(out.commit.as_str()));
+    assert!(!repo.path().join("a/tests/one.sh").exists());
+    let lean = std::fs::read_to_string(repo.path().join(tests_file("ts"))).unwrap();
+    assert!(!lean.contains("tr_one") && !lean.contains("Scaffolding"), "{lean}");
+    assert!(lean.contains("check tr_two where") && lean.contains("check «ts-check» where"), "{lean}");
+    assert!(repo.git().commit_body(&out.commit).unwrap_or_default().contains("a/tests/shared.sh"));
+    assert_trim_imported(&mut player, &hub, "ts", &out);
+
+    // Its last lister gone, the shared file goes too.
+    let out = trim(&repo, &home, "ts", &["tr_two"]).expect("trim tr_two");
+    let mut deleted = out.plan.deleted.clone();
+    deleted.sort();
+    assert_eq!(deleted, vec!["a/tests/shared.sh".to_string(), "a/tests/two.sh".to_string()]);
+    assert!(out.plan.kept.is_empty());
+    assert_trim_imported(&mut player, &hub, "ts", &out);
+}
+
+#[test]
+fn trim_refuses_unknown_names_other_files_checks_and_untested_tasks() {
+    let (repo, _home_dir, home, mut player) = tested_for_trim("tu");
+    let tip = repo.git().rev_parse("refs/heads/task/tu");
+
+    let err = trim(&repo, &home, "tu", &["nope"]).unwrap_err();
+    assert!(err.contains("no check \"nope\"") && err.contains("tr_one") && err.contains("wk_own"), "{err}");
+    let err = trim(&repo, &home, "tu", &["tr_one", "story"]).unwrap_err();
+    assert!(err.contains("architecture/Tests.lean"), "{err}");
+    assert!(err.contains("a trim drops only checks task/tu added"), "{err}");
+    let err = trim(&repo, &home, "nosuch", &["tr_one"]).unwrap_err();
+    assert!(err.contains("no task/nosuch"), "{err}");
+    checkout_branch(repo.path(), "main");
+    plan(&repo, &mut player, "tv", "title = \"tv\"\nphase = \"p1\"\nmodules = [\"a\"]\n");
+    let err = trim(&repo, &home, "tv", &["tr_one"]).unwrap_err();
+    assert!(err.contains("task/tv is ready"), "{err}");
+    assert_eq!(repo.git().rev_parse("refs/heads/task/tu"), tip, "a refused trim commits nothing");
+}
+
+#[test]
+fn trim_drops_a_worker_check_and_its_whole_file() {
+    let (repo, _home_dir, home, mut player) = tested_for_trim("tw");
+    let hub = Git::new(home.hub());
+    // Off the branch: only its ref moves.
+    checkout_branch(repo.path(), "main");
+
+    let out = trim(&repo, &home, "tw", &["wk_own", "tr_one", "tr_two"]).expect("trim");
+    assert!(out.plan.lean.contains(&(worker_file("tw"), None)), "{:?}", out.plan.lean);
+    let mut deleted = out.plan.deleted.clone();
+    deleted.sort();
+    assert_eq!(deleted, ["a/tests/one.sh", "a/tests/shared.sh", "a/tests/t.sh", "a/tests/two.sh"]);
+    assert_eq!(repo.git().rev_parse("refs/heads/task/tw").as_deref(), Some(out.commit.as_str()));
+    assert_eq!(repo.git().run(&["symbolic-ref", "--short", "HEAD"]).unwrap(), "main");
+    assert_trim_imported(&mut player, &hub, "tw", &out);
+    let tip = hub.rev_parse("refs/heads/task/tw").unwrap();
+    assert!(hub.blob_hash(&tip, &worker_file("tw")).is_none());
+    assert!(hub.blob_hash(&tip, &tests_file("tw")).is_some());
+
+    // A dropped name is unknown from then on.
+    let err = trim(&repo, &home, "tw", &["wk_own"]).unwrap_err();
+    assert!(err.contains("no check \"wk_own\""), "{err}");
+}

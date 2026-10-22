@@ -163,8 +163,8 @@ pub fn decide(actor: Actor, mv: Move, ctx: Ctx) -> Verdict {
             | Move::Other => Reject(Reason::Ownership),
         },
         // A task agent posts while staged, sends back while tested, replies
-        // to a contest while contested, trims while tested (when the director
-        // asks it to); never a marker, never the plan.
+        // to a contest while contested; never a trim (`dashboard trim` is
+        // the director's), a marker or the plan.
         Actor::TaskAgent => match mv {
             Move::Post if status == Status::Staged && managed => Allow,
             // The director's plan moved the task out from under a running
@@ -177,9 +177,7 @@ pub fn decide(actor: Actor, mv: Move, ctx: Ctx) -> Verdict {
             {
                 Hold
             }
-            Move::SendBack | Move::Trim if status == Status::Tested && managed && !spike => {
-                Allow
-            }
+            Move::SendBack if status == Status::Tested && managed && !spike => Allow,
             Move::ContestReply if status == Status::Contested && managed => Allow,
             Move::Post
             | Move::Replan
@@ -446,7 +444,7 @@ mod tests {
             (Actor::Director, Move::Other, &[]),
             (Actor::TaskAgent, Move::Post, &["staged"]),
             (Actor::TaskAgent, Move::SendBack, &["tested"]),
-            (Actor::TaskAgent, Move::Trim, &["tested"]),
+            (Actor::TaskAgent, Move::Trim, &[]),
             (Actor::TaskAgent, Move::ContestReply, &["contested"]),
             (Actor::TaskAgent, Move::Replan, &[]),
             (Actor::TaskAgent, Move::Stage, &[]),

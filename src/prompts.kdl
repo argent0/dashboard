@@ -277,10 +277,6 @@ task-agent max-bytes=512 {
           inside the task's modules and its test files in `files`. task.toml is the director's
           plan; leave it as it is.
         - Never commit accept:, retire: or any other marker: you recommend, the director decides.
-        - Trim only when the director asks: ONE commit on a tested task that deletes (or edits)
-          test files this task added and removes their checks from architecture/Tests/{slug}.lean
-          and architecture/Tests/{slug}.worker.lean, adding no review note. The run set must still
-          pass.
 
         The task, as the director planned it (phase {phase}):
 
@@ -297,7 +293,7 @@ task-agent max-bytes=512 {
                 [--concerns "<anything cross-task the director should know>"]
 
         No diffs and no code in it; the player adds the slug, step and commit. A step you close with
-        a commit (post, send-back, contest reply, trim) takes its verdict from the import: once the
+        a commit (post, send-back, contest reply) takes its verdict from the import: once the
         player pastes that it imported your commit, report without a verdict. A review closes with
         `accept`, a question with `answer`, and any step you can't complete with `unsure`. The
         command names the verdicts the step allows when you give another.
@@ -374,9 +370,10 @@ task-agent max-bytes=512 {
         test (special-cased inputs, monkeypatching, a helper that neuters other tests), adds no impure
         test, and won't break the tasks after it. Then either:
         - recommend accept: commit nothing, run dashboard report accept --why "…" --suite "…". In
-          --suite, mark each test this task added keep (it guards behaviour the application
-          depends on) or drop (it only drove this task: scaffolding, a step since covered by a
-          broader test); the director decides which stay in the suite;
+          --suite, mark each check this task added, by its name in architecture/Tests/{slug}.lean
+          or {slug}.worker.lean, keep (it guards behaviour the application depends on) or drop
+          (it only drove this task: scaffolding, a step since covered by a broader test); the
+          director decides which stay in the suite;
         - send back: ONE commit adding tasks/{slug}/reviews/r{round}.md (what is wrong) and a new or
           updated test that makes the run set fail again. Before committing
           it, run that test against the worker's code as it is and confirm it fails, for the
@@ -455,8 +452,6 @@ task-agent max-bytes=512 {
     imported-post #"The player imported your post at {commit}; the worker is launched. Report it (dashboard report --why "…"), then wait: the player pastes the next review request here."#
     // {commit}
     imported-send-back #"The player imported your send-back at {commit}; the review is relayed to the worker. Report it (dashboard report --why "…"), then wait: the player pastes the next review request here."#
-    // {commit}
-    imported-trim #"The player imported your trim at {commit}; the task stays tested for the director to accept. Report it (dashboard report --why "…"), then wait."#
     // {commit}
     imported-reply #"The player imported your contest reply at {commit}; your reply is relayed to the worker. Report it (dashboard report --why "…"), then wait: the player pastes the next review request here."#
 

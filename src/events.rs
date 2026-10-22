@@ -199,7 +199,7 @@ impl Event {
             )),
             EventKind::AgentLaunched => None, // informational: the task agent posts or reviews it
             EventKind::AgentReport => Some(format!(
-                "accept: commit `accept: {slug}` with its why as the body; unsure: `dashboard ask {slug} \"...\"` or take it to the operator; posted, sent-back, replied, trimmed, answer: nothing to do"
+                "accept: drop the checks its suite line marks drop with `dashboard trim {slug} <check>…`, then commit `accept: {slug}` with its why as the body; unsure: `dashboard ask {slug} \"...\"` or take it to the operator; posted, sent-back, replied, answer: nothing to do"
             )),
             EventKind::AgentDied => Some(format!(
                 "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug} --agent; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug} --agent{RELAUNCH_CAP}"

@@ -24,5 +24,6 @@ pub mod report;
 pub mod sandbox;
 pub mod speedup;
 pub mod spike;
+pub mod trim;
 pub mod state;
 pub mod ui;
