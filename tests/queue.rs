@@ -57,7 +57,7 @@ fn queued_run_reports_output_and_never_strikes() {
 
     // Fails: the flag is missing.
     let snap = queue::snapshot(&wt).unwrap();
-    let req = queue::enqueue(&home, &wt, "x", &snap, 1).unwrap();
+    let req = queue::enqueue(&home, &wt, "x", &snap, &[], 1).unwrap();
     assert!(queue::next(&home).is_some());
     player.tick().expect("serve tick");
     let (pass, text) = queue::wait(&home, &req.id, Some(Duration::from_secs(1))).expect("result");
@@ -69,7 +69,7 @@ fn queued_run_reports_output_and_never_strikes() {
     let head = wt.rev_parse("HEAD").unwrap();
     write_file(&dir, "ok.flag", "1\n");
     let snap = queue::snapshot(&wt).unwrap();
-    let req = queue::enqueue(&home, &wt, "x", &snap, 2).unwrap();
+    let req = queue::enqueue(&home, &wt, "x", &snap, &[], 2).unwrap();
     player.tick().expect("serve tick");
     let (pass, text) = queue::wait(&home, &req.id, Some(Duration::from_secs(1))).expect("result");
     assert!(pass, "{text}");

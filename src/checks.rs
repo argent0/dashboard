@@ -206,6 +206,24 @@ impl RunSet {
     pub fn whole(checks: Vec<Check>, why: &str) -> RunSet {
         RunSet { checks, whole: true, why: why.to_string() }
     }
+
+    /// The named checks of the set, in set order (`dashboard test
+    /// [check…]`, spec §21); no names keeps the whole set. A name outside
+    /// the set is an error listing the set.
+    pub fn restrict(self, names: &[String]) -> Result<RunSet, String> {
+        if names.is_empty() {
+            return Ok(self);
+        }
+        if let Some(n) = names.iter().find(|n| !self.checks.iter().any(|c| c.name == **n)) {
+            let all: Vec<&str> = self.checks.iter().map(|c| c.name.as_str()).collect();
+            return Err(format!("check {n:?} is outside the run set; the run set is: {}", all.join(", ")));
+        }
+        Ok(RunSet {
+            checks: self.checks.into_iter().filter(|c| names.contains(&c.name)).collect(),
+            whole: false,
+            why: format!("{} of {}", names.join(", "), self.why),
+        })
+    }
 }
 
 // --------------------------------------------------------------------------

@@ -51,7 +51,14 @@ fn launched(runs: &str) -> (DirectorRepo, TempDir, Home, Player<NullSessions>, P
 }
 
 fn dash(clone: &PathBuf, home: &Home, cmd: &str) -> (i32, String) {
-    let out = run_dashboard(&[cmd, "--home", home.root.to_str().unwrap()], clone);
+    dash_args(clone, home, &[cmd])
+}
+
+/// `dashboard <args…> --home <home>` in `clone`: exit code and output.
+fn dash_args(clone: &PathBuf, home: &Home, args: &[&str]) -> (i32, String) {
+    let mut all = args.to_vec();
+    all.extend(["--home", home.root.to_str().unwrap()]);
+    let out = run_dashboard(&all, clone);
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     (out.status.code().unwrap_or(-1), text)
 }
@@ -114,9 +121,52 @@ fn a_queued_run_runs_the_run_set() {
     write_file(&clone, "a/feature.txt", "x\n");
     let wt = Git::new(&clone);
     let snap = queue::snapshot(&wt).unwrap();
-    let req = queue::enqueue(&home, &wt, "s", &snap, 1).unwrap();
+    let req = queue::enqueue(&home, &wt, "s", &snap, &[], 1).unwrap();
     player.tick().expect("serve tick");
     let (pass, text) = queue::wait(&home, &req.id, Some(Duration::from_secs(1))).expect("result");
     assert!(pass, "{text}");
     assert!(!text.contains("b_only"), "{text}");
+}
+
+#[test]
+fn test_runs_only_the_named_checks() {
+    let (_repo, _home_dir, home, _player, clone) = launched("parallel");
+    let (code, text) = dash_args(&clone, &home, &["test", "unit"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("running unit of the run set of a"), "{text}");
+    assert!(text.contains("ok   unit") && !text.contains("story") && !text.contains("s-check"), "{text}");
+    let (code, text) = dash_args(&clone, &home, &["test", "s-check", "unit"]);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("ok   unit") && text.contains("FAIL s-check") && !text.contains("story"), "{text}");
+}
+
+#[test]
+fn a_check_outside_the_run_set_is_refused() {
+    let (_repo, _home_dir, home, _player, clone) = launched("parallel");
+    for name in ["b_only", "nope"] {
+        let (code, text) = dash_args(&clone, &home, &["test", name]);
+        assert_eq!(code, 1, "{text}");
+        assert!(text.contains(&format!("check \"{name}\" is outside the run set")), "{text}");
+        for n in ["unit", "story", "s-check"] {
+            assert!(text.contains(n), "{n}: {text}");
+        }
+    }
+    assert!(Git::new(home.hub()).for_each_ref("refs/dashboard/test/*").is_empty());
+}
+
+#[test]
+fn a_queued_run_takes_check_names() {
+    let (_repo, _home_dir, home, mut player, clone) = launched("queued");
+    let wt = Git::new(&clone);
+    let snap = queue::snapshot(&wt).unwrap();
+    let req = queue::enqueue(&home, &wt, "s", &snap, &["unit".into()], 1).unwrap();
+    player.tick().expect("serve tick");
+    let (pass, text) = queue::wait(&home, &req.id, Some(Duration::from_secs(1))).expect("result");
+    assert!(pass, "{text}");
+    assert!(text.contains("ok   unit") && !text.contains("s-check") && !text.contains("story"), "{text}");
+    // A name outside the run set fails the queued run with the allowed names.
+    let req = queue::enqueue(&home, &wt, "s", &snap, &["b_only".into()], 2).unwrap();
+    player.tick().expect("serve tick");
+    let (pass, text) = queue::wait(&home, &req.id, Some(Duration::from_secs(1))).expect("result");
+    assert!(!pass && text.contains("outside the run set"), "{text}");
 }

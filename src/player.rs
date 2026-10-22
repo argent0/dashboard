@@ -1153,8 +1153,13 @@ impl<S: Sessions> Player<S> {
             Some(sha) => {
                 // The task's run set, against the hub tip it builds on.
                 let tip = self.hub.rev_parse(&format!("refs/heads/task/{}", req.slug));
-                let suite = self.run_task_set(&req.slug, &sha, tip.as_deref());
-                (suite.pass, queue::render(&suite))
+                match self.run_set_for(&req.slug, &sha, tip.as_deref()).and_then(|s| s.restrict(&req.checks)) {
+                    Ok(set) => {
+                        let suite = self.runner.run_set(&sha, &set);
+                        (suite.pass, queue::render(Some(&set.why), &suite))
+                    }
+                    Err(e) => (false, queue::render(None, &checks::SuiteResult::failing(e))),
+                }
             }
             None => (
                 false,

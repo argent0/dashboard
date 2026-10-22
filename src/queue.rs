@@ -20,6 +20,9 @@ pub struct Request {
     pub commit: String,
     /// The repository holding `refs/dashboard/test/<id>`, to fetch from.
     pub repo: PathBuf,
+    /// The checks to run, all within the run set; none runs the whole set.
+    #[serde(default)]
+    pub checks: Vec<String>,
 }
 
 impl Request {
@@ -104,6 +107,7 @@ pub fn enqueue(
     worktree: &Git,
     slug: &str,
     commit: &str,
+    checks: &[String],
     now_millis: u128,
 ) -> Result<Request, String> {
     let common = worktree
@@ -114,6 +118,7 @@ pub fn enqueue(
         slug: slug.to_string(),
         commit: commit.to_string(),
         repo: PathBuf::from(common),
+        checks: checks.to_vec(),
     };
     worktree
         .update_ref(&req.ref_name(), commit)
@@ -172,12 +177,13 @@ fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// What the agent reads: every check's verdict, command and output tail.
-pub fn render(suite: &SuiteResult) -> String {
+/// What the agent reads: which checks ran (`why`, the run set's), then
+/// every check's verdict, command and output tail.
+pub fn render(why: Option<&str>, suite: &SuiteResult) -> String {
     if let Some(e) = &suite.error {
         return format!("suite could not run: {e}\n");
     }
-    let mut out = String::new();
+    let mut out = why.map(|w| format!("running {w}\n")).unwrap_or_default();
     for c in &suite.checks {
         out.push_str(&render_check(c));
     }

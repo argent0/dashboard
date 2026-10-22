@@ -134,6 +134,9 @@ enum Command {
     /// `[player] runs = "queued"`, where it waits its turn in the player's
     /// queue. Exits 1 if the run set fails. A failing run is never a strike.
     Test {
+        /// Run only these checks, each in the run set; none runs it whole.
+        #[arg(num_args = 0..)]
+        checks: Vec<String>,
         /// Print the result file's path and return instead of waiting.
         #[arg(long)]
         no_wait: bool,
@@ -177,7 +180,7 @@ fn main() {
         }
         Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
         Some(Command::Scope) => run_scope(args.home),
-        Some(Command::Test { no_wait, timeout }) => run_test(args.home, no_wait, timeout),
+        Some(Command::Test { checks, no_wait, timeout }) => run_test(args.home, &checks, no_wait, timeout),
         Some(Command::Arch { action: ArchAction::Check { root } }) => run_arch_check(&root),
         Some(Command::Arch { action: ArchAction::Gen { root, check } }) => run_arch_gen(&root, check),
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
@@ -662,48 +665,74 @@ fn run_scope(home: Option<PathBuf>) {
     }
 }
 
-fn run_test(home: Option<PathBuf>, no_wait: bool, timeout: Option<u64>) {
+/// The snapshot of `c`'s working tree (`queue::snapshot`), fetched into the
+/// hub under a temporary `refs/dashboard/test/*` ref: `(commit, hub ref)`.
+/// The caller deletes the ref once done with the commit.
+fn snapshot_for_run(c: &TaskClone, hub: &git::Git) -> (String, String) {
+    let commit = queue::snapshot(&c.worktree).unwrap_or_else(|e| fail(e));
+    let local = format!("refs/dashboard/test/{:016}-{}", now_millis(), c.slug);
+    let repo = c
+        .worktree
+        .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .unwrap_or_else(|e| fail(e.to_string()));
+    c.worktree.update_ref(&local, &commit).unwrap_or_else(|e| fail(e.to_string()));
+    let fetched = hub.run(&["fetch", "--quiet", &repo, &format!("+{local}:{local}")]);
+    let _ = c.worktree.delete_ref(&local);
+    fetched.unwrap_or_else(|e| fail(e.to_string()));
+    (commit, local)
+}
+
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// The task's modules at the hub tip of `task/<slug>`, with that tip.
+fn task_modules(hub: &git::Git, slug: &str) -> (Option<String>, Vec<String>) {
+    let tip = hub.rev_parse(&format!("refs/heads/task/{slug}"));
+    let modules = tip
+        .as_deref()
+        .and_then(|t| dashboard::records::task_config_at(hub, t, slug))
+        .map(|cfg| cfg.modules)
+        .unwrap_or_default();
+    (tip, modules)
+}
+
+fn run_test(home: Option<PathBuf>, checks: &[String], no_wait: bool, timeout: Option<u64>) {
     let c = task_clone(home);
     let hub = git::Git::new(c.home.hub());
     let roadmap = hub_roadmap(&hub);
-    let commit = queue::snapshot(&c.worktree).unwrap_or_else(|e| fail(e));
-    if roadmap.player.runs != config::Runs::Queued {
-        // Here and now, in the CLI's own worktree: fetch the snapshot into
-        // the hub (the cache is its notes), run, drop the ref.
-        let slug = c.slug.as_str();
-        let millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let local = format!("refs/dashboard/test/{millis:016}-{slug}");
-        let repo = c
-            .worktree
-            .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .unwrap_or_else(|e| fail(e.to_string()));
-        c.worktree.update_ref(&local, &commit).unwrap_or_else(|e| fail(e.to_string()));
-        let fetched = hub.run(&["fetch", "--quiet", &repo, &format!("+{local}:{local}")]);
-        let _ = c.worktree.delete_ref(&local);
-        fetched.unwrap_or_else(|e| fail(e.to_string()));
-        let runner = cli_runner(&c.home, &roadmap);
-        let tip = hub.rev_parse(&format!("refs/heads/task/{slug}"));
-        let modules = tip
-            .as_deref()
-            .and_then(|t| dashboard::records::task_config_at(&hub, t, slug))
-            .map(|cfg| cfg.modules)
-            .unwrap_or_default();
-        let suite = match runner.run_set_for(&commit, &modules, tip.as_deref()) {
-            Ok(set) => runner.run_set(&commit, &set),
-            Err(e) => dashboard::checks::SuiteResult::failing(e),
+    let runner = cli_runner(&c.home, &roadmap);
+    let (commit, local) = snapshot_for_run(&c, &hub);
+    let (tip, modules) = task_modules(&hub, &c.slug);
+    let queued = roadmap.player.runs == config::Runs::Queued;
+    // The run set at the snapshot, so the worker's own checks count. The
+    // queued path computes it only to check the names.
+    let set = (!queued || !checks.is_empty()).then(|| runner.run_set_for(&commit, &modules, tip.as_deref()));
+    // Names outside the run set (or a run set that can't be built for
+    // them) are the caller's error.
+    let set = set.map(|set| match set.and_then(|s| s.restrict(checks)) {
+        Err(e) if !checks.is_empty() => {
+            let _ = hub.delete_ref(&local);
+            fail(e)
+        }
+        other => other,
+    });
+    if !queued {
+        // Here and now, in the CLI's own worktree (the cache is the hub's
+        // notes); the snapshot's ref goes once the run is done.
+        let (why, suite) = match set.expect("computed for a local run") {
+            Ok(set) => (Some(set.why.clone()), runner.run_set(&commit, &set)),
+            Err(e) => (None, dashboard::checks::SuiteResult::failing(e)),
         };
         let _ = hub.delete_ref(&local);
-        print!("{}", queue::render(&suite));
+        print!("{}", queue::render(why.as_deref(), &suite));
         std::process::exit(if suite.pass { 0 } else { 1 });
     }
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let req = queue::enqueue(&c.home, &c.worktree, &c.slug, &commit, millis).unwrap_or_else(|e| fail(e));
+    let _ = hub.delete_ref(&local);
+    let req = queue::enqueue(&c.home, &c.worktree, &c.slug, &commit, checks, now_millis()).unwrap_or_else(|e| fail(e));
     let result = queue::result_path(&c.home, &req.id);
     if no_wait {
         println!("{}", result.display());
