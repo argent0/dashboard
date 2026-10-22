@@ -16,6 +16,7 @@ use dashboard::init;
 use dashboard::paths::{self, Home};
 use dashboard::player::{self, NullSessions, Player, Sessions, TickReport};
 use dashboard::records::{self, Actor, Transition};
+use dashboard::report;
 use dashboard::state::{self, Status};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -153,12 +154,28 @@ fn plan_post_finish(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
     );
 }
 
-/// The report file the player reads from the task agent's git directory.
-fn report_file(repo: &DirectorRepo) -> PathBuf {
+/// The task agent's worktree git directory, where `dashboard report`
+/// files its report.
+fn agent_git_dir(repo: &DirectorRepo) -> PathBuf {
     let out = Git::new(agent_dir(repo))
         .run(&["rev-parse", "--absolute-git-dir"])
         .expect("git dir");
-    PathBuf::from(out).join("dashboard-report.md")
+    PathBuf::from(out)
+}
+
+/// `dashboard report <verdict> --why <why>` (and `--suite` on accept), as
+/// the task agent runs it from its worktree.
+fn file_report(repo: &DirectorRepo, verdict: Option<&str>, why: &str) -> Result<report::Filed, String> {
+    report::submit(
+        &agent_git_dir(repo),
+        &report::Draft {
+            verdict: verdict.map(String::from),
+            why: why.to_string(),
+            check: Some("src/feature.txt exists".to_string()),
+            suite: (verdict == Some("accept")).then(|| "s-check: keep".to_string()),
+            concerns: None,
+        },
+    )
 }
 
 // --------------------------------------------------------------------------
@@ -197,7 +214,7 @@ fn a_ready_task_launches_its_task_agent_with_the_post_step() {
         "mind the widget cache",
         "ship the widget",
         "Step: post",
-        "verdict:",
+        "dashboard report",
     ] {
         assert!(
             prompt.contains(needle),
@@ -619,6 +636,15 @@ fn the_task_agents_send_back_is_imported_and_relayed_to_the_worker() {
             .any(|(k, m)| k == "s" && m.contains("also src/feature2.txt")),
         "the worker gets the review"
     );
+
+    // The import is the verdict: the report adds the why.
+    file_report(&repo, None, "feature2 is missing.").expect("implied sent-back");
+    let report = player.tick().expect("tick");
+    let text = &report.agent_reports[0].1.text;
+    assert!(
+        text.contains(&format!("step: review r1\ncommit: {sha}\n")) && text.contains("verdict: sent-back"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -629,12 +655,26 @@ fn a_report_becomes_a_note_and_an_agent_report_event() {
     let mut player = open_player(&home);
     plan_post_finish(&repo, &mut player);
 
-    let file = report_file(&repo);
-    std::fs::write(&file, "slug: s\nstep: review r1\ncommit: none\ncheck: src/feature.txt exists\nverdict: accept\nwhy: it does it.\nconcerns: none\n").unwrap();
+    // The review takes accept or unsure; the command names them.
+    for (verdict, needle) in [
+        (Some("sent-back"), "review r1 (accept | unsure)"),
+        (Some("maybe"), "no verdict"),
+        (None, "name your verdict"),
+    ] {
+        let err = file_report(&repo, verdict, "it does it.").expect_err("refused");
+        assert!(err.contains(needle), "{err}");
+    }
+    file_report(&repo, Some("accept"), "it does it.").expect("accept");
     let report = player.tick().expect("tick");
     assert_eq!(report.agent_reports.len(), 1, "{report}");
     assert_eq!(report.agent_reports[0].1.verdict, "accept");
-    assert!(!file.exists(), "the player consumes the report");
+    let text = &report.agent_reports[0].1.text;
+    assert!(
+        text.starts_with("slug: s\nstep: review r1\ncommit: none\ncheck: src/feature.txt exists\nverdict: accept\nwhy: it does it.\nsuite: s-check: keep\nconcerns: none"),
+        "{text}"
+    );
+    let err = file_report(&repo, Some("unsure"), "again").expect_err("closed");
+    assert!(err.contains("no step waits"), "{err}");
 
     let t = task(&hub, "s");
     assert_eq!(
@@ -682,6 +722,11 @@ fn ask_relaunch_and_death_of_a_task_agent() {
             .iter()
             .any(|m| m.contains("Question from the director: why that check?"))
     );
+    let err = file_report(&repo, Some("posted"), "early").expect_err("not imported");
+    assert!(err.contains("follows from your commit"), "{err}");
+    assert_eq!(file_report(&repo, Some("answer"), "it guards the cache.").unwrap().step, "question");
+    let report = player.tick().expect("tick");
+    assert_eq!(report.agent_reports[0].1.verdict, "answer");
     assert!(
         player.relaunch_agent("s").is_err(),
         "alive: nothing to relaunch"
@@ -814,7 +859,7 @@ fn a_collected_report_starts_the_task_agents_relaunch_count_over() {
     }
     assert_eq!(agent_relaunches(), 2);
 
-    std::fs::write(report_file(&repo), "slug: s\nverdict: unsure\nwhy: hm.\n").unwrap();
+    file_report(&repo, Some("unsure"), "hm.").expect("unsure");
     let report = player.tick().expect("tick");
     assert_eq!(report.agent_reports.len(), 1, "{report}");
     assert_eq!(agent_relaunches(), 0, "a report is progress");
@@ -862,11 +907,7 @@ fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
     assert_eq!(idle().len(), 1);
 
     // A stop after leaving a report is the wait for the director.
-    std::fs::write(
-        report_file(&repo),
-        "verdict: question\nwhy: which widget?\n",
-    )
-    .unwrap();
+    file_report(&repo, Some("unsure"), "which widget?").expect("unsure on the post");
     std::fs::write(&marker, "stop 101 2\n").unwrap();
     let report = player.tick().expect("tick");
     assert_eq!(report.agent_reports.len(), 1, "{report}");
@@ -1062,6 +1103,9 @@ fn a_contest_goes_to_the_task_agent_and_its_reply_back_to_the_worker() {
     assert!(player.sessions().sent.iter().any(|(k, m)| k == "s"
         && m.contains("Reply to your contest c1")
         && m.contains("created by the build")));
+    assert_eq!(file_report(&repo, None, "fair point.").unwrap().verdict, report::Verdict::Replied);
+    let report = player.tick().expect("tick");
+    assert!(report.agent_reports[0].1.text.contains("step: contest c1\n"), "{report}");
 }
 
 #[test]

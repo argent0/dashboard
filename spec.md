@@ -808,7 +808,8 @@ with the operator.
   pastes a review request for the next round into the task agent's session
   (once per tip, recorded in `refs/dashboard/agent-asked/<slug>`).
 - *Questions*: `dashboard ask <slug> "<question>"` pastes the director's
-  question into the session; the answer comes back as a report.
+  question into the session and notes it as waiting for an answer; the
+  answer comes back as a report.
 - *End*: the session is killed and the clone removed when the task is
   accepted, retired or auto-retired. An escalated task keeps its task agent,
   so the director can ask it what went wrong.
@@ -822,8 +823,8 @@ source (§4) makes its commits the task agent's (`actor: task_agent`).
 
 **Prompt.** The player writes it from `prompts.kdl` (§19): the task agent's role and rules, the task
 as planned (`task.toml`, the phase goal, and the director's `brief`, a free
-text field of `task.toml` that is the director's channel to it), the report
-format, and the current step. The rules: never write a throwaway
+text field of `task.toml` that is the director's channel to it), how to
+report, and the current step. The rules: never write a throwaway
 implementation (implementing is the worker's; it may run any test it
 writes against the code as it is, to see it fail for the right reason, but
 never against code it wrote); test observable behaviour, not one
@@ -865,17 +866,41 @@ While task agents are on, a director post or send-back on an agent-managed
 task is an `ownership` rejection: those are the task agent's. Plan, replan,
 trim, accept, retire and conflict resolution stay the director's.
 
-**Reports.** After each step and each question, the task agent writes a
-fixed block (`slug`, `step`, `commit`, `check`, `verdict`, `why`, `suite`,
-`concerns`; verdict `posted | accept | sent-back | replied | unsure | answer |
-trimmed`; `suite` marks each test the task added keep or drop on an
-`accept` verdict, §6.5) to
-`dashboard-report.md` in its clone's git directory. The player reads and
-removes it, notes it on the task tip (`refs/notes/dashboard-agent-reports`,
-a list), and emits an `agent_report` event carrying the block. `status`
-shows each task agent's session, liveness and latest verdict. The director
-trims what it drops (§6.5) and accepts on an `accept` verdict, asks (`dashboard ask`) or takes an `unsure`
-to the operator; the decision stays the director's.
+**Reports.** After each step and each question, the task agent runs, from
+its worktree:
+
+    dashboard report [verdict] --why "…" [--check "…"] [--suite "…"] [--concerns "…"]
+
+The player notes in the clone's git directory what waits for a report
+(`dashboard-step.json`, and `dashboard-question.json` for the director's
+question) and which verdicts close it:
+
+| Waiting | Noted when | Verdicts |
+|---|---|---|
+| `post` | the post step is pasted (launch, relaunch) | `unsure` |
+| `post` + commit | its post is imported | `posted` |
+| `review r<N>` | the review request is pasted | `accept` (with `--suite`), `unsure` |
+| `review r<N>` + commit | its send-back is imported | `sent-back` |
+| `contest c<N>` | the contest is pasted | `unsure` |
+| `contest c<N>` + commit | its reply is imported | `replied` |
+| `trim` + commit | its trim is imported (it answers the question) | `trimmed` |
+| `question` | `dashboard ask` | `answer`, `unsure` |
+
+A step closed by a commit takes its verdict from the import, so the agent
+leaves it out; a named verdict closes the question first, then the step.
+Any other verdict, an empty `--why`, `accept` without `--suite` (each test
+the task added, keep or drop, §6.5) or `--suite` on another verdict exits 1
+naming what waits. The command writes `dashboard-report.json` atomically;
+the player takes it, closes the step it names, and renders the block the
+director reads (`slug`, `step`, `commit`, `check`, `verdict`, `why`,
+`suite`, `concerns`) with slug, step and commit from its own note. A report
+no waiting step allows (written by hand, or overtaken by a new step) is
+dropped and the agent told. The player notes the block on the task tip
+(`refs/notes/dashboard-agent-reports`, a list) and emits an `agent_report`
+event carrying it. `status` shows each task agent's session, liveness and
+latest verdict. The director trims what it drops (§6.5) and accepts on an
+`accept` verdict, asks (`dashboard ask`) or takes an `unsure` to the
+operator; the decision stays the director's.
 
 **Events.** `agent_launched`, `agent_report`, `agent_died`. For an
 agent-managed task, `tested` and `contested` are not emitted: they're the task

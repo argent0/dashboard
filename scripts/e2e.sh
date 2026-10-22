@@ -256,8 +256,10 @@ FAKE_AGENT_EOF
 # The fake task agent (spec §17): stands in for a real task agent session.
 # Launched with "Step: post" in its prompt, it copies the post the scenario
 # prepared for its slug ($TA_TEMPLATES/<slug>/) into its worktree, commits it
-# on agent/<slug> and reports `posted`. Then it watches the hub: once the
-# worker's work (src/<slug>.txt, or <slug>/<slug>.txt) is on task/<slug>, it reports `accept`.
+# on agent/<slug> and, once the player has imported it, reports it with
+# `dashboard report` (verdict implied). Then it watches the hub: once the
+# worker's work (src/<slug>.txt, or <slug>/<slug>.txt) is on task/<slug>, it
+# reports `accept`.
 # --------------------------------------------------------------------------
 
 write_fake_task_agent() {
@@ -266,6 +268,8 @@ write_fake_task_agent() {
 # Fake task agent driver (written by scripts/e2e.sh). $1 is the prompt.
 set -eu
 TEMPLATES=__TEMPLATES__
+BIN=__BIN__
+HOME_DIR=__HOME__
 
 git config user.name "E2E Fake Task Agent" || true
 git config user.email "fake-task-agent@example.com" || true
@@ -273,11 +277,14 @@ git config commit.gpgsign false || true
 
 branch=$(git rev-parse --abbrev-ref HEAD)
 slug=${branch#agent/}
-report="$(git rev-parse --absolute-git-dir)/dashboard-report.md"
-write_report() {
-  printf 'slug: %s\nstep: %s\ncommit: none\ncheck: %s.txt exists\nverdict: %s\nwhy: fake task agent.\nconcerns: none\n' \
-    "$slug" "$1" "$slug" "$2" >"$report.tmp"
-  mv "$report.tmp" "$report"
+# Retries until the player waits for this report (an import lands a tick
+# after the commit, a review once the worker's work is tested).
+report() {
+  rend=$(($(date +%s) + 60))
+  until "$BIN" --home "$HOME_DIR" report "$@" --why "fake task agent." --check "$slug.txt exists" >/dev/null 2>&1; do
+    [ "$(date +%s)" -lt "$rend" ] || return 1
+    sleep 0.5
+  done
 }
 
 case "$1" in
@@ -287,7 +294,7 @@ case "$1" in
     cp -R "$TEMPLATES/$slug/." .
     git add -A
     git commit -q -m "post: $slug"
-    write_report post posted
+    report
     ;;
 esac
 
@@ -298,13 +305,13 @@ while [ "$(date +%s)" -lt "$end" ]; do
   tip=$(git rev-parse "origin/task/$slug" 2>/dev/null || echo "")
   if [ -n "$tip" ] && [ "$tip" != "$reviewed" ] && { git cat-file -e "$tip:src/$slug.txt" 2>/dev/null || git cat-file -e "$tip:$slug/$slug.txt" 2>/dev/null; }; then
     git merge -q --ff-only "origin/task/$slug" || true
-    write_report "review r1" accept
+    report accept --suite "$slug-check: keep"
     reviewed=$tip
   fi
   sleep 0.5
 done
 FAKE_TASK_AGENT_EOF
-  sed -i "s|__TEMPLATES__|$TA_TEMPLATES|" "$FAKE_TASK_AGENT"
+  sed -i "s|__TEMPLATES__|$TA_TEMPLATES|; s|__BIN__|$BIN|; s|__HOME__|$HOME_DIR|" "$FAKE_TASK_AGENT"
   chmod +x "$FAKE_TASK_AGENT"
 }
 

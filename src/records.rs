@@ -835,12 +835,11 @@ pub fn agent_asked(hub: &Git, slug: &str) -> Option<String> {
     hub.rev_parse(&format!("refs/dashboard/agent-asked/{slug}"))
 }
 
-/// One report a task agent handed the player (its fixed return block),
-/// noted on the task tip it was read at.
+/// One report a task agent filed with `dashboard report` (`report::take`
+/// renders its block), noted on the task tip it was collected at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentReport {
-    /// `posted`, `accept`, `sent-back`, `unsure`, or `answer` for a reply to
-    /// `dashboard ask`; `unknown` when the block has no recognized verdict.
+    /// One of `report::Verdict`, checked against the step it closes.
     pub verdict: String,
     pub text: String,
     #[serde(default)]

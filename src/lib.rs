@@ -20,6 +20,7 @@ pub mod queue;
 pub mod raise;
 pub mod records;
 pub mod render;
+pub mod report;
 pub mod sandbox;
 pub mod speedup;
 pub mod spike;

@@ -43,7 +43,6 @@ const TEMPLATES: &[(&str, &[&str])] = &[
             "phase",
             "task_toml",
             "brief",
-            "report_file",
         ],
     ),
     ("task-agent.relaunched", &["slug"]),
@@ -71,7 +70,8 @@ const TEMPLATES: &[(&str, &[&str])] = &[
     ("task-agent.imported-reply", &["commit"]),
     ("task-agent.imported-trim", &["commit"]),
     ("task-agent.escalated", &["slug", "cause"]),
-    ("task-agent.question", &["question", "report_file"]),
+    ("task-agent.question", &["question"]),
+    ("task-agent.report-dropped", &["message"]),
 ];
 
 /// What the player joins templates with when one prompt is made of several

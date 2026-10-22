@@ -27,6 +27,7 @@ use crate::paths::{self, Home};
 use crate::prompts::{self, Prompts};
 use crate::queue;
 use crate::raise;
+use crate::report;
 use crate::records::{self, Actor, RejectionRecord, Transition};
 use crate::sandbox::Sandbox;
 use crate::spike;
@@ -5310,10 +5311,14 @@ impl<S: Sessions> Player<S> {
             return Ok(());
         };
         let status = task.status;
+        let (review_step, contest_step) = (
+            format!("review r{}", task.review_round + 1),
+            format!("contest c{}", task.contest_round + 1),
+        );
 
         if self.hub.is_empty_commit(candidate) {
             let msg = format!(
-                "ownership: task/{slug}: a task agent never commits a marker; accept:/retire: are the director's, so recommend in your report instead"
+                "ownership: task/{slug}: a task agent never commits a marker; accept:/retire: are the director's, so recommend accept with `dashboard report accept` instead"
             );
             return self.reject_by(
                 Actor::TaskAgent,
@@ -5447,12 +5452,19 @@ impl<S: Sessions> Player<S> {
 
         let key = state::agent_key(slug);
         if report.imported.iter().any(|(_, sha, _)| sha == candidate) {
-            let template = match step {
-                "post" => "task-agent.imported-post",
-                "send-back" => "task-agent.imported-send-back",
-                "trim" => "task-agent.imported-trim",
-                _ => "task-agent.imported-reply",
+            let (template, name, verdict) = match step {
+                "post" => ("task-agent.imported-post", "post".to_string(), report::Verdict::Posted),
+                "send-back" => ("task-agent.imported-send-back", review_step, report::Verdict::SentBack),
+                "trim" => ("task-agent.imported-trim", "trim".to_string(), report::Verdict::Trimmed),
+                _ => ("task-agent.imported-reply", contest_step, report::Verdict::Replied),
             };
+            if let Some(git_dir) = self.session_git_dir(&key) {
+                report::set_step(&git_dir, &report::Owed::imported(name, candidate, verdict))?;
+                if verdict == report::Verdict::Trimmed {
+                    // The director asked for the trim: it is the answer.
+                    report::clear_question(&git_dir);
+                }
+            }
             let text = self
                 .prompts()?
                 .render(template, &[("commit", short(candidate))]);
@@ -5529,6 +5541,12 @@ impl<S: Sessions> Player<S> {
                         != Some(task.tip.as_str())
                 {
                     records::set_agent_asked(&self.hub, &task.slug, &task.tip)?;
+                    if let (Some(git_dir), Some(name)) = (
+                        self.session_git_dir(&state::agent_key(&task.slug)),
+                        agent_step_name(task, step),
+                    ) {
+                        report::set_step(&git_dir, &report::Owed::asked(name))?;
+                    }
                     let text =
                         self.agent_step_text(&self.prompts()?, task, step, &hub_state.roadmap);
                     self.relay(&state::agent_key(&task.slug), &text);
@@ -5603,10 +5621,9 @@ impl<S: Sessions> Player<S> {
         relaunched: bool,
     ) -> Result<(), String> {
         let prompts = self.prompts()?;
-        let report_file = Self::git_dir(dir)?
-            .join("dashboard-report.md")
-            .display()
-            .to_string();
+        if let Some(name) = agent_step_name(task, step) {
+            report::set_step(&Self::git_dir(dir)?, &report::Owed::asked(name))?;
+        }
         let slug = task.slug.as_str();
         let toml = self
             .hub
@@ -5636,7 +5653,6 @@ impl<S: Sessions> Player<S> {
                 ("phase", &phase),
                 ("task_toml", toml.trim()),
                 ("brief", brief),
-                ("report_file", &report_file),
             ],
         );
         let relaunched =
@@ -5729,35 +5745,38 @@ impl<S: Sessions> Player<S> {
         }
     }
 
-    /// Reads and removes the report a task agent left in its clone's git
-    /// directory, noting it on the task tip (spec §17) and reporting it.
+    /// Takes the report a task agent filed with `dashboard report`
+    /// (`report::take`), noting it on the task tip (spec §17) and reporting
+    /// it; a report no pending step allows is dropped and the agent told.
     fn collect_agent_report(
         &mut self,
         slug: &str,
         tip: &str,
         report: &mut TickReport,
     ) -> Result<(), String> {
-        let dir = paths::agent_clone(&self.director, slug);
-        if !dir.exists() {
-            return Ok(());
-        }
-        let Ok(file) = Self::git_dir(&dir).map(|d| d.join("dashboard-report.md")) else {
+        let key = state::agent_key(slug);
+        let Some(git_dir) = self.session_git_dir(&key) else {
             return Ok(());
         };
-        let Ok(text) = std::fs::read_to_string(&file) else {
-            return Ok(());
+        let collected = match report::take(&git_dir, slug) {
+            None => return Ok(()),
+            Some(Ok(c)) => c,
+            Some(Err(message)) => {
+                let text = self
+                    .prompts()?
+                    .render("task-agent.report-dropped", &[("message", &message)]);
+                self.relay(&key, &text);
+                return Ok(());
+            }
         };
-        let _ = std::fs::remove_file(&file);
         // Its stop after this is the wait for the director (`owes_work`).
-        if let Some(git_dir) = file.parent() {
-            let _ = std::fs::write(git_dir.join(REPORTED_FILE), "");
-        }
+        let _ = std::fs::write(git_dir.join(REPORTED_FILE), "");
         let rec = records::record_agent_report(
             &self.hub,
             tip,
             records::AgentReport {
-                verdict: report_verdict(&text),
-                text: text.trim().to_string(),
+                verdict: collected.verdict.as_str().to_string(),
+                text: collected.text,
                 at: 0,
             },
         )?;
@@ -5839,13 +5858,10 @@ impl<S: Sessions> Player<S> {
                 "ask: task/{slug}'s task agent is dead — `dashboard relaunch {slug} --agent` first"
             ));
         }
-        let report_file =
-            Self::git_dir(&paths::agent_clone(&self.director, slug))?.join("dashboard-report.md");
-        let file = report_file.display().to_string();
-        let text = self.prompts()?.render(
-            "task-agent.question",
-            &[("question", question), ("report_file", &file)],
-        );
+        report::set_question(&Self::git_dir(&paths::agent_clone(&self.director, slug))?)?;
+        let text = self
+            .prompts()?
+            .render("task-agent.question", &[("question", question)]);
         self.relay(&key, &text);
         Ok(())
     }
@@ -6179,25 +6195,15 @@ enum AgentStep {
     Wait,
 }
 
-/// The `verdict:` of a task agent's report, or `unknown`.
-fn report_verdict(text: &str) -> String {
-    const KNOWN: [&str; 6] = [
-        "posted",
-        "accept",
-        "sent-back",
-        "replied",
-        "unsure",
-        "answer",
-    ];
-    text.lines()
-        .find_map(|l| l.trim().strip_prefix("verdict:"))
-        .and_then(|v| v.split_whitespace().next())
-        .map(|v| {
-            v.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                .to_ascii_lowercase()
-        })
-        .filter(|v| KNOWN.contains(&v.as_str()))
-        .unwrap_or_else(|| "unknown".to_string())
+/// The name a report gives `step` of `task` (`report::Owed::step`): what
+/// the agent is asked now. `Wait` asks nothing.
+fn agent_step_name(task: &state::TaskState, step: AgentStep) -> Option<String> {
+    match step {
+        AgentStep::Post => Some("post".to_string()),
+        AgentStep::Review => Some(format!("review r{}", task.review_round + 1)),
+        AgentStep::Contest => Some(format!("contest c{}", task.contest_round + 1)),
+        AgentStep::Wait => None,
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -6275,18 +6281,6 @@ mod tests {
         assert_eq!(s.reap("a"), Some(Remains::default()));
         assert_eq!(s.reap("a"), None);
         assert_eq!(s.reaped, vec!["a".to_string()]);
-    }
-
-    #[test]
-    fn report_verdict_reads_the_verdict_line() {
-        assert_eq!(
-            report_verdict("slug: s\nverdict: accept\nwhy: ok"),
-            "accept"
-        );
-        assert_eq!(report_verdict("verdict: Sent-Back (r1)"), "sent-back");
-        assert_eq!(report_verdict("  verdict: `unsure`"), "unsure");
-        assert_eq!(report_verdict("verdict: maybe"), "unknown");
-        assert_eq!(report_verdict("no verdict here"), "unknown");
     }
 
     #[test]

@@ -230,7 +230,7 @@ spike max-bytes=512 {
 }
 
 task-agent max-bytes=512 {
-    // {slug} {project} {phase} {task_toml} {brief} {report_file}
+    // {slug} {project} {phase} {task_toml} {brief}
     preamble max-bytes=4096 #"""
         You are the task agent for task `{slug}` in project `{project}`: the director's delegate for
         this one task. You write its post (the worker's prompt and a currently failing test) and
@@ -280,18 +280,17 @@ task-agent max-bytes=512 {
 
         Director's brief: {brief}
 
-        After each step, and after answering a question from the director, write your report: exactly
-        the block below, to {report_file}.tmp, then mv it to {report_file} (the player reads and
-        removes it). No diffs and no code in it.
+        After each step, and to answer the director, report from this worktree:
 
-        slug: {slug}
-        step: post | review r<N> | contest c<N> | question
-        commit: <sha, or "none">
-        check: <one line: what the task's check asserts and why it fails / now passes>
-        verdict: posted | accept | sent-back | replied | unsure | answer | trimmed
-        why: <two or three sentences>
-        suite: <on accept: each test this task added, keep or drop, and why; else "n/a">
-        concerns: <anything cross-task the director should know, or "none">
+            dashboard report [verdict] --why "<two or three sentences>"
+                [--check "<what the task's check asserts, why it fails / now passes>"]
+                [--concerns "<anything cross-task the director should know>"]
+
+        No diffs and no code in it; the player adds the slug, step and commit. A step you close with
+        a commit (post, send-back, contest reply, trim) takes its verdict from the import: once the
+        player pastes that it imported your commit, report without a verdict. A review closes with
+        `accept`, a question with `answer`, and any step you can't complete with `unsure`. The
+        command names the verdicts the step allows when you give another.
 
         The player pastes later steps into this session (review requests, the director's questions,
         rejections of your commits); wait for them between steps.
@@ -327,7 +326,7 @@ task-agent max-bytes=512 {
         {check}
         - updates to any existing test this task makes stale.
         Before committing, run the task's check and confirm it fails, for the reason the task exists:
-        the player rejects a post whose check already passes. Then write your report (step: post).
+        the player rejects a post whose check already passes.
         """#
     // {slug}
     post-check-task #"""
@@ -355,16 +354,16 @@ task-agent max-bytes=512 {
         {base} {tip}. Check that it does what the task asked, stays in scope, doesn't game its own
         test (special-cased inputs, monkeypatching, a helper that neuters other tests), adds no impure
         test, and won't break the tasks after it. Then either:
-        - recommend accept: commit nothing, report verdict: accept. In its suite line, mark each
-          test this task added keep (it guards behaviour the application depends on) or drop (it
-          only drove this task: scaffolding, a step since covered by a broader test); the
-          director decides which stay in the suite;
+        - recommend accept: commit nothing, run dashboard report accept --why "…" --suite "…". In
+          --suite, mark each test this task added keep (it guards behaviour the application
+          depends on) or drop (it only drove this task: scaffolding, a step since covered by a
+          broader test); the director decides which stay in the suite;
         - send back: ONE commit adding tasks/{slug}/reviews/r{round}.md (what is wrong) and a new or
-          updated test that makes the run set fail again, report verdict: sent-back. Before committing
+          updated test that makes the run set fail again. Before committing
           it, run that test against the worker's code as it is and confirm it fails, for the
           reason your review gives: a send-back the run set still passes is a `review` strike. Run it
           only on the worker's code: never write code of your own to see how the test should
-          pass. A concern you can't turn into a failing test isn't a send-back: report verdict:
+          pass. A concern you can't turn into a failing test isn't a send-back: report
           unsure.{cap}{notes}
         """#
     // {notes}: what a test-speedup finish removed or rewired
@@ -399,7 +398,7 @@ task-agent max-bytes=512 {
         tasks/{slug}/contests/c{n}.md, your answer to the worker, and, if it's right, the fixed
         tests (tests and architecture/Tests/ only). If the test is right, the reply alone explains how it can be
         met. A reply spends no review round; the worker may contest {remaining} more time(s) before
-        the task escalates. Then write your report (step: contest c{n}, verdict: replied).
+        the task escalates.
         """#
 
     // {slug} {status}
@@ -434,22 +433,27 @@ task-agent max-bytes=512 {
         """#
 
     // {commit}
-    imported-post "The player imported your post at {commit}; the worker is launched. Write your report if you haven't yet, then wait: the player pastes the next review request here."
+    imported-post #"The player imported your post at {commit}; the worker is launched. Report it (dashboard report --why "…"), then wait: the player pastes the next review request here."#
     // {commit}
-    imported-send-back "The player imported your send-back at {commit}; the review is relayed to the worker. Write your report if you haven't yet, then wait: the player pastes the next review request here."
+    imported-send-back #"The player imported your send-back at {commit}; the review is relayed to the worker. Report it (dashboard report --why "…"), then wait: the player pastes the next review request here."#
     // {commit}
-    imported-trim "The player imported your trim at {commit}; the task stays tested for the director to accept. Write your report (verdict: trimmed), then wait."
+    imported-trim #"The player imported your trim at {commit}; the task stays tested for the director to accept. Report it (dashboard report --why "…"), then wait."#
     // {commit}
-    imported-reply "The player imported your contest reply at {commit}; your reply is relayed to the worker. Write your report if you haven't yet, then wait: the player pastes the next review request here."
+    imported-reply #"The player imported your contest reply at {commit}; your reply is relayed to the worker. Report it (dashboard report --why "…"), then wait: the player pastes the next review request here."#
 
     // {slug} {cause}
     escalated "task/{slug} is escalated ({cause}). Stop here: the director decides with the operator and may ask you about it."
 
-    // {question} {report_file}
+    // {question}
     question #"""
         Question from the director: {question}
 
-        Answer with your report (step: question, verdict: answer or unsure), written to
-        {report_file}.tmp and moved to {report_file}.
+        Answer with dashboard report answer --why "<your answer>" (or unsure).
+        """#
+
+    // {message}
+    report-dropped #"""
+        The player dropped your report: {message}. Run dashboard report again for the step that
+        waits.
         """#
 }

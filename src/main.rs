@@ -124,6 +124,30 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         question: Vec<String>,
     },
+    /// From a task agent's worktree: report to the director on the step the
+    /// player waits on (spec.md §17). The player fills in slug, step and
+    /// commit. A review closes with accept (with --suite) or unsure, a
+    /// question with answer or unsure, a post or contest with unsure; a
+    /// step closed by a commit (post, send-back, contest reply, trim)
+    /// takes its verdict from the player's import, so leave it out then.
+    /// Exits 1, naming the verdicts allowed, on any other.
+    Report {
+        /// accept | unsure | answer, or posted | sent-back | replied |
+        /// trimmed, implied after an import.
+        verdict: Option<String>,
+        /// Two or three sentences: why this verdict.
+        #[arg(long)]
+        why: String,
+        /// What the task's check asserts and why it fails / now passes.
+        #[arg(long)]
+        check: Option<String>,
+        /// With accept: each test this task added, keep or drop, and why.
+        #[arg(long)]
+        suite: Option<String>,
+        /// Anything cross-task the director should know.
+        #[arg(long)]
+        concerns: Option<String>,
+    },
     /// Print the task's scope from a worker's or task agent's clone: its
     /// modules, the paths it may write, what else its working tree holds
     /// (read-only) and the checks that judge it.
@@ -192,6 +216,10 @@ fn main() {
             run_relaunch(args.home, &slug, agent, reset)
         }
         Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
+        Some(Command::Report { verdict, why, check, suite, concerns }) => run_report(
+            args.home,
+            dashboard::report::Draft { verdict, why, check, suite, concerns },
+        ),
         Some(Command::Scope) => run_scope(args.home),
         Some(Command::Test { checks, no_wait, timeout }) => run_test(args.home, &checks, no_wait, timeout),
         Some(Command::Build { nodes }) => run_build(args.home, &nodes),
@@ -581,6 +609,29 @@ fn run_ask(home: Option<PathBuf>, slug: &str, question: &str) {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+// --------------------------------------------------------------------------
+// dashboard report
+// --------------------------------------------------------------------------
+
+fn run_report(home: Option<PathBuf>, draft: dashboard::report::Draft) {
+    let c = task_clone(home);
+    if !c.agent {
+        fail("dashboard report runs in a task agent's worktree (branch agent/<slug>)".into());
+    }
+    let git_dir = c
+        .worktree
+        .run(&["rev-parse", "--absolute-git-dir"])
+        .unwrap_or_else(|e| fail(e.to_string()));
+    match dashboard::report::submit(std::path::Path::new(&git_dir), &draft) {
+        Ok(f) => println!(
+            "reported {} on {}; the player hands it to the director",
+            f.verdict.as_str(),
+            f.step
+        ),
+        Err(e) => fail(e),
     }
 }
 
