@@ -358,6 +358,7 @@ fn a_speedup_post_imports_while_main_is_over_and_unproven_evidence_retires_it() 
     assert!(!Git::new(&clone).is_sparse() && clone.join("roadmap.toml").exists());
     let git_dir = Git::new(&clone).run(&["rev-parse", "--absolute-git-dir"]).unwrap();
     let prompt = std::fs::read_to_string(Path::new(&git_dir).join("dashboard-prompt.md")).unwrap();
+    assert!(!prompt.contains("Your working tree holds only"), "a full tree: {prompt}");
     assert!(prompt.contains("test-speedup") && prompt.contains("- slow"), "{prompt}");
 
     // `other` is not slow on main.

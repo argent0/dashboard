@@ -241,6 +241,10 @@ fn post_launches_a_worker_clone_with_pins_and_a_prompt_file() {
         prompt_content.contains("tasks/foo/"),
         "the preamble should list the pinned tasks/foo/ paths: {prompt_content}"
     );
+    assert!(
+        prompt_content.contains("dashboard build") && prompt_content.contains("git show origin/task/foo:"),
+        "an ordinary task's prompt describes its sparse tree: {prompt_content}"
+    );
 
     assert_eq!(player.sessions().launched.len(), 1);
     let call = &player.sessions().launched[0];

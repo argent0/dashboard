@@ -49,6 +49,20 @@ worker max-bytes=512 {
         happen — follow their recovery instructions.
         """#
 
+    // {slug}; appended to `launch` for an ordinary task, whose tree is sparse
+    workspace max-bytes=1024 #"""
+        Your working tree holds only this task's files: your modules, `shared`, architecture/,
+        tasks/{slug}/, the APIs of your modules and the files of the checks that judge you
+        (`dashboard scope` lists them). Other modules are absent on purpose; read one with
+        `git show origin/task/{slug}:<path>` when you must.
+
+        `dashboard build [module…]` compiles your modules in their views (a root in a full tree)
+        with each one's `build_cmd`; `dashboard test [check…]` runs the run set, or the named checks
+        of it. Declare a new test in architecture/Tests/{slug}.worker.lean first, then write its
+        files: `dashboard build` or `dashboard test` opens them in your tree so `git add -A` picks
+        them up.
+        """#
+
     // {slug} {fix_paths} {replacements}; appended to `launch` for a flaky-test-fix
     flaky max-bytes=1024 #"""
         This is a flaky-test-fix task. The test is flaky, not wrong: replace it with a stable one that
@@ -89,8 +103,9 @@ worker max-bytes=512 {
         This project queues test runs: run the task's run set with `dashboard test` from your
         worktree instead of running it yourself. It snapshots your working tree, waits its turn
         behind other tasks' runs, and prints each check's result and output; it exits 1 if the
-        run set fails, and a failing run costs nothing. `dashboard test --no-wait` prints the result
-        file's path instead: read it once it exists.
+        run set fails, and a failing run costs nothing. `dashboard test [check…]` runs only the named
+        checks. `dashboard test --no-wait` prints the result file's path instead: read it once it
+        exists. `dashboard build` runs here, unqueued.
         """#
 
     finish-accepted "finish accepted — tests passed, awaiting director review; don't commit further"
@@ -107,8 +122,9 @@ worker max-bytes=512 {
 
     // {round} {slug} {review}
     review #"""
-        Review round {round} from the director. Fetch it: git pull --ff-only origin task/{slug}. Then
-        make the task's run set pass (`dashboard test`) and commit.
+        Review round {round} from the director. Fetch it: git pull --ff-only origin task/{slug}. Your
+        tree may have gained files (the tests are re-pinned); the pull brings them. Then make the
+        task's run set pass (`dashboard test`) and commit.
 
         {review}
         """#
@@ -119,8 +135,8 @@ worker max-bytes=512 {
     // {n} {slug} {reply}
     contest-reply #"""
         Reply to your contest c{n}. Fetch it: git pull --ff-only origin task/{slug} (tests may have
-        changed; they're re-pinned). Then make the task's run set pass and commit, or contest/block
-        again.
+        changed; they're re-pinned). Your tree may have gained files; the pull brings them. Then make
+        the task's run set pass and commit, or contest/block again.
 
         {reply}
         """#
@@ -292,8 +308,9 @@ task-agent max-bytes=512 {
         This project queues test runs: run the task's run set with `dashboard test` from your
         worktree instead of running it yourself. It snapshots your working tree, waits its turn
         behind other tasks' runs, and prints each check's result and output; it exits 1 if the
-        run set fails, and a failing run costs nothing. `dashboard test --no-wait` prints the result
-        file's path instead: read it once it exists.
+        run set fails, and a failing run costs nothing. `dashboard test [check…]` runs only the named
+        checks. `dashboard test --no-wait` prints the result file's path instead: read it once it
+        exists.
         """#
 
     // {slug} {check}: {check} is `post-check-task` or `post-check-flaky`

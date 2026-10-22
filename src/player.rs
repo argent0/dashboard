@@ -4518,9 +4518,10 @@ impl<S: Sessions> Player<S> {
                 &question,
             )
         } else {
-            let flaky = records::task_config_at(&self.hub, tip, slug).and_then(|cfg| match cfg
+            let kind = records::task_config_at(&self.hub, tip, slug).and_then(|cfg| match cfg
                 .kind
             {
+                TaskKind::Task => Some(prompts.render("worker.workspace", &[("slug", slug)])),
                 TaskKind::FlakyTestFix => {
                     let (fix_paths, replacements) =
                         flaky::prompt_lists(&cfg.fix_paths, &cfg.replace);
@@ -4546,7 +4547,7 @@ impl<S: Sessions> Player<S> {
             }
             prompts.worker_launch(
                 &preamble,
-                flaky.as_deref(),
+                kind.as_deref(),
                 &prompt_body,
             )
         };

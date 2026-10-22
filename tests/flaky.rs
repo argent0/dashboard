@@ -129,6 +129,7 @@ fn a_reproduced_flake_posts_launches_and_unpins_only_fix_paths() {
         .run(&["rev-parse", "--absolute-git-dir"])
         .unwrap();
     let prompt = std::fs::read_to_string(Path::new(&git_dir).join("dashboard-prompt.md")).unwrap();
+    assert!(!prompt.contains("Your working tree holds only"), "a full tree: {prompt}");
     assert!(
         prompt.contains("flaky-test-fix") && prompt.contains("flaky_stable"),
         "{prompt}"

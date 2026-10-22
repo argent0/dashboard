@@ -18,6 +18,7 @@ pub const STARTER: &str = include_str!("prompts.kdl");
 const TEMPLATES: &[(&str, &[&str])] = &[
     ("worker.launch", &["slug", "project"]),
     ("worker.queued", &[]),
+    ("worker.workspace", &["slug"]),
     ("worker.flaky", &["slug", "fix_paths", "replacements"]),
     ("worker.test-speedup", &["slow"]),
     ("worker.finish-accepted", &[]),
@@ -232,8 +233,9 @@ impl Prompts {
         out
     }
 
-    /// A worker's prompt file: its preamble (plus a flaky-test-fix's or
-    /// test-speedup's paragraph, already rendered), then the task's prompt.md.
+    /// A worker's prompt file: its preamble (plus an ordinary task's sparse
+    /// tree, a flaky-test-fix's or a test-speedup's paragraph, already
+    /// rendered), then the task's prompt.md.
     pub fn worker_launch(&self, preamble: &str, kind: Option<&str>, prompt: &str) -> String {
         match kind {
             Some(f) => format!("{preamble}{JOIN}{f}{RULE}{prompt}"),
@@ -293,7 +295,7 @@ impl Prompts {
                     + JOIN.len()
                     + s("worker.queued")
                     + JOIN.len()
-                    + max(&["worker.flaky", "worker.test-speedup"])
+                    + max(&["worker.workspace", "worker.flaky", "worker.test-speedup"])
                     + RULE.len(),
             ),
             (
@@ -505,7 +507,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("worker.review is 142 bytes, over its max-bytes 100"),
+            err.contains("worker.review is 223 bytes, over its max-bytes 100"),
             "{err}"
         );
         let err = Prompts::parse(&replace(
