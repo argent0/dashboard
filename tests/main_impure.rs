@@ -153,6 +153,17 @@ fn a_director_commit_on_an_impure_main_is_not_rejected() {
 
 #[test]
 fn a_finish_failing_only_on_mains_impure_check_is_held_then_released() {
+    held_then_released(false);
+}
+
+#[test]
+fn a_released_finish_in_a_dirty_tree_is_left_to_the_worker_to_rebase() {
+    held_then_released(true);
+}
+
+/// A held finish, released once main is fixed: the player rebases it onto
+/// the merge in a clean tree, and leaves a `dirty` one to the worker.
+fn held_then_released(dirty: bool) {
     let (repo, _home_dir, home, mut player) = setup();
     let hub = Git::new(home.hub());
     plan_and_post(&repo, &mut player);
@@ -189,6 +200,9 @@ fn a_finish_failing_only_on_mains_impure_check_is_held_then_released() {
 
     // The director fixes main: the player merges it into task/a, and the
     // stale held finish isn't treated as a diverged clone.
+    if dirty {
+        write_file(&worker.dir, "src/scratch.txt", "mine\n");
+    }
     fix_main(&repo);
     let report = player.tick().unwrap();
     assert!(report.rejected.is_empty(), "{report}");
@@ -200,20 +214,45 @@ fn a_finish_failing_only_on_mains_impure_check_is_held_then_released() {
         "{report}"
     );
     assert_eq!(records::held_commit(&hub, "a"), None);
-    assert!(
-        player
-            .sessions()
-            .sent
-            .iter()
-            .any(|(s, m)| s == "a" && m.contains("git pull --rebase origin task/a"))
-    );
-    let report = player.tick().unwrap();
-    assert!(report.rejected.is_empty(), "{report}");
-
-    // The worker rebases as told; the finish now goes through.
-    worker
-        .run(&["pull", "-q", "--rebase", "origin", "task/a"])
-        .unwrap();
+    let released = player
+        .sessions()
+        .sent
+        .iter()
+        .find(|(_, m)| m.contains("main's checks are fixed"))
+        .unwrap()
+        .clone();
+    assert_eq!(released.0, "a");
+    let hub_tip = hub.rev_parse("refs/heads/task/a").unwrap();
+    if dirty {
+        // Left as it was: the worker rebases as told.
+        assert!(released.1.contains("git pull --rebase origin task/a"), "{}", released.1);
+        assert_eq!(worker.rev_parse("HEAD"), Some(finish.clone()));
+        let report = player.tick().unwrap();
+        assert!(report.rejected.is_empty(), "{report}");
+        worker
+            .run(&["pull", "-q", "--rebase", "origin", "task/a"])
+            .unwrap();
+    } else {
+        // The player rebased it: the worker's finish, on the merge.
+        let head = worker.rev_parse("HEAD").unwrap();
+        assert!(
+            released.1.contains(&format!("your tree is at {}", &head[..12])),
+            "{}",
+            released.1
+        );
+        assert_eq!(hub.parents(&format!("{head}~1")).len(), 2, "on the merge");
+        assert_eq!(hub_tip, head, "imported as it stands");
+        assert_eq!(
+            worker.run(&["log", "-1", "--format=%an|%cn"]).unwrap(),
+            "Test Worker|dashboard-player"
+        );
+        // The same tick imports it as the finish.
+        assert!(
+            report.imported.iter().any(|(_, _, t)| *t == Transition::Finish),
+            "{report}"
+        );
+        return;
+    }
     let report = player.tick().unwrap();
     assert!(report.rejected.is_empty(), "{report}");
     assert!(

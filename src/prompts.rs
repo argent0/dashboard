@@ -24,13 +24,18 @@ const TEMPLATES: &[(&str, &[&str])] = &[
     ("worker.finish-accepted", &[]),
     ("worker.rejected", &["message", "recovery"]),
     ("worker.recovery-history", &["slug"]),
+    ("worker.recovery-reset", &["slug", "tip"]),
     ("worker.recovery-other", &[]),
-    ("worker.review", &["round", "slug", "review"]),
+    ("worker.synced", &["slug", "tip"]),
+    ("worker.sync-forward", &["slug"]),
+    ("worker.rebased", &["slug", "tip"]),
+    ("worker.sync-rebase", &["slug"]),
+    ("worker.review", &["round", "sync", "review"]),
     ("worker.contest-recorded", &["n"]),
-    ("worker.contest-reply", &["n", "slug", "reply"]),
-    ("worker.merge-failed", &["slug", "summary"]),
+    ("worker.contest-reply", &["n", "sync", "reply"]),
+    ("worker.merge-failed", &["slug", "sync", "summary"]),
     ("worker.held", &["checks"]),
-    ("worker.released", &["slug"]),
+    ("worker.released", &["slug", "sync"]),
     ("spike.launch", &["slug", "project", "pinned"]),
     ("spike.question", &["round", "question"]),
     ("spike.finish-accepted", &["answer"]),
@@ -47,23 +52,28 @@ const TEMPLATES: &[(&str, &[&str])] = &[
     ),
     ("task-agent.relaunched", &["slug"]),
     ("task-agent.queued", &[]),
-    ("task-agent.post", &["slug", "check"]),
+    ("task-agent.synced", &["slug", "tip"]),
+    ("task-agent.sync-forward", &["slug"]),
+    ("task-agent.rebased", &["slug", "tip"]),
+    ("task-agent.sync-rebase", &["slug"]),
+    ("task-agent.post", &["slug", "sync", "check"]),
     ("task-agent.post-check-task", &["slug"]),
     ("task-agent.post-check-flaky", &[]),
     ("task-agent.post-check-speedup", &[]),
     (
         "task-agent.review",
-        &["round", "slug", "tip", "base", "cap", "notes"],
+        &["round", "slug", "tip", "base", "sync", "cap", "notes"],
     ),
     ("task-agent.review-notes", &["notes"]),
     ("task-agent.review-cap-last", &[]),
     ("task-agent.review-cap-over", &["max"]),
-    ("task-agent.contest", &["n", "slug", "reason", "remaining"]),
+    ("task-agent.contest", &["n", "slug", "sync", "reason", "remaining"]),
     ("task-agent.wait", &["slug", "status"]),
     ("task-agent.rejected", &["message", "recovery"]),
     ("task-agent.recovery-history", &["slug"]),
+    ("task-agent.recovery-reset", &["slug", "tip"]),
     ("task-agent.recovery-other", &["slug"]),
-    ("task-agent.rebase", &["slug"]),
+    ("task-agent.rebase", &["slug", "sync"]),
     ("task-agent.hold", &["slug", "status"]),
     ("task-agent.imported-post", &["commit"]),
     ("task-agent.imported-send-back", &["commit"]),
@@ -272,7 +282,16 @@ impl Prompts {
             .iter()
             .map(|(k, _)| (k.to_string(), s(k)))
             .collect();
-        let step = [
+        // A step's or message's {sync}: the player's own sync, or the
+        // command it leaves to the agent.
+        let forward = |sec: &str| {
+            max(&[&format!("{sec}.synced"), &format!("{sec}.sync-forward")])
+        };
+        let rebase = |sec: &str| {
+            max(&[&format!("{sec}.rebased"), &format!("{sec}.sync-rebase")])
+        };
+        let step = forward("task-agent")
+            + [
             s("task-agent.post")
                 + max(&[
                     "task-agent.post-check-task",
@@ -283,11 +302,11 @@ impl Prompts {
                 + max(&["task-agent.review-cap-last", "task-agent.review-cap-over"])
                 + s("task-agent.review-notes"),
             s("task-agent.contest"),
-            s("task-agent.wait"),
         ]
         .into_iter()
         .max()
         .unwrap_or(0);
+        let step = step.max(s("task-agent.wait"));
         sizes.extend([
             (
                 "worker prompt".to_string(),
@@ -318,13 +337,35 @@ impl Prompts {
             ),
             ("task agent step".to_string(), step),
             (
+                "worker sync message".to_string(),
+                forward("worker")
+                    + max(&["worker.review", "worker.contest-reply", "worker.merge-failed"]),
+            ),
+            (
+                "worker release".to_string(),
+                s("worker.released") + rebase("worker"),
+            ),
+            (
+                "task agent rebase".to_string(),
+                s("task-agent.rebase") + rebase("task-agent"),
+            ),
+            (
                 "worker rejection".to_string(),
-                s("worker.rejected") + max(&["worker.recovery-history", "worker.recovery-other"]),
+                s("worker.rejected")
+                    + max(&[
+                        "worker.recovery-history",
+                        "worker.recovery-reset",
+                        "worker.recovery-other",
+                    ]),
             ),
             (
                 "task agent rejection".to_string(),
                 s("task-agent.rejected")
-                    + max(&["task-agent.recovery-history", "task-agent.recovery-other"]),
+                    + max(&[
+                        "task-agent.recovery-history",
+                        "task-agent.recovery-reset",
+                        "task-agent.recovery-other",
+                    ]),
             ),
         ]);
         sizes
@@ -507,7 +548,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("worker.review is 223 bytes, over its max-bytes 100"),
+            err.contains("worker.recovery-reset is 143 bytes, over its max-bytes 100"),
             "{err}"
         );
         let err = Prompts::parse(&replace(
@@ -535,9 +576,29 @@ mod tests {
         let review = sizes.iter().find(|(k, _)| k == "worker.review").unwrap().1;
         let rendered = p.render(
             "worker.review",
-            &[("round", ""), ("slug", ""), ("review", &big)],
+            &[("round", ""), ("sync", ""), ("review", &big)],
         );
         assert_eq!(rendered.len() - big.len(), review);
+    }
+
+    #[test]
+    fn a_message_counts_its_largest_sync_variant() {
+        let p = Prompts::parse(STARTER).unwrap();
+        let sizes = p.static_sizes();
+        let size = |k: &str| sizes.iter().find(|(n, _)| n == k).unwrap().1;
+        let synced = size("worker.synced").max(size("worker.sync-forward"));
+        let messages = ["worker.review", "worker.contest-reply", "worker.merge-failed"];
+        let largest = messages.iter().map(|k| size(k)).max().unwrap();
+        assert_eq!(size("worker sync message"), synced + largest);
+        let rebased = size("task-agent.rebased").max(size("task-agent.sync-rebase"));
+        assert_eq!(size("task agent rebase"), size("task-agent.rebase") + rebased);
+        // Each variant fills the message's {sync}.
+        let sync = p.render("worker.synced", &[("slug", "s"), ("tip", "abc")]);
+        let filled = p.render(
+            "worker.review",
+            &[("round", "1"), ("sync", &sync), ("review", "r")],
+        );
+        assert!(filled.contains("Your tree is already at abc, the tip of task/s"), "{filled}");
     }
 
     #[test]

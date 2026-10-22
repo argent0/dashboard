@@ -494,7 +494,19 @@ fn a_task_agent_adds_its_declared_test_files_inside_a_module() {
 }
 
 #[test]
-fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
+fn a_hub_move_under_the_agents_commit_is_rebased_by_the_player_without_a_strike() {
+    hub_move_under_the_agents_commit(false);
+}
+
+#[test]
+fn a_hub_move_under_a_dirty_agent_tree_asks_for_a_rebase_without_a_strike() {
+    hub_move_under_the_agents_commit(true);
+}
+
+/// Main moves under the staged task's agent before it posts: a clean
+/// worktree is rebased by the player and the post imported; a `dirty` one
+/// is asked to rebase, once per commit.
+fn hub_move_under_the_agents_commit(dirty: bool) {
     let repo = repo_with_task_agents();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
@@ -516,10 +528,36 @@ fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(report.imported.len(), 1, "only the merge: {report}");
     assert_eq!(report.imported[0].2, Transition::MergeUnblock);
-    agent_post(&repo);
+    let post = agent_post(&repo);
+    if dirty {
+        write_file(&agent_dir(&repo), "scratch.txt", "mine\n");
+    }
     let report = player.tick().expect("tick");
     assert!(report.rejected.is_empty(), "{report}");
     assert!(report.imported.is_empty(), "{report}");
+    if !dirty {
+        let agent = Git::new(agent_dir(&repo));
+        let head = agent.rev_parse("HEAD").unwrap();
+        assert_ne!(head, post, "rebased");
+        assert_eq!(
+            agent.run(&["rev-parse", "HEAD~1"]).ok(),
+            hub.rev_parse("refs/heads/task/s")
+        );
+        let told = agent_sent(&player).pop().unwrap();
+        assert!(
+            told.contains(&format!("The player rebased your commit onto it: agent/s is at {}", &head[..12])),
+            "{told}"
+        );
+        let report = player.tick().expect("tick");
+        assert_eq!(
+            report.imported.first().map(|i| i.2),
+            Some(Transition::Post),
+            "{report}"
+        );
+        assert!(task(&hub, "s").strikes.is_empty());
+        return;
+    }
+    assert_eq!(Git::new(agent_dir(&repo)).rev_parse("HEAD"), Some(post), "untouched");
     let asked: Vec<String> = agent_sent(&player)
         .into_iter()
         .filter(|m| m.contains("git rebase origin/task/s"))
@@ -538,6 +576,7 @@ fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
 
     // The agent rebases its post onto the merge.
     let dir = agent_dir(&repo);
+    std::fs::remove_file(dir.join("scratch.txt")).unwrap();
     Git::new(&dir).run(&["fetch", "-q", "origin"]).unwrap();
     Git::new(&dir)
         .run(&["reset", "-q", "--hard", "origin/task/s"])
@@ -579,6 +618,14 @@ fn a_tested_task_is_handed_to_its_task_agent_for_review_once() {
         .collect();
     assert_eq!(reviews.len(), 1, "{reviews:?}");
     assert!(reviews[0].contains("reviews/r1.md"), "{}", reviews[0]);
+    // The player brought the agent's clean worktree to the worker's work.
+    let tip = Git::new(home.hub()).rev_parse("refs/heads/task/s").unwrap();
+    assert_eq!(Git::new(agent_dir(&repo)).rev_parse("HEAD"), Some(tip.clone()));
+    assert!(
+        reviews[0].contains(&format!("Your branch is already at {}, the tip of task/s.", &tip[..12])),
+        "{}",
+        reviews[0]
+    );
     player.tick().expect("tick");
     assert_eq!(
         agent_sent(&player)
@@ -1193,7 +1240,7 @@ fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalat
 }
 
 #[test]
-fn another_tasks_agent_commits_merged_in_from_main_still_ask_for_a_rebase() {
+fn another_tasks_agent_commits_merged_in_from_main_still_take_a_rebase() {
     let repo = repo_with_task_agents();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
@@ -1252,8 +1299,9 @@ fn another_tasks_agent_commits_merged_in_from_main_still_ask_for_a_rebase() {
             .sessions()
             .sent
             .iter()
-            .any(|(k, m)| k == "t_agent" && m.contains("git rebase origin/task/t")),
-        "t's agent is asked to rebase"
+            .any(|(k, m)| k == "t_agent"
+                && m.contains("The player rebased your commit onto it: agent/t is at")),
+        "t's agent's post is rebased"
     );
     assert!(task(&hub, "t").strikes.is_empty());
 }

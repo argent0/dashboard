@@ -717,6 +717,84 @@ fn short(sha: &str) -> &str {
 }
 
 // --------------------------------------------------------------------------
+// Tree sync: the player brings an agent's tree to its task branch at a step
+// boundary, just before it pastes the step (spec §5)
+// --------------------------------------------------------------------------
+
+/// How an agent's tree reaches `origin/task/<slug>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeSync {
+    /// A fast-forward: the hub built on what the agent has.
+    Forward,
+    /// The agent's own unimported commits, replayed onto the hub's tip.
+    Rebase,
+    /// A reset dropping a history the hub rejected.
+    Reset,
+}
+
+impl TreeSync {
+    /// The templates of `section` for this sync: the one saying the player
+    /// did it (`{slug}` `{tip}`), and the one handing it to the agent
+    /// (`{slug}`).
+    fn templates(self, section: &str) -> (String, String) {
+        let (done, todo) = match self {
+            TreeSync::Forward => ("synced", "sync-forward"),
+            TreeSync::Rebase => ("rebased", "sync-rebase"),
+            TreeSync::Reset => ("recovery-reset", "recovery-history"),
+        };
+        (format!("{section}.{done}"), format!("{section}.{todo}"))
+    }
+}
+
+/// Settings for every git command the player runs in an agent's tree: the
+/// agent's hooks and fsmonitor stay unrun, and a commit the player
+/// rewrites (a rebase) carries the player as committer, its author kept.
+const TREE_GIT: &[&str] = &["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+const TREE_IDENTITY: &[(&str, &str)] = &[
+    ("GIT_COMMITTER_NAME", "dashboard-player"),
+    ("GIT_COMMITTER_EMAIL", "dashboard-player@localhost"),
+];
+
+/// Brings `dir`, an agent's worktree on `branch`, to the hub's
+/// `task/<slug>` by `how`, and returns its new HEAD. It acts only on a
+/// clean tree (no change to a tracked file, no untracked file outside the
+/// ignored ones) still on `branch`, and only by a fast-forward, a rebase
+/// without conflicts or a reset; a rebase that conflicts is aborted, so the
+/// tree stays as the agent left it. `None` leaves the sync to the agent.
+fn sync_tree(dir: &Path, branch: &str, slug: &str, how: TreeSync) -> Option<String> {
+    if !dir.exists() {
+        return None;
+    }
+    let git = Git::new(dir);
+    let run = |args: &[&str]| {
+        let all: Vec<&str> = TREE_GIT.iter().chain(args).copied().collect();
+        git.run_with_env(&all, TREE_IDENTITY)
+    };
+    let on_branch = run(&["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
+    if on_branch != branch {
+        return None;
+    }
+    run(&["fetch", "--quiet", "origin"]).ok()?;
+    let status = run(&["status", "--porcelain", "--untracked-files=all"]).ok()?;
+    if !status.is_empty() {
+        return None;
+    }
+    let target = format!("origin/task/{slug}");
+    match how {
+        TreeSync::Forward => run(&["merge", "--quiet", "--ff-only", &target]).ok()?,
+        TreeSync::Rebase => {
+            if run(&["rebase", "--quiet", &target]).is_err() {
+                let _ = run(&["rebase", "--abort"]);
+                return None;
+            }
+            String::new()
+        }
+        TreeSync::Reset => run(&["reset", "--quiet", "--hard", &target]).ok()?,
+    };
+    git.rev_parse("HEAD")
+}
+
+// --------------------------------------------------------------------------
 // Player
 // --------------------------------------------------------------------------
 
@@ -1035,9 +1113,9 @@ impl<S: Sessions> Player<S> {
                 slug.clone(),
                 format!("released: main is clean and merged into task/{slug}; the worker rebases its finish"),
             ));
-            let text = self
-                .prompts()?
-                .render("worker.released", &[("slug", &slug)]);
+            let prompts = self.prompts()?;
+            let sync = self.sync_text(&prompts, false, &slug, TreeSync::Rebase);
+            let text = prompts.render("worker.released", &[("slug", &slug), ("sync", &sync)]);
             self.relay(&slug, &text);
         }
         Ok(())
@@ -1411,6 +1489,24 @@ impl<S: Sessions> Player<S> {
         }
         self.panes.remove(key);
         self.sessions.send(key, text);
+    }
+
+    /// Syncs `slug`'s worker tree (or, with `agent`, its task agent's) by
+    /// `how` (`sync_tree`) and renders what the message about to be pasted
+    /// says of it: the tree is at its new tip, or the command to run.
+    /// Called only at a step boundary, right before that message: the agent
+    /// sits waiting for it.
+    fn sync_text(&self, prompts: &Prompts, agent: bool, slug: &str, how: TreeSync) -> String {
+        let (section, dir, branch) = if agent {
+            ("task-agent", paths::agent_clone(&self.director, slug), format!("agent/{slug}"))
+        } else {
+            ("worker", paths::worker_clone(&self.director, slug), format!("task/{slug}"))
+        };
+        let (done, todo) = how.templates(section);
+        match sync_tree(&dir, &branch, slug, how) {
+            Some(tip) => prompts.render(&done, &[("slug", slug), ("tip", short(&tip))]),
+            None => prompts.render(&todo, &[("slug", slug)]),
+        }
     }
 
     /// The git dir of session `key`'s worktree, if it has one.
@@ -2357,10 +2453,9 @@ impl<S: Sessions> Player<S> {
         if actor == Actor::TaskAgent {
             let prompts = self.prompts()?;
             let recovery = match reason {
-                Reason::History => "task-agent.recovery-history",
-                _ => "task-agent.recovery-other",
+                Reason::History => self.sync_text(&prompts, true, slug, TreeSync::Reset),
+                _ => prompts.render("task-agent.recovery-other", &[("slug", slug)]),
             };
-            let recovery = prompts.render(recovery, &[("slug", slug)]);
             self.relay(
                 &state::agent_key(slug),
                 &prompts.render(
@@ -2931,11 +3026,13 @@ impl<S: Sessions> Player<S> {
             .hub
             .show_file(candidate, &expected_path)
             .unwrap_or_default();
-        let text = self.prompts()?.render(
+        let prompts = self.prompts()?;
+        let sync = self.sync_text(&prompts, false, slug, TreeSync::Forward);
+        let text = prompts.render(
             "worker.review",
             &[
                 ("round", &round.to_string()),
-                ("slug", slug),
+                ("sync", &sync),
                 ("review", &review_body),
             ],
         );
@@ -3153,9 +3250,11 @@ impl<S: Sessions> Player<S> {
 
         self.pin(slug, candidate, report)?;
         let reply = self.hub.show_file(candidate, &expected).unwrap_or_default();
-        let text = self.prompts()?.render(
+        let prompts = self.prompts()?;
+        let sync = self.sync_text(&prompts, false, slug, TreeSync::Forward);
+        let text = prompts.render(
             "worker.contest-reply",
-            &[("n", &n.to_string()), ("slug", slug), ("reply", &reply)],
+            &[("n", &n.to_string()), ("sync", &sync), ("reply", &reply)],
         );
         self.relay(slug, &text);
         Ok(())
@@ -3416,9 +3515,11 @@ impl<S: Sessions> Player<S> {
                     suite.summary()
                 ),
             ));
-            let text = self.prompts()?.render(
+            let prompts = self.prompts()?;
+            let sync = self.sync_text(&prompts, false, slug, TreeSync::Forward);
+            let text = prompts.render(
                 "worker.merge-failed",
-                &[("slug", slug), ("summary", &suite.summary())],
+                &[("slug", slug), ("sync", &sync), ("summary", &suite.summary())],
             );
             self.relay(slug, &text);
             return Ok(());
@@ -5159,10 +5260,9 @@ impl<S: Sessions> Player<S> {
 
         let prompts = self.prompts()?;
         let recovery = match reason {
-            Reason::History => "worker.recovery-history",
-            _ => "worker.recovery-other",
+            Reason::History => self.sync_text(&prompts, false, slug, TreeSync::Reset),
+            _ => prompts.render("worker.recovery-other", &[]),
         };
-        let recovery = prompts.render(recovery, &[("slug", slug)]);
         self.relay(
             slug,
             &prompts.render(
@@ -5265,9 +5365,9 @@ impl<S: Sessions> Player<S> {
                 );
             }
             if self.agent_rebase_told.get(slug) != Some(&incoming) {
-                let text = self
-                    .prompts()?
-                    .render("task-agent.rebase", &[("slug", slug)]);
+                let prompts = self.prompts()?;
+                let sync = self.sync_text(&prompts, true, slug, TreeSync::Rebase);
+                let text = prompts.render("task-agent.rebase", &[("slug", slug), ("sync", &sync)]);
                 self.relay(&state::agent_key(slug), &text);
                 self.agent_rebase_told.insert(slug.to_string(), incoming);
             }
@@ -5672,6 +5772,8 @@ impl<S: Sessions> Player<S> {
 
     /// What the task agent is asked to do now: the post, a review round, a
     /// contest reply, or nothing until the player pastes a step.
+    /// Its post, review and contest steps start from the task branch's tip:
+    /// the player brings a clean worktree there first (`sync_text`).
     fn agent_step_text(
         &self,
         prompts: &Prompts,
@@ -5680,6 +5782,7 @@ impl<S: Sessions> Player<S> {
         roadmap: &RoadmapConfig,
     ) -> String {
         let slug = task.slug.as_str();
+        let sync = || self.sync_text(prompts, true, slug, TreeSync::Forward);
         match step {
             AgentStep::Post => {
                 let check = if task.config.kind == TaskKind::FlakyTestFix {
@@ -5689,7 +5792,10 @@ impl<S: Sessions> Player<S> {
                 } else {
                     prompts.render("task-agent.post-check-task", &[("slug", slug)])
                 };
-                prompts.render("task-agent.post", &[("slug", slug), ("check", &check)])
+                prompts.render(
+                    "task-agent.post",
+                    &[("slug", slug), ("sync", &sync()), ("check", &check)],
+                )
             }
             AgentStep::Review => {
                 let round = task.review_round + 1;
@@ -5715,6 +5821,7 @@ impl<S: Sessions> Player<S> {
                         ("slug", slug),
                         ("tip", &task.tip),
                         ("base", &base),
+                        ("sync", &sync()),
                         ("cap", &cap),
                         ("notes", &notes),
                     ],
@@ -5733,6 +5840,7 @@ impl<S: Sessions> Player<S> {
                     &[
                         ("n", &n.to_string()),
                         ("slug", slug),
+                        ("sync", &sync()),
                         ("reason", &reason),
                         ("remaining", &remaining),
                     ],

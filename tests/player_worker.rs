@@ -630,17 +630,19 @@ fn worker_merge_commit_is_rejected_with_history() {
     assert_ne!(task_status(&hub, "m"), Status::Tested);
 }
 
-#[test]
-fn worker_commit_built_on_a_stale_pre_send_back_tip_is_diverged_history() {
-    let repo = director_repo();
-    let (_home_dir, home) = init_hub(&repo);
-    let hub = Git::new(home.hub());
-    let mut player = open_player(&home);
-
-    plan_and_post(&repo, &mut player, "d");
-    commit_in_clone(&repo, "d", "src/feature.txt", "done\n", "finish work");
+/// `d` finished, then sent back (r1): the player syncs the worker's tree
+/// to the send-back just before pasting the review, unless `scratch` (an
+/// untracked file) leaves the tree dirty.
+fn finish_and_send_back(repo: &DirectorRepo, player: &mut Player<NullSessions>, hub: &Git, scratch: bool) -> String {
+    plan_and_post(repo, player, "d");
+    commit_in_clone(repo, "d", "src/feature.txt", "done\n", "finish work");
     player.tick().expect("finish tick should succeed");
-    assert_eq!(task_status(&hub, "d"), Status::Tested);
+    assert_eq!(task_status(hub, "d"), Status::Tested);
+    let finish = hub.rev_parse("refs/heads/task/d").unwrap();
+    let dir = paths::worker_clone(&repo.director_path(), "d");
+    if scratch {
+        write_file(&dir, "src/scratch.txt", "mine\n");
+    }
 
     director_pull_task_branch(repo.path(), "d");
     write_file(
@@ -657,26 +659,112 @@ fn worker_commit_built_on_a_stale_pre_send_back_tip_is_diverged_history() {
     let report = player.tick().expect("send-back tick should succeed");
     assert_eq!(report.imported.len(), 1, "{report}");
     assert_eq!(report.imported[0].2, Transition::SendBack);
-    assert_eq!(task_status(&hub, "d"), Status::InRevision);
+    assert_eq!(task_status(hub, "d"), Status::InRevision);
+    finish
+}
 
-    // The worker keeps committing on its stale pre-send-back tip instead
-    // of pulling first — its history no longer contains the hub's new tip.
-    commit_in_clone(
+fn last_sent(player: &Player<NullSessions>, slug: &str) -> String {
+    let sent = &player.sessions().sent;
+    sent.iter()
+        .rev()
+        .find(|(s, _)| s == slug)
+        .map(|(_, m)| m.clone())
+        .unwrap_or_else(|| panic!("nothing sent to {slug}: {sent:?}"))
+}
+
+#[test]
+fn the_player_syncs_a_clean_worker_tree_before_pasting_a_review() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    finish_and_send_back(&repo, &mut player, &hub, false);
+
+    let tip = hub.rev_parse("refs/heads/task/d").unwrap();
+    let worker = Git::new(paths::worker_clone(&repo.director_path(), "d"));
+    assert_eq!(worker.rev_parse("HEAD"), Some(tip.clone()));
+    assert!(worker.dir.join("tasks/d/reviews/r1.md").exists());
+    let review = last_sent(&player, "d");
+    assert!(review.starts_with("Review round 1"), "{review}");
+    assert!(
+        review.contains(&format!("Your tree is already at {}, the tip of task/d", &tip[..12])),
+        "{review}"
+    );
+    assert!(!review.contains("git pull"), "{review}");
+}
+
+#[test]
+fn a_dirty_worker_tree_is_left_as_it_is_and_told_to_pull() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    let finish = finish_and_send_back(&repo, &mut player, &hub, true);
+
+    let worker = Git::new(paths::worker_clone(&repo.director_path(), "d"));
+    assert_eq!(worker.rev_parse("HEAD"), Some(finish), "untouched");
+    assert_eq!(
+        std::fs::read_to_string(worker.dir.join("src/scratch.txt")).unwrap(),
+        "mine\n"
+    );
+    let review = last_sent(&player, "d");
+    assert!(
+        review.contains("Fetch it: git pull --ff-only origin task/d."),
+        "{review}"
+    );
+}
+
+#[test]
+fn worker_commit_built_on_a_stale_pre_send_back_tip_is_diverged_history() {
+    stale_commit_after_send_back(false);
+}
+
+#[test]
+fn a_dirty_tree_with_a_diverged_history_is_left_to_the_worker_to_reset() {
+    stale_commit_after_send_back(true);
+}
+
+/// The worker commits on its pre-send-back tip (it moved its tree back
+/// there): diverged history. The player resets a clean tree to the hub's
+/// tip itself; a `dirty` one gets the reset command.
+fn stale_commit_after_send_back(dirty: bool) {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    let finish = finish_and_send_back(&repo, &mut player, &hub, false);
+
+    let dir = paths::worker_clone(&repo.director_path(), "d");
+    let worker = Git::new(&dir);
+    worker.run(&["reset", "-q", "--hard", &finish]).unwrap();
+    let stale = commit_in_clone(
         &repo,
         "d",
         "src/feature2.txt",
         "done too\n",
         "add feature2 without pulling first",
     );
+    if dirty {
+        write_file(&dir, "src/scratch.txt", "mine\n");
+    }
     let report = player.tick().expect("tick should succeed");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::History);
-    let sent = &player.sessions().sent;
-    assert!(
-        sent.iter().any(|(slug, msg)| slug == "d"
-            && msg.contains("git fetch origin && git reset --hard origin/task/d")),
-        "{sent:?}"
-    );
+    let msg = last_sent(&player, "d");
+    let tip = hub.rev_parse("refs/heads/task/d").unwrap();
+    if dirty {
+        assert!(
+            msg.contains("git fetch origin && git reset --hard origin/task/d"),
+            "{msg}"
+        );
+        assert_eq!(worker.rev_parse("HEAD"), Some(stale));
+    } else {
+        assert!(
+            msg.contains(&format!("your tree is reset to task/d at {}", &tip[..12])),
+            "{msg}"
+        );
+        assert_eq!(worker.rev_parse("HEAD"), Some(tip));
+    }
     assert_eq!(task_status(&hub, "d"), Status::InRevision);
 }
 

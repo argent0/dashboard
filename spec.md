@@ -137,12 +137,36 @@ and topical.
 **Rejection.** The player leaves the hub branch untouched, stores the
 offending commit under `refs/rejected/<slug>/<n>` as evidence, records the
 reason so `dashboard` shows it, and relays it to the worker's tmux session
-when the worker is the author. The agent recovers in its own clone: a
-fixing commit on top for content violations (e.g. restoring a pinned file),
-or `git reset --hard` to the hub ref for history violations. The player
-writes a worker's sparse patterns (§21) and nothing else in an agent's
-clone. Each rejection is a strike in its reason's
+when the worker is the author. The agent recovers in its own clone with a
+fixing commit on top for content violations (e.g. restoring a pinned file).
+A history violation goes back to the hub ref: the player resets a clean
+clone there itself (tree sync, below), and an agent with changes of its own
+runs `git reset --hard` to it. Each rejection is a strike in its reason's
 counter (§10).
+
+**Tree sync.** In an agent's clone the player writes a worker's sparse
+patterns (§21) and syncs the tree at step boundaries: right before it
+pastes a message that starts the agent's next step from the hub's
+`task/<slug>`, it brings the clone there itself, so the message says the
+tree is already at that tip.
+
+| Message | Sync |
+| --- | --- |
+| task agent: post, review, contest steps | fast-forward |
+| worker: review, contest reply, merge failed | fast-forward |
+| task agent: the hub moved under its commit (§17) | rebase of its commit |
+| worker: held finish released (§20) | rebase of its finish |
+| either: a `history` rejection | `reset --hard` |
+
+The player acts only on a clean clone (no change to a tracked file, no
+untracked file beyond ignored ones) still on its own branch, and only by a
+fast-forward, a rebase without conflicts or a reset. Otherwise, or when the
+rebase conflicts (then aborted), it leaves the tree exactly as it was and
+the message carries the git command for the agent to run. These messages
+answer a commit or a contest the agent made and waits on, so the agent is
+idle when its tree moves. The player's git there runs without the clone's
+hooks or fsmonitor, and a rebased commit keeps its author, with the player
+as committer; it is then imported like any other commit of that agent.
 
 ## 6. Tests
 
@@ -859,8 +883,8 @@ stay the worker's.
 Rejections count against the task's strike counters like anyone's (§10) and
 are relayed into the task agent's session with a recovery hint. A hub tip
 that moved under an unimported commit (an unblock merge, a director replan)
-is not the agent's fault: it is asked, once per commit, to rebase, with no
-strike.
+is not the agent's fault: the player rebases its commit onto the new tip
+(tree sync, §5), or asks it to, once per commit, with no strike.
 
 While task agents are on, a director post or send-back on an agent-managed
 task is an `ownership` rejection: those are the task agent's. Plan, replan,
@@ -1023,7 +1047,8 @@ and a worker's finish or a director's accept is *held* — neither imported
 nor rejected, no strike, said once. When those checks are clean on `main`,
 a held accept is simply re-landed; a held finish's branch still carries the
 old check, so the player merges `main` into it (a `sync_revision`,
-re-pinned) and the worker rebases its finish onto that. A launch held for
+re-pinned) and rebases the worker's finish onto that (tree sync, §5), or
+asks the worker to. A launch held for
 an impure task check is reported once per tip, not every tick.
 
 **An over-budget `main`.** The same rule covers a `main` that is already over

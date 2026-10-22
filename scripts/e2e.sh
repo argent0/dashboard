@@ -203,7 +203,8 @@ while [ "$(date +%s)" -lt "$end" ]; do
     local_head=$(git rev-parse HEAD)
     remote_head=$(git rev-parse "origin/task/$slug" 2>/dev/null || echo "")
     if [ -n "$remote_head" ] && [ "$remote_head" != "$local_head" ] && git merge-base --is-ancestor "$local_head" "origin/task/$slug" 2>/dev/null; then
-      git merge -q --ff-only "origin/task/$slug"
+      # The player may be fast-forwarding this tree itself (tree sync).
+      git merge -q --ff-only "origin/task/$slug" 2>/dev/null || true
     fi
 
     # Already blocked: nothing more to do until the director retires this
@@ -470,6 +471,12 @@ wait_until "the review pasted into alpha's session" alpha_pasted
 alpha_pastes=$(cat "$AGENT_LOGS/alpha.pastes")
 assert_contains "$alpha_pastes" "finish accepted" "alpha's pasted relays"
 assert_contains "$alpha_pastes" "Review round 1 from the director" "alpha's pasted relays"
+# The player synced alpha's tree itself, or (a fake agent mid-commit) left
+# it the command: either way the review says where the tree stands.
+case "$alpha_pastes" in
+  *"Your tree is already at "*", the tip of task/alpha"* | *"Fetch it: git pull --ff-only origin task/alpha."*) ;;
+  *) echo "e2e: alpha's review carries no tree sync line" >&2; printf '%s\n' "$alpha_pastes" >&2; exit 1 ;;
+esac
 
 # --------------------------------------------------------------------------
 # 5. Accept alpha. Tick -> hub main has a merge with Task: alpha, the tmux

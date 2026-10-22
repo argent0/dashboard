@@ -118,13 +118,26 @@ worker max-bytes=512 {
         """#
     // {slug}
     recovery-history "run `git fetch origin && git reset --hard origin/task/{slug}`, then redo your work and commit"
+    // {slug} {tip}: instead of `recovery-history` once the player reset a clean tree itself
+    recovery-reset "your tree is reset to task/{slug} at {tip}, so the hub's history is yours again (`git reflog` still holds the rejected commits); redo your work and commit"
     recovery-other "fix it with a new commit on top"
 
-    // {round} {slug} {review}
+    // The player brings a clean tree up to date itself just before pasting
+    // `review`, `contest-reply` and `merge-failed`, and fills their {sync}
+    // with `synced`; a tree with uncommitted or untracked files gets
+    // `sync-forward`, the command to run instead.
+    // {slug} {tip}
+    synced "Your tree is already at {tip}, the tip of task/{slug}, with any new files in it (the tests are re-pinned)."
+    // {slug}
+    sync-forward "Fetch it: git pull --ff-only origin task/{slug}. Your tree may gain files (the tests are re-pinned); the pull brings them."
+    // `released`'s {sync}: {slug} {tip} once the player rebased a clean tree, else {slug}
+    rebased "The player rebased your held finish onto it: your tree is at {tip}, and the player judges that commit as your finish."
+    sync-rebase "Rebase your held finish onto it: git pull --rebase origin task/{slug}. Make the run set pass, then commit as usual."
+
+    // {round} {sync} {review}
     review #"""
-        Review round {round} from the director. Fetch it: git pull --ff-only origin task/{slug}. Your
-        tree may have gained files (the tests are re-pinned); the pull brings them. Then make the
-        task's run set pass (`dashboard test`) and commit.
+        Review round {round} from the director. {sync} Then make the task's run set pass
+        (`dashboard test`) and commit.
 
         {review}
         """#
@@ -132,20 +145,18 @@ worker max-bytes=512 {
     // {n}
     contest-recorded "contest c{n} recorded; don't commit further. The reply will be pasted here."
 
-    // {n} {slug} {reply}
+    // {n} {sync} {reply}
     contest-reply #"""
-        Reply to your contest c{n}. Fetch it: git pull --ff-only origin task/{slug} (tests may have
-        changed; they're re-pinned). Your tree may have gained files; the pull brings them. Then make
-        the task's run set pass and commit, or contest/block again.
+        Reply to your contest c{n}; the tests may have changed. {sync} Then make the task's run set
+        pass and commit, or contest/block again.
 
         {reply}
         """#
 
-    // {slug} {summary}
+    // {slug} {sync} {summary}
     merge-failed #"""
         main was merged into task/{slug} to accept it, and the checks it ran on the merge fail.
-        Fetch it: git pull --ff-only origin task/{slug}. Make them pass and commit. The pinned files
-        are re-pinned at the merge.
+        {sync} Make them pass and commit. The pinned files are re-pinned at the merge.
 
         {summary}
         """#
@@ -157,10 +168,9 @@ worker max-bytes=512 {
         fixed.
         """#
 
-    // {slug}
+    // {slug} {sync}
     released #"""
-        main's checks are fixed, and the player merged main into task/{slug}. Rebase your held finish
-        onto it: git pull --rebase origin task/{slug}. Make the run set pass, then commit as usual.
+        main's checks are fixed, and the player merged main into task/{slug}. {sync}
         """#
 }
 
@@ -312,11 +322,21 @@ task-agent max-bytes=512 {
         exists.
         """#
 
-    // {slug} {check}: {check} is `post-check-task` or `post-check-flaky`
+    // The player brings a clean worktree up to date itself just before a
+    // step (`post`, `review`, `contest`) and fills its {sync} with `synced`;
+    // a worktree with uncommitted or untracked files gets `sync-forward`.
+    // {slug} {tip}
+    synced "Your branch is already at {tip}, the tip of task/{slug}."
+    // {slug}
+    sync-forward "Update your branch first: git fetch origin && git merge --ff-only origin/task/{slug}."
+    // `rebase`'s {sync}: {slug} {tip} once the player rebased a clean worktree, else {slug}
+    rebased "The player rebased your commit onto it: agent/{slug} is at {tip}, and the player imports it from there. Wait for its verdict."
+    sync-rebase "Run git fetch origin && git rebase origin/task/{slug}, re-run the task's check if your post is affected, and leave the result committed."
+
+    // {slug} {sync} {check}: {check} is `post-check-task` or `post-check-flaky`
     post max-bytes=1024 #"""
-        Step: post. task/{slug} is ready: its dependencies are accepted and merged in. Update your
-        branch first: git fetch origin && git merge --ff-only origin/task/{slug}. Then make ONE
-        commit on agent/{slug} with:
+        Step: post. task/{slug} is ready: its dependencies are accepted and merged in. {sync} Then
+        make ONE commit on agent/{slug} with:
         - tasks/{slug}/prompt.md: task-specific instructions for the worker only (the player
           prepends its own preamble on commit discipline and scope), including one line telling it
           every test it adds must be pure;
@@ -345,13 +365,12 @@ task-agent max-bytes=512 {
           files its check needs that don't exist yet;
         """#
 
-    // {round} {slug} {tip} {base} {cap} {notes}: {cap} is empty, `review-cap-last` or
+    // {round} {slug} {tip} {base} {sync} {cap} {notes}: {cap} is empty, `review-cap-last` or
     // `review-cap-over`; {notes} is empty or `review-notes`
     review max-bytes=1536 #"""
         Step: review round {round}. The worker's work on task/{slug} passed the task's run set at
-        {tip}; the player ran it, so don't re-run it. Update your branch: git fetch origin && git
-        merge --ff-only origin/task/{slug}. Read what the worker changed this round: git diff
-        {base} {tip}. Check that it does what the task asked, stays in scope, doesn't game its own
+        {tip}; the player ran it, so don't re-run it. {sync} Read what the worker changed this
+        round: git diff {base} {tip}. Check that it does what the task asked, stays in scope, doesn't game its own
         test (special-cased inputs, monkeypatching, a helper that neuters other tests), adds no impure
         test, and won't break the tasks after it. Then either:
         - recommend accept: commit nothing, run dashboard report accept --why "…" --suite "…". In
@@ -385,16 +404,15 @@ task-agent max-bytes=512 {
         accept, or report unsure.
         """#
 
-    // {n} {slug} {reason} {remaining}
+    // {n} {slug} {sync} {reason} {remaining}
     contest max-bytes=1024 #"""
         Step: contest c{n}. The worker says a test it must pass is wrong (it can't be satisfied, or
         demands one particular implementation instead of behaviour):
 
         {reason}
 
-        Update your branch: git fetch origin && git merge --ff-only origin/task/{slug}. Take it as a
-        collaborator's feedback on your tests, not an attack on them: judge it from the task and the
-        tests, still without writing any implementation. Then reply in ONE commit adding
+        {sync} Take it as a collaborator's feedback on your tests, not an attack on them: judge it
+        from the task and the tests, still without writing any implementation. Then reply in ONE commit adding
         tasks/{slug}/contests/c{n}.md, your answer to the worker, and, if it's right, the fixed
         tests (tests and architecture/Tests/ only). If the test is right, the reply alone explains how it can be
         met. A reply spends no review round; the worker may contest {remaining} more time(s) before
@@ -414,22 +432,23 @@ task-agent max-bytes=512 {
         """#
     // {slug}
     recovery-history "git fetch origin && git reset --hard origin/task/{slug}, then redo your commit"
+    // {slug} {tip}: instead of `recovery-history` once the player reset a clean worktree itself
+    recovery-reset "your branch is reset to task/{slug} at {tip} (`git reflog` still holds the rejected commits); redo your commit"
     // {slug}
     recovery-other "fix it with a new commit on top, or git reset --hard origin/task/{slug} and redo it"
 
-    // {slug}
+    // {slug} {sync}
     rebase #"""
         task/{slug} moved on the hub under your commit (main merged in, or a replan). Nothing was
-        rejected: run git fetch origin && git rebase origin/task/{slug}, re-run the task's check if
-        your post is affected, and leave the result committed.
+        rejected. {sync}
         """#
 
     // {slug} {status}
     hold #"""
         task/{slug} is {status}, not staged: the director changed its plan (a new dependency) or a
         dependency was retired. Nothing was rejected and no strike was counted; your commit is held,
-        not imported. Wait here: if the task returns to staged the player will ask you to rebase
-        (git fetch origin && git rebase origin/task/{slug}) and then import your post.
+        not imported. Wait here: if the task returns to staged the player rebases your commit onto
+        task/{slug} (or asks you to, when your worktree has changes of its own) and then imports your post.
         """#
 
     // {commit}
