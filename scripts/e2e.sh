@@ -399,10 +399,6 @@ cat >"$DIR_REPO/tasks/alpha/task.toml" <<'EOF'
 title = "Add feature"
 phase = "p1"
 modules = ["app"]
-
-[check]
-name = "alpha-check"
-cmd = "test -f src/feature.txt"
 EOF
 cat >"$DIR_REPO/tasks/alpha/agent.sh" <<'EOF'
 #!/bin/sh
@@ -513,10 +509,6 @@ title = "Second feature"
 phase = "p1"
 modules = ["app"]
 depends_on = ["alpha"]
-
-[check]
-name = "beta-check"
-cmd = "test -f src/featureb.txt"
 EOF
 cat >"$DIR_REPO/tasks/beta/agent.sh" <<'EOF'
 #!/bin/sh
@@ -663,7 +655,6 @@ wait_until "gamma and delta planned" both_ready
 for t in gamma delta; do
   git -C "$DIR_REPO" checkout -q "task/$t"
   echo "Create src/$t.txt." >"$DIR_REPO/tasks/$t/prompt.md"
-  printf 'title = "%s"\nphase = "p1"\nmodules = ["app"]\n\n[check]\nname = "%s-check"\ncmd = "test -f src/%s.txt"\n' "$t" "$t" "$t" >"$DIR_REPO/tasks/$t/task.toml"
   printf '#!/bin/sh\nmkdir -p src\necho ok > src/%s.txt\necho %s > src/shared.txt\n' "$t" "$t" >"$DIR_REPO/tasks/$t/agent.sh"
   task_tests "$DIR_REPO/architecture/Tests/$t.lean" "$t-check" "test -f src/$t.txt"
   git -C "$DIR_REPO" add -A
@@ -725,7 +716,6 @@ git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: eta"
 wait_until "eta is ready" task_status_is eta ready
 echo "Create src/eta.txt." >"$DIR_REPO/tasks/eta/prompt.md"
-printf 'title = "eta"\nphase = "p1"\nmodules = ["app"]\n\n[check]\nname = "eta-check"\ncmd = "test -f src/eta.txt"\n' >"$DIR_REPO/tasks/eta/task.toml"
 printf '#!/bin/sh\nmkdir -p src\necho ok > src/eta.txt\n' >"$DIR_REPO/tasks/eta/agent.sh"
 task_tests "$DIR_REPO/architecture/Tests/eta.lean" eta-check "test -f src/eta.txt"
 git -C "$DIR_REPO" add -A
@@ -787,7 +777,7 @@ task_tests "$TA_TEMPLATES/epsilon/architecture/Tests/epsilon.lean" epsilon-check
 
 git -C "$DIR_REPO" checkout -q -b task/epsilon main
 mkdir -p "$DIR_REPO/tasks/epsilon"
-printf 'title = "epsilon"\nphase = "p1"\nmodules = ["app"]\nbrief = "a fake task agent posts this"\n\n[check]\nname = "epsilon-check"\ncmd = "test -f src/epsilon.txt"\n' >"$DIR_REPO/tasks/epsilon/task.toml"
+printf 'title = "epsilon"\nphase = "p1"\nmodules = ["app"]\nbrief = "a fake task agent posts this"\n' >"$DIR_REPO/tasks/epsilon/task.toml"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: epsilon"
 
@@ -870,7 +860,7 @@ task_tests "$TA_TEMPLATES/zeta/architecture/Tests/zeta.lean" zeta-arch "$arch_cm
 
 git -C "$DIR_REPO" checkout -q -b task/zeta main
 mkdir -p "$DIR_REPO/tasks/zeta"
-printf 'title = "zeta"\nphase = "p1"\nmodules = ["zeta", "app"]\nbrief = "a module test in a view with a linked cache"\n\n[check]\nname = "zeta-arch"\ncmd = "%s"\n' "$arch_cmd" >"$DIR_REPO/tasks/zeta/task.toml"
+printf 'title = "zeta"\nphase = "p1"\nmodules = ["zeta", "app"]\nbrief = "a module test in a view with a linked cache"\n' >"$DIR_REPO/tasks/zeta/task.toml"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: zeta"
 wait_until "zeta is ready" task_status_is zeta ready
@@ -960,7 +950,7 @@ task_tests "$TA_TEMPLATES/a/architecture/Tests/a.lean" a-check "test -f a/a.txt"
 
 git -C "$DIR_REPO" checkout -q -b task/a main
 mkdir -p "$DIR_REPO/tasks/a"
-printf 'title = "a"\nphase = "p1"\nmodules = ["a"]\nbrief = "scoped to module a"\n\n[check]\nname = "a-check"\ncmd = "test -f a/a.txt"\n' >"$DIR_REPO/tasks/a/task.toml"
+printf 'title = "a"\nphase = "p1"\nmodules = ["a"]\nbrief = "scoped to module a"\n' >"$DIR_REPO/tasks/a/task.toml"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: a"
 wait_until "a is ready" task_status_is a ready

@@ -223,11 +223,16 @@ there and fails like any failing check. For a worker's own check that is a
 
 ### 6.3 The task check
 
-Each task's `task.toml` declares the task's own check (same shape, in TOML):
-the thing that must fail at post and is the task's reason to exist. In the
-post commit the director also declares it in
-`architecture/Tests/<slug>.lean`, so while the task runs it is part of the
-suite. Whether it stays there after accept is the director's call (§6.5).
+The task check is the thing that must fail at post and is the task's reason
+to exist. The post commit declares it, once, in
+`architecture/Tests/<slug>.lean`: the checks of that file are the task check,
+so while the task runs it is part of the suite. The player reads it from
+there wherever it needs it: at post at least one of them must fail, and at
+launch the task is held while all of them pass. `task.toml` stays the
+director's plan and carries no `[check]` (a flaky-test-fix's stability
+`[check]` is the one exception, §15, since it stays out of the suite).
+Whether those checks stay after accept is the director's call (§6.5); the
+post commit in the branch's history keeps the record of what the task asked.
 Every check in that file covers only modules in the task's `modules`.
 
 ### 6.4 Stale tests
@@ -262,9 +267,9 @@ before `accept:` the director (or the task agent, at its request) makes a
 - removes their entries from `architecture/Tests/<slug>.lean` and
   `architecture/Tests/<slug>.worker.lean` (or a whole file).
 
-Everything else stays: tests already on `main`, the task check in
-`tasks/<slug>/task.toml` (the record of what the task asked), and the
-dropped tests themselves in the branch's history. The run set must still
+Everything else stays: tests already on `main`, `tasks/<slug>/task.toml`,
+and the dropped tests themselves (with the post's task check, the record of
+what the task asked) in the branch's history. The run set must still
 pass at the trim. The task stays `tested`, re-pinned at the trim; accept
 then lands the trimmed branch. A task with nothing to drop needs no trim.
 
@@ -345,9 +350,9 @@ roadmap.toml                   on main: title, phases (id, title, goal, hidden),
                                docs_paths, [limits] (§10)
 prompts.kdl                    on main: every prompt the player sends (§19)
 architecture/Tests.lean        project suite: checks, test_paths, list_cmd (§6.2)
-architecture/Tests/<slug>.lean the checks a task's post adds
+architecture/Tests/<slug>.lean the checks a task's post adds: its task check (§6.3)
 architecture/Tests/<slug>.worker.lean   the checks the task's worker adds
-tasks/<slug>/task.toml         title, phase, milestone, depends_on, modules, check
+tasks/<slug>/task.toml         title, phase, milestone, depends_on, modules, brief (a flaky-test-fix adds its [check], §15)
 tasks/<slug>/prompt.md         director → worker instructions
 tasks/<slug>/reviews/r<N>.md   director's send-back notes, round N
 ```
@@ -402,8 +407,8 @@ failed validation is a rejection with the listed reason (§10).
 |---|---|---|---|
 | **plan** | new branch `task/<slug>` from `main`, adding `tasks/<slug>/task.toml` (director) | slug unused (incl. retired); `depends_on` slugs exist and aren't retired; no cycles; `modules` non-empty for an ordinary task, each a module or root of `main`'s architecture (§6.6) | `plan` |
 | **replan** | edits `tasks/<slug>/task.toml` on a not-yet-posted branch (director) | same as plan | `plan` |
-| **post** | adds `prompt.md`, the task check and its test files, `architecture/Tests/<slug>.lean`, stale-test updates (director, or its task agent §17) | all `depends_on` accepted and merged into the branch (§11); every new check's `covers` within `modules`; task check **fails** | `post` |
-| **launch** | — (player) | task check still **fails** at the tip; records pins; starts `tmux` session running `claude` in a fresh worker clone with `prompt.md` | — |
+| **post** | adds `prompt.md`, the test files, `architecture/Tests/<slug>.lean` holding the task check (§6.3), stale-test updates (director, or its task agent §17) | all `depends_on` accepted and merged into the branch (§11); `Tests/<slug>.lean` has at least one check, each with `covers` within `modules`; task check **fails** (one of its checks fails) | `post` |
+| **launch** | — (player) | task check still **fails** at the tip (one of its checks fails); records pins; starts `tmux` session running `claude` in a fresh worker clone with `prompt.md` | — |
 | **finish** | code, optionally new tests (worker) | pins unchanged; inside scope (§8.3); run set (§6.6) **passes** | `pins`, `scope`, `suite` |
 | **block** | `block:` marker (worker) | — | — (escalates) |
 | **contest** / **reply** | `contest:` marker (worker); the reply (task agent or director) | §18 | §18 |
@@ -758,7 +763,7 @@ still one `suite` strike. With `retry_on`, only a failure whose output
 matches is retried, so any other failure is a strike at once. Both fields are
 director-owned and pinned with the suite.
 
-Retries never apply to a task's own `[check]` (§6.3) or to evidence (§15),
+Retries never apply to a task check (§6.3) or to evidence (§15),
 and the worker's verdict stays plain: it is never told of them.
 
 Every attempt is in the cached result. A check that passed only on a retry
@@ -837,11 +842,11 @@ fetch is validated, as one cumulative change from the hub tip:
 
 | Task status | Commit | Validated as | Rejection reason |
 |---|---|---|---|
-| `ready` | adds `prompt.md`, the test files, `architecture/Tests/<slug>.lean`, `[check]` in `task.toml` | the post row of §9 | `post`, `evidence` |
+| `ready` | adds `prompt.md`, the test files, `architecture/Tests/<slug>.lean` (the task check) | the post row of §9 | `post`, `evidence` |
 | `tested` | adds `reviews/r<N>.md` + new/updated tests | the send-back row of §9 | `review` |
 | `tested` | leaves `tasks/<slug>/` alone: removes tests the task added | the trim row of §9, only when the director asks | `accept` |
 | `contested` | adds `contests/c<N>.md` + optionally fixed tests | the reply row of §18 | `ownership` |
-| any | touches a path outside its scope: `architecture/Tests/<slug>.lean`, the `files` of checks in the task's run set, the APIs whose both ends are in `modules`, the hub's `test_paths`, `[player] lock_files` and `tasks/<slug>/`; changes `task.toml` beyond `[check]`; any other status | — | `ownership` |
+| any | touches a path outside its scope: `architecture/Tests/<slug>.lean`, the `files` of checks in the task's run set, the APIs whose both ends are in `modules`, the hub's `test_paths`, `[player] lock_files` and `tasks/<slug>/`; changes `task.toml` (the director's plan); any other status | — | `ownership` |
 | any | an empty (marker) commit | — | `ownership` |
 | any | merge commit, or rewrites a commit imported from it | — | `history` |
 

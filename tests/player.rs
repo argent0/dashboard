@@ -552,7 +552,7 @@ fn replan_happy_path() {
 // pre-5b scope (fetch, history rules, main docs commits, plan/replan,
 // unblock merges).
 #[test]
-fn post_missing_a_check_in_task_toml_is_rejected_with_post() {
+fn post_missing_a_task_check_is_rejected_with_post() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
@@ -568,9 +568,9 @@ fn post_missing_a_check_in_task_toml_is_rejected_with_post() {
     player.tick().expect("tick should succeed");
     let tip_before = hub.rev_parse("refs/heads/task/nocheck").unwrap();
 
-    // Adding prompt.md is a `post` (spec §9) attempt, but task.toml declares
-    // no [check] section, so validate_post rejects it before ever running
-    // anything.
+    // Adding prompt.md is a `post` (spec §9) attempt, but it adds no
+    // architecture/Tests/nocheck.lean, the task check's one home, so
+    // validate_post rejects it before ever running anything.
     director_commit_on_branch(
         repo.path(),
         "task/nocheck",
@@ -582,13 +582,37 @@ fn post_missing_a_check_in_task_toml_is_rejected_with_post() {
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Post);
     assert!(
-        report.rejected[0].message.contains("[check]"),
+        report.rejected[0].message.contains("architecture/Tests/nocheck.lean has no check"),
         "{}",
         report.rejected[0].message
     );
     assert_eq!(
         hub.rev_parse("refs/heads/task/nocheck").as_deref(),
         Some(tip_before.as_str())
+    );
+}
+
+#[test]
+fn plan_with_a_check_in_task_toml_is_rejected_with_plan() {
+    let repo = director_repo();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+
+    // The task check lives only in architecture/Tests/<slug>.lean.
+    director_commit_on_branch(
+        repo.path(),
+        "task/dup",
+        "tasks/dup/task.toml",
+        "title = \"Dup\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"dup-check\"\ncmd = \"true\"\n",
+        "plan: dup",
+    );
+    let report = player.tick().expect("tick should succeed");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Plan);
+    assert!(
+        report.rejected[0].message.contains("architecture/Tests/<slug>.lean"),
+        "{}",
+        report.rejected[0].message
     );
 }
 

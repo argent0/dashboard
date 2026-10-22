@@ -74,7 +74,7 @@ fn plan_and_post(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
     write_file(
         repo.path(),
         "tasks/a/task.toml",
-        "title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"a-check\"\ncmd = \"test -f src/feature.txt\"\n",
+        "title = \"a\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(
         repo.path(),

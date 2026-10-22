@@ -93,7 +93,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) -> p
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n"
         ),
     );
     write_file(
@@ -303,7 +303,7 @@ fn launch_skipped_with_an_error_when_the_clone_dir_already_exists() {
     write_file(
         repo.path(),
         "tasks/leftover/task.toml",
-        "title = \"Leftover\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"leftover-check\"\ncmd = \"test -f src/feature.txt\"\n",
+        "title = \"Leftover\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(
         repo.path(),
@@ -505,7 +505,7 @@ fn finish_modifying_a_pinned_file_is_rejected_with_pins_and_relayed() {
         &repo,
         "y",
         "tasks/y/task.toml",
-        "title = \"Y (tampered)\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"y-check\"\ncmd = \"true\"\n",
+        "title = \"Y (tampered)\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
         "tamper with the pinned task.toml",
     );
 
@@ -1227,11 +1227,6 @@ fn plan_and_post_on(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug
     checkout_branch(repo.path(), &format!("task/{slug}"));
     write_file(repo.path(), &format!("tasks/{slug}/prompt.md"), "do the thing\n");
     let cmd = format!("test -f {module}/feature.txt");
-    write_file(
-        repo.path(),
-        &format!("tasks/{slug}/task.toml"),
-        &format!("{plan_toml}\n[check]\nname = \"{slug}-check\"\ncmd = \"{cmd}\"\n"),
-    );
     write_file(repo.path(), &tests_file(slug), &lean_task_tests(&format!("{slug}-check"), &cmd, &format!("[{module}]")));
     commit(repo.path(), &format!("post: {slug}"));
     let report = player.tick().expect("post tick");
@@ -1333,7 +1328,6 @@ fn a_post_check_covers_only_the_task_modules() {
     let plan_toml = "title = \"o\"\nphase = \"p1\"\nmodules = [\"a\"]\n";
     plan(&repo, &mut player, "o", plan_toml);
     write_file(repo.path(), "tasks/o/prompt.md", "x\n");
-    write_file(repo.path(), "tasks/o/task.toml", &format!("{plan_toml}\n[check]\nname = \"o-check\"\ncmd = \"test -f b/x\"\n"));
     write_file(repo.path(), &tests_file("o"), &lean_task_tests("o-check", "test -f b/x", "[b]"));
     commit(repo.path(), "post: o");
     let report = player.tick().expect("tick");

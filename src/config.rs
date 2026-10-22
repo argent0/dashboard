@@ -28,7 +28,7 @@ pub struct RoadmapConfig {
 #[serde(default)]
 pub struct BudgetConfig {
     /// Kills any single run of a suite check that takes longer (the check
-    /// fails, a `budget` strike). Not applied to a task's own `[check]`.
+    /// fails, a `budget` strike). Not applied to a task check.
     pub check_timeout: u64,
     /// A suite whose checks took longer in total is reported (`suite_slow`).
     pub suite_warn: u64,
@@ -355,7 +355,7 @@ pub struct Check {
     pub min_pass: u32,
     /// On a failing verdict, re-run the whole check up to this many more
     /// times; it passes if any attempt passes. Director-owned, like the rest
-    /// of the check. Never applied to a task's own `[check]` (spec §6.3).
+    /// of the check. Never applied to a task check (spec §6.3).
     #[serde(default)]
     pub retry_failed: u32,
     /// Regexes: only retry when a failing run's output matches one of them.
@@ -629,6 +629,9 @@ impl TaskConfig {
             }
         }
         if let Some(c) = &self.check {
+            if self.kind == TaskKind::Task {
+                return Err("a task has no [check] in task.toml: its task check is the checks its post adds to architecture/Tests/<slug>.lean".to_string());
+            }
             c.validate()?;
         }
         for e in &self.evidence {
@@ -1619,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn task_config_with_check_validated() {
+    fn a_task_keeps_its_check_in_its_suite_file() {
         let toml = r#"
             title = "Do the thing"
             modules = ["a"]
@@ -1627,9 +1630,8 @@ mod tests {
             [check]
             name = "t"
             cmd = "true"
-            runs = 2
-            min_pass = 3
         "#;
-        assert!(task_config_from_str(toml).is_err());
+        let err = task_config_from_str(toml).unwrap_err();
+        assert!(err.contains("architecture/Tests/<slug>.lean"), "{err}");
     }
 }

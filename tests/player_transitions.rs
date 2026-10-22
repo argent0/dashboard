@@ -90,7 +90,7 @@ fn post(repo: &DirectorRepo, player: &mut Player<NullSessions>, slug: &str) {
         repo.path(),
         &format!("tasks/{slug}/task.toml"),
         &format!(
-            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"{slug}-check\"\ncmd = \"test -f src/feature.txt\"\n"
+            "title = \"{slug}\"\nphase = \"p1\"\nmodules = [\"app\"]\n"
         ),
     );
     write_file(
@@ -210,7 +210,7 @@ fn post_rejected_when_the_task_check_already_passes() {
     write_file(
         repo.path(),
         "tasks/eager/task.toml",
-        "title = \"Eager\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"eager-check\"\ncmd = \"test -f src/feature.txt\"\n",
+        "title = \"Eager\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(
         repo.path(),
@@ -254,7 +254,7 @@ fn post_rejected_when_dependencies_are_not_accepted() {
     write_file(
         repo.path(),
         "tasks/b/task.toml",
-        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f src/feature.txt\"\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n",
     );
     write_file(
         repo.path(),
@@ -299,7 +299,7 @@ fn post_rejected_when_the_suite_fragment_is_missing() {
     write_file(
         repo.path(),
         "tasks/notests/task.toml",
-        "title = \"No tests entry\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"notests-check\"\ncmd = \"test -f src/feature.txt\"\n",
+        "title = \"No tests entry\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     // architecture/Tests/notests.lean deliberately not added.
     commit(repo.path(), "post: notests (forgot its Tests file)");
@@ -336,7 +336,7 @@ fn post_rejected_when_the_task_check_goes_in_tests_lean() {
     write_file(
         repo.path(),
         "tasks/shared/task.toml",
-        "title = \"Shared\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"shared-check\"\ncmd = \"test -f src/feature.txt\"\n",
+        "title = \"Shared\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     // The old shape: appended to the file every parallel post would edit.
     write_file(
@@ -375,7 +375,7 @@ fn post_rejected_when_a_check_name_is_declared_twice() {
     write_file(
         repo.path(),
         "tasks/dup/task.toml",
-        "title = \"Dup\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"unit\"\ncmd = \"test -f src/feature.txt\"\n",
+        "title = \"Dup\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(
         repo.path(),
@@ -424,7 +424,7 @@ fn post_rejected_when_a_dependency_is_accepted_but_not_yet_merged_into_the_branc
     write_file(
         repo.path(),
         "tasks/b/task.toml",
-        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n\n[check]\nname = \"b-check\"\ncmd = \"test -f src/feature.txt\"\n",
+        "title = \"B\"\nphase = \"p1\"\nmodules = [\"app\"]\ndepends_on = [\"a\"]\n",
     );
     write_file(
         repo.path(),
@@ -1051,7 +1051,7 @@ fn empty_marker_on_top_of_a_rejected_non_empty_commit_is_ownership() {
     write_file(
         repo.path(),
         "tasks/stack/task.toml",
-        "title = \"Stack\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"stack-check\"\ncmd = \"true\"\n",
+        "title = \"Stack\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(
         repo.path(),
@@ -1095,7 +1095,7 @@ fn two_post_rejections_escalate_the_task() {
     write_file(
         repo.path(),
         "tasks/strikeout/task.toml",
-        "title = \"Strikeout\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"strikeout-check\"\ncmd = \"true\"\n",
+        "title = \"Strikeout\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(
         repo.path(),

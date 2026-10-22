@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 const PLAN: &str = "title = \"s\"\nphase = \"p1\"\nmodules = [\"app\"]\nbrief = \"mind the widget cache\"\n";
-const CHECK: &str = "\n[check]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\n";
 
 // --------------------------------------------------------------------------
 // Fixture helpers
@@ -114,8 +113,8 @@ fn agent_commit(repo: &DirectorRepo, files: &[(&str, &str)], msg: &str) -> Strin
     commit(&dir, msg)
 }
 
-/// The task agent's post: the prompt, the `[check]` in task.toml and the
-/// same check in its suite fragment.
+/// The task agent's post: the prompt and the task check in its suite
+/// fragment.
 fn agent_post(repo: &DirectorRepo) -> String {
     agent_commit(
         repo,
@@ -124,7 +123,6 @@ fn agent_post(repo: &DirectorRepo) -> String {
                 "tasks/s/prompt.md",
                 "make src/feature.txt; tests you add must be pure\n",
             ),
-            ("tasks/s/task.toml", &format!("{PLAN}{CHECK}")),
             (
                 &*tests_file("s"),
                 &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\n"),
@@ -301,7 +299,6 @@ fn a_director_post_is_ownership_when_task_agents_are_on() {
 
     checkout_branch(repo.path(), "task/s");
     write_file(repo.path(), "tasks/s/prompt.md", "do it\n");
-    write_file(repo.path(), "tasks/s/task.toml", &format!("{PLAN}{CHECK}"));
     write_file(
         repo.path(),
         &*tests_file("s"),
@@ -404,9 +401,7 @@ fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
             ("tasks/s/prompt.md", "p\n"),
             (
                 "tasks/s/task.toml",
-                &format!(
-                    "title = \"s, renamed\"\nphase = \"p1\"\nmodules = [\"app\"]\nbrief = \"mind the widget cache\"\n{CHECK}"
-                ),
+                "title = \"s, renamed\"\nphase = \"p1\"\nmodules = [\"app\"]\nbrief = \"mind the widget cache\"\n",
             ),
             (
                 &*tests_file("s"),
@@ -418,7 +413,7 @@ fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
     let report = player.tick().expect("tick");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert!(
-        report.rejected[0].message.contains("only set [check]"),
+        report.rejected[0].message.contains("task.toml is the director's plan"),
         "{}",
         report.rejected[0].message
     );
@@ -448,10 +443,9 @@ fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
 /// The post with its check's `files` declared and written beside it.
 fn agent_post_with_files(repo: &DirectorRepo, files: &str, written: &[(&str, &str)]) {
     let check = format!("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\nfiles = {files}\n");
-    let (suite, toml, tests) = (task_suite_lean(&check), format!("{PLAN}{CHECK}"), tests_file("s"));
+    let (suite, tests) = (task_suite_lean(&check), tests_file("s"));
     let mut all = vec![
         ("tasks/s/prompt.md", "make src/feature.txt; tests you add must be pure\n"),
-        ("tasks/s/task.toml", &*toml),
         (&*tests, &*suite),
     ];
     all.extend_from_slice(written);
@@ -535,7 +529,6 @@ fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
         &repo,
         &[
             ("tasks/s/prompt.md", "make src/feature.txt\n"),
-            ("tasks/s/task.toml", &format!("{PLAN}{CHECK}")),
             (
                 &*tests_file("s"),
                 &*task_suite_lean("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\n"),
@@ -1090,7 +1083,6 @@ fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalat
     player.tick().expect("plan tick");
     checkout_branch(repo.path(), "task/s");
     write_file(repo.path(), "tasks/s/prompt.md", "make src/feature.txt\n");
-    write_file(repo.path(), "tasks/s/task.toml", &format!("{PLAN}{CHECK}"));
     write_file(
         repo.path(),
         &*tests_file("s"),
@@ -1201,7 +1193,7 @@ fn another_tasks_agent_commits_merged_in_from_main_still_ask_for_a_rebase() {
     write_file(
         &t_dir,
         "tasks/t/task.toml",
-        "title = \"t\"\nphase = \"p1\"\nmodules = [\"app\"]\n\n[check]\nname = \"t-check\"\ncmd = \"test -f t.txt\"\n",
+        "title = \"t\"\nphase = \"p1\"\nmodules = [\"app\"]\n",
     );
     write_file(
         &t_dir,
@@ -1300,7 +1292,7 @@ fn a_director_replan_after_posting_is_ownership() {
     write_file(
         repo.path(),
         "tasks/s/task.toml",
-        &format!("{PLAN}{CHECK}# edited\n"),
+        &format!("{PLAN}# edited\n"),
     );
     commit(repo.path(), "replan: s");
     let report = player.tick().expect("tick");
@@ -1372,7 +1364,6 @@ fn post_with(modules: &str, extra: &[(&str, &str)]) -> TickReport {
     assert!(report.rejected.is_empty(), "{report}");
     let mut files: Vec<(String, String)> = vec![
         ("tasks/s/prompt.md".into(), "make a/feature.txt\n".into()),
-        ("tasks/s/task.toml".into(), format!("{plan_toml}\n[check]\nname = \"s-check\"\ncmd = \"test -f a/feature.txt\"\n")),
         (tests_file("s"), lean_task_tests("s-check", "test -f a/feature.txt", "[a]")),
     ];
     files.extend(extra.iter().map(|(p, t)| (p.to_string(), t.to_string())));

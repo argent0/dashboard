@@ -1037,22 +1037,32 @@ impl Runner {
         Ok(RunSet { checks, whole: false, why: format!("the run set of {}", modules.join(", ")) })
     }
 
-    /// Reads `tasks/<slug>/task.toml` at `commit` and runs its `[check]`.
-    /// Errors (not a `CheckResult`) if the file is missing, invalid, or has
-    /// no check — there's nothing to run.
-    pub fn run_task_check(&self, commit: &str, slug: &str) -> Result<CheckResult, String> {
+    /// The task check of `slug` at `commit` (spec §6.3), run once: every
+    /// check in `architecture/Tests/<slug>.lean`, or a flaky-test-fix's
+    /// `[check]` in `task.toml` (kept out of the suite, spec §15). Errors
+    /// (not a `CheckResult`) when there's nothing to run.
+    pub fn run_task_check(&self, commit: &str, slug: &str) -> Result<Vec<CheckResult>, String> {
         let path = format!("tasks/{slug}/task.toml");
         let text = self
             .hub
             .show_file(commit, &path)
             .ok_or_else(|| format!("{path} not found at {commit}"))?;
         let cfg = config::task_config_from_str(&text).map_err(|e| format!("{path}: {e}"))?;
-        let check = cfg
-            .check
-            .ok_or_else(|| format!("{path}: no [check] section"))?;
+        let checks = match cfg.check {
+            Some(check) => vec![check],
+            None => {
+                let tests_path = config::tests_file(slug);
+                let suite = crate::records::suite_at(&self.hub, commit, Some(&self.exporter))?;
+                let own: Vec<Check> = suite.from_file(&tests_path).into_iter().cloned().collect();
+                if own.is_empty() {
+                    return Err(format!("{tests_path} has no check: the task check lives there"));
+                }
+                own
+            }
+        };
         // A task check that fails must keep meaning "fails for the reason
         // the task exists" (spec §6.3): no retries here.
-        Ok(self.run_check(commit, &check.without_retries()))
+        Ok(checks.iter().map(|c| self.run_check(commit, &c.without_retries())).collect())
     }
 }
 

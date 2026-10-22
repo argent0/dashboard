@@ -46,7 +46,6 @@ fn launched_with(runs: &str, manifest: &str, modules: &str) -> (DirectorRepo, Te
     director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", &plan, "plan: s");
     player.tick().expect("plan tick");
     write_file(repo.path(), "tasks/s/prompt.md", "make a/feature.txt\n");
-    write_file(repo.path(), "tasks/s/task.toml", &format!("{plan}\n[check]\nname = \"s-check\"\ncmd = \"test -f a/feature.txt\"\n"));
     write_file(repo.path(), &tests_file("s"), &lean_task_tests("s-check", "test -f a/feature.txt", "[a]"));
     commit(repo.path(), "post: s");
     let report = player.tick().expect("post tick");

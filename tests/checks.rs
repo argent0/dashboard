@@ -227,24 +227,25 @@ fn suite_passes_when_every_check_passes() {
 // --------------------------------------------------------------------------
 
 #[test]
-fn run_task_check_reads_task_toml() {
+fn run_task_check_runs_the_checks_of_the_tasks_suite_file() {
     let repo = director_repo();
     let (_home_dir, home) = init_hub(&repo);
     let runner = Runner::new(&home);
 
+    write_file(repo.path(), "tasks/foo/task.toml", "title = \"Foo\"\nmodules = [\"app\"]\n");
     write_file(
         repo.path(),
-        "tasks/foo/task.toml",
-        "title = \"Foo\"\nmodules = [\"app\"]\n\n[check]\nname = \"foo-check\"\ncmd = \"true\"\n",
+        &*tests_file("foo"),
+        &*task_suite_lean("[[check]]\nname = \"foo-check\"\ncmd = \"true\"\n\n[[check]]\nname = \"foo-other\"\ncmd = \"false\"\n"),
     );
-    let sha = commit(repo.path(), "plan: foo");
+    let sha = commit(repo.path(), "post: foo");
     push_main_to_hub(repo.path());
 
-    let result = runner
+    let results = runner
         .run_task_check(&sha, "foo")
         .expect("task check should be found and run");
-    assert_eq!(result.name, "foo-check");
-    assert!(result.pass);
+    let got: Vec<(&str, bool)> = results.iter().map(|r| (r.name.as_str(), r.pass)).collect();
+    assert_eq!(got, vec![("foo-check", true), ("foo-other", false)]);
 }
 
 #[test]

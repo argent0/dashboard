@@ -2669,10 +2669,11 @@ impl<S: Sessions> Player<S> {
     /// spec §9's post row: status must be `ready` (other tasks may be in
     /// flight: spec §4's parallel tasks); every accepted dependency's merge must already be an
     /// ancestor of `candidate` (else the branch hasn't been unblocked into
-    /// yet); `task.toml` must parse and declare a check; its suite file
-    /// `architecture/Tests/<slug>.lean` must carry a matching check and the whole suite
-    /// must load (spec §6.3); and that check must currently
-    /// *fail* (spec §3.1's evidence requirement).
+    /// yet); `task.toml` must parse; the whole suite must load and the
+    /// task's suite file `architecture/Tests/<slug>.lean` must carry at least
+    /// one check, each covering only the task's modules: together they are
+    /// the task check (spec §6.3), and one must currently *fail* (spec
+    /// §3.1's evidence requirement).
     fn validate_post(
         &self,
         slug: &str,
@@ -2757,10 +2758,10 @@ impl<S: Sessions> Player<S> {
             }
             return Ok(());
         }
-        let check = cfg
-            .check
-            .ok_or_else(|| format!("post: task/{slug}: {task_toml_path} has no [check] section"))?;
         if cfg.kind == TaskKind::FlakyTestFix {
+            let check = cfg
+                .check
+                .ok_or_else(|| format!("post: task/{slug}: {task_toml_path} has no [check] section"))?;
             // The stress check is a one-off proof for this task, an exception
             // to spec §6.3: it must not slow every future suite.
             if has_file || suite.check(&check.name).is_some() {
@@ -2777,6 +2778,13 @@ impl<S: Sessions> Player<S> {
                 ));
             }
         } else {
+            // The task check is the checks of the task's own file, never
+            // Tests.lean, so parallel posts never edit the same file.
+            if own.is_empty() {
+                return Err(format!(
+                    "post: task/{slug}: {tests_path} has no check; the task check lives there"
+                ));
+            }
             // A task's checks test what it changes: within its modules.
             for c in &own {
                 if c.all {
@@ -2786,30 +2794,19 @@ impl<S: Sessions> Player<S> {
                     return Err(format!("post: task/{slug}: check {} in {tests_path} covers {n}, outside the task's modules ({})", c.name, cfg.modules.join(", ")));
                 }
             }
-            // The check must live in the task's own file, not Tests.lean, so
-            // parallel posts never edit the same file.
-            if !own.iter().any(|c| {
-                c.name == check.name
-                    && c.cmd == check.cmd
-                    && c.runs == check.runs
-                    && c.min_pass == check.min_pass
-            }) {
-                return Err(format!(
-                    "post: task/{slug}: {tests_path} has no check matching the task check {:?} (same name, cmd, runs, min_pass)",
-                    check.name
-                ));
-            }
         }
 
-        let result = self
+        let results = self
             .runner
             .run_task_check(candidate, slug)
             .map_err(|e| format!("post: task/{slug}: {e}"))?;
-        if let Some(why) = result.impurity() {
-            let _ = records::record_impurity(&self.hub, slug, candidate, &result);
-            return Err(format!("post: task/{slug}: {why}"));
+        for result in &results {
+            if let Some(why) = result.impurity() {
+                let _ = records::record_impurity(&self.hub, slug, candidate, result);
+                return Err(format!("post: task/{slug}: {why}"));
+            }
         }
-        if result.pass {
+        if results.iter().all(|r| r.pass) {
             return Err(format!(
                 "post: task/{slug}: task check already passes — it must fail at post"
             ));
@@ -4210,17 +4207,18 @@ impl<S: Sessions> Player<S> {
                 return self.auto_retire(slug, tip, &miss, report);
             }
         } else {
-            let result = self
+            let results = self
                 .runner
                 .run_task_check(tip, slug)
                 .map_err(|e| format!("launch: task/{slug}: {e}"))?;
-            if let Some(why) = result.impurity() {
-                let _ = records::record_impurity(&self.hub, slug, tip, &result);
+            if let Some(result) = results.iter().find(|r| r.impurity().is_some()) {
+                let why = result.impurity().unwrap_or_default();
+                let _ = records::record_impurity(&self.hub, slug, tip, result);
                 let msg = format!("launch: task/{slug}: {why} — not launching");
                 self.hold_launch(slug, tip, msg, report);
                 return Ok(());
             }
-            if result.pass {
+            if results.iter().all(|r| r.pass) {
                 let msg = format!(
                     "launch: task/{slug}: the task check now passes at the tip — not launching a worker for work that's already done"
                 );
@@ -5103,8 +5101,8 @@ impl<S: Sessions> Player<S> {
             return Ok(());
         };
 
-        let check = self.runner.run_task_check(candidate, slug)?;
-        if !check.pass {
+        let results = self.runner.run_task_check(candidate, slug)?;
+        if let Some(check) = results.iter().find(|c| !c.pass) {
             let passed = check.exits.iter().filter(|&&e| e == 0).count();
             let tail = check
                 .output_tail
@@ -5298,8 +5296,8 @@ impl<S: Sessions> Player<S> {
     /// The newest commit a task agent made, validated as one cumulative
     /// change from the hub tip: its post while the task is staged, a
     /// send-back while it's tested. Either may touch only tests, the suite
-    /// files and `tasks/<slug>/` (with `[check]` the only part of `task.toml`
-    /// it may change), and it never commits a marker (spec §17).
+    /// files and `tasks/<slug>/` (all but `task.toml`, the director's plan),
+    /// and it never commits a marker (spec §17).
     fn try_agent_commit(
         &mut self,
         slug: &str,
@@ -5477,8 +5475,8 @@ impl<S: Sessions> Player<S> {
 
     /// Where a task agent may write (`agent_scope`), plus new files under
     /// the `files` its candidate declares in `Tests/<slug>.lean` (a test
-    /// inside a module's paths, declared and written in one post); and in
-    /// `task.toml` only `[check]`, the rest being the director's plan.
+    /// inside a module's paths, declared and written in one post); never
+    /// `task.toml`, the director's plan.
     fn agent_paths_ok(
         &self,
         slug: &str,
@@ -5500,20 +5498,10 @@ impl<S: Sessions> Player<S> {
         }
         let toml_path = format!("tasks/{slug}/task.toml");
         if diffs.iter().any(|(_, p)| *p == toml_path) {
-            let plan = |c: &str| {
-                self.hub
-                    .show_file(c, &toml_path)
-                    .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
-                    .map(|mut t| {
-                        t.remove("check");
-                        t
-                    })
-            };
-            if plan(tip) != plan(candidate) {
-                return Err(format!(
-                    "ownership: task/{slug}: in task.toml a task agent may only set [check]; the rest is the director's plan"
-                ));
-            }
+            return Err(format!(
+                "ownership: task/{slug}: task.toml is the director's plan; the task check goes in {}",
+                config::tests_file(slug)
+            ));
         }
         Ok(())
     }

@@ -264,8 +264,8 @@ task-agent max-bytes=512 {
           The prompt.md you write passes this rule on to the worker in one line.
         - Write only tests, architecture/Tests/{slug}.lean, the APIs between the task's modules and
           files under tasks/{slug}/, never code. Each check in Tests/{slug}.lean names `covers`
-          inside the task's modules and its test files in `files`. In task.toml only [check] is
-          yours; the rest is the director's plan.
+          inside the task's modules and its test files in `files`. task.toml is the director's
+          plan; leave it as it is.
         - Never commit accept:, retire: or any other marker: you recommend, the director decides.
         - Trim only when the director asks: ONE commit on a tested task that deletes (or edits)
           test files this task added and removes their checks from architecture/Tests/{slug}.lean
@@ -331,9 +331,9 @@ task-agent max-bytes=512 {
         """#
     // {slug}
     post-check-task #"""
-        - its [check] in tasks/{slug}/task.toml (unless the plan already has one) and the same check
-          in architecture/Tests/{slug}.lean (same name, cmd, runs and min_pass; check names are
-          unique across the whole suite), with `covers` inside the task's modules;
+        - the task's check in architecture/Tests/{slug}.lean, with `covers` inside the task's
+          modules (check names are unique across the whole suite); the checks there are the task
+          check, and at least one of them must fail;
         """#
     post-check-speedup #"""
         - nothing in architecture/Tests/: this is a test-speedup (spec §15.1), whose [[slow]] checks are
