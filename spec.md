@@ -845,7 +845,11 @@ fetch is validated, as one cumulative change from the hub tip:
 | any | an empty (marker) commit | — | `ownership` |
 | any | merge commit, or rewrites a commit imported from it | — | `history` |
 
-Scope is read at the hub tip, so a commit can't widen its own.
+Scope is read at the hub tip, so a commit can't widen its own, with one
+exception: the commit may add new files under the `files` it declares in
+`architecture/Tests/<slug>.lean`, so a test can live inside a module's paths
+(a Rust crate's `tests/`) and stay in the module's view. Existing files there
+stay the worker's.
 Rejections count against the task's strike counters like anyone's (§10) and
 are relayed into the task agent's session with a recovery hint. A hub tip
 that moved under an unimported commit (an unblock merge, a director replan)

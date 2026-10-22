@@ -5475,8 +5475,10 @@ impl<S: Sessions> Player<S> {
         records::agent_scope_at(&self.hub, slug, tip, Some(self.runner.exporter()))
     }
 
-    /// Where a task agent may write (`agent_scope`); and in `task.toml`
-    /// only `[check]`, the rest being the director's plan.
+    /// Where a task agent may write (`agent_scope`), plus new files under
+    /// the `files` its candidate declares in `Tests/<slug>.lean` (a test
+    /// inside a module's paths, declared and written in one post); and in
+    /// `task.toml` only `[check]`, the rest being the director's plan.
     fn agent_paths_ok(
         &self,
         slug: &str,
@@ -5485,8 +5487,12 @@ impl<S: Sessions> Player<S> {
         diffs: &[(char, String)],
     ) -> Result<(), String> {
         let scope = self.agent_scope(slug, tip);
-        for (_, path) in diffs {
-            if !path_under_test_paths(path, &scope) {
+        let declared: Vec<String> = records::suite_at(&self.hub, candidate, Some(self.runner.exporter()))
+            .map(|s| s.from_file(&config::tests_file(slug)).iter().flat_map(|c| c.files.iter().cloned()).collect())
+            .unwrap_or_default();
+        for (status, path) in diffs {
+            let added = *status == 'A' && path_under_test_paths(path, &declared);
+            if !added && !path_under_test_paths(path, &scope) {
                 return Err(format!(
                     "ownership: task/{slug}: a task agent writes its task's tests, the prompt, reviews and the APIs inside its modules, never {path:?}: the code is the worker's"
                 ));

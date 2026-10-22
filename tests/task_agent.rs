@@ -445,6 +445,43 @@ fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
     );
 }
 
+/// The post with its check's `files` declared and written beside it.
+fn agent_post_with_files(repo: &DirectorRepo, files: &str, written: &[(&str, &str)]) {
+    let check = format!("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\nfiles = {files}\n");
+    let (suite, toml, tests) = (task_suite_lean(&check), format!("{PLAN}{CHECK}"), tests_file("s"));
+    let mut all = vec![
+        ("tasks/s/prompt.md", "make src/feature.txt; tests you add must be pure\n"),
+        ("tasks/s/task.toml", &*toml),
+        (&*tests, &*suite),
+    ];
+    all.extend_from_slice(written);
+    agent_commit(repo, &all, "post: s");
+}
+
+#[test]
+fn a_task_agent_adds_its_declared_test_files_inside_a_module() {
+    // A new file under the post's own declared `files`, inside `app`'s `src/`.
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(&repo, &mut player);
+    agent_post_with_files(&repo, "[\"src/tests/\"]", &[("src/tests/s.rs", "#[test] fn s() {}\n")]);
+    let report = player.tick().expect("tick");
+    assert!(report.rejected.is_empty(), "{report}");
+    assert_eq!(report.imported[0].2, Transition::Post, "{report}");
+
+    // Declaring an existing file of the module keeps it the worker's.
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let mut player = open_player(&home);
+    plan(&repo, &mut player);
+    agent_post_with_files(&repo, "[\"src/\"]", &[("src/.keep", "mine\n")]);
+    let report = player.tick().expect("tick");
+    assert_eq!(report.rejected.len(), 1, "{report}");
+    assert_eq!(report.rejected[0].reason, Reason::Ownership);
+    assert!(report.rejected[0].message.contains("src/.keep"), "{}", report.rejected[0].message);
+}
+
 #[test]
 fn a_hub_move_under_the_agents_commit_asks_for_a_rebase_without_a_strike() {
     let repo = repo_with_task_agents();

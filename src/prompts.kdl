@@ -321,7 +321,9 @@ task-agent max-bytes=512 {
         - tasks/{slug}/prompt.md: task-specific instructions for the worker only (the player
           prepends its own preamble on commit discipline and scope), including one line telling it
           every test it adds must be pure;
-        - the task's test files, named in the `files` of its checks (or under test_paths);
+        - the task's test files, named in the `files` of its checks (or under test_paths); a
+          new file there may sit inside a module's paths, e.g. a Rust crate's tests/, so it
+          builds in the module's view;
         {check}
         - updates to any existing test this task makes stale.
         Before committing, run the task's check and confirm it fails, for the reason the task exists:
