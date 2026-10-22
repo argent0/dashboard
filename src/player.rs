@@ -23,6 +23,7 @@ use crate::flaky;
 use crate::speedup;
 use crate::fsm::{self, Move, Verdict};
 use crate::git::Git;
+use crate::marker::{self, Gate, Marker};
 use crate::paths::{self, Home};
 use crate::prompts::{self, Prompts};
 use crate::queue;
@@ -2279,7 +2280,7 @@ impl<S: Sessions> Player<S> {
         let cumulative_empty = diffs.is_empty();
 
         if self.hub.is_empty_commit(candidate) {
-            return self.try_marker(slug, tip, candidate, cumulative_empty, status, report);
+            return self.try_marker(slug, tip, candidate, cumulative_empty, report);
         }
 
         let ctx = self.fsm_ctx(&hub_state, slug);
@@ -2457,22 +2458,13 @@ impl<S: Sessions> Player<S> {
 
     /// `fsm`'s view of `slug` in `hub_state`, or none for an unknown task.
     fn fsm_ctx(&self, hub_state: &state::HubState, slug: &str) -> Option<fsm::Ctx> {
-        let task = hub_state.tasks.iter().find(|t| t.slug == slug)?;
-        Some(fsm::Ctx {
-            status: task.status,
-            managed: state::task_agent_managed(&hub_state.roadmap, &task.config),
-            spike: task.spike.is_some(),
-            agent: task.agent.is_some(),
-        })
+        fsm::Ctx::of(hub_state, slug)
     }
 
-    /// The fsm verdict for the director making `mv` on `slug`'s branch now.
-    /// An unknown task has no context: `None`.
-    fn director_verdict(&self, slug: &str, mv: Move) -> Result<Option<Verdict>, String> {
+    /// The gate on the director's marker `m` on `slug`'s branch now.
+    fn marker_gate(&self, slug: &str, m: Marker) -> Result<Gate, String> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
-        Ok(self
-            .fsm_ctx(&hub_state, slug)
-            .map(|c| fsm::decide(Actor::Director, mv, c)))
+        Ok(marker::gate(m, slug, self.fsm_ctx(&hub_state, slug)))
     }
 
     /// An empty commit on an existing branch: a marker (spec §5, §9). Only
@@ -2487,7 +2479,6 @@ impl<S: Sessions> Player<S> {
         tip: &str,
         candidate: &str,
         cumulative_empty: bool,
-        status: Option<Status>,
         report: &mut TickReport,
     ) -> Result<(), String> {
         if !cumulative_empty {
@@ -2500,20 +2491,13 @@ impl<S: Sessions> Player<S> {
         }
 
         let subject = self.hub.commit_subject(candidate).unwrap_or_default();
-        if subject.starts_with("accept:") {
-            return self.try_accept(slug, tip, candidate, status, report);
-        }
-        if subject.starts_with("retire:") {
-            return self.try_retire(slug, tip, candidate, status, report);
-        }
-        if subject.starts_with("conclude:") {
-            return self.try_conclude(slug, tip, candidate, status, report);
-        }
-        if subject.starts_with("stage:") {
-            return self.try_stage(slug, tip, candidate, status, true, report);
-        }
-        if subject.starts_with("unstage:") {
-            return self.try_stage(slug, tip, candidate, status, false, report);
+        match Marker::of(&subject) {
+            Some(Marker::Accept) => return self.try_accept(slug, tip, candidate, report),
+            Some(Marker::Retire) => return self.try_retire(slug, tip, candidate, report),
+            Some(Marker::Conclude) => return self.try_conclude(slug, tip, candidate, report),
+            Some(Marker::Stage) => return self.try_stage(slug, tip, candidate, true, report),
+            Some(Marker::Unstage) => return self.try_stage(slug, tip, candidate, false, report),
+            None => {}
         }
         let msg = format!(
             "task/{slug} commit {} is an empty marker with subject {subject:?} — only `accept:`/`retire:`/`conclude:`/`stage:`/`unstage:` are the director's to make here",
@@ -2533,33 +2517,18 @@ impl<S: Sessions> Player<S> {
         slug: &str,
         tip: &str,
         candidate: &str,
-        status: Option<Status>,
         stage: bool,
         report: &mut TickReport,
     ) -> Result<(), String> {
-        let (marker, needs, transition) = if stage {
-            ("stage", Status::Ready, Transition::Stage)
+        let (m, transition) = if stage {
+            (Marker::Stage, Transition::Stage)
         } else {
-            ("unstage", Status::Staged, Transition::Unstage)
+            (Marker::Unstage, Transition::Unstage)
         };
-        let mv = if stage { Move::Stage } else { Move::Unstage };
-        let problem = match self.director_verdict(slug, mv)? {
-            Some(Verdict::Allow) => None,
-            Some(Verdict::Ignore | Verdict::Hold) => return Ok(()),
-            _ if status != Some(needs) => Some(format!(
-                "{marker}: task/{slug} is {} — only a {} task can be {marker}d",
-                status.map(|s| s.as_str()).unwrap_or("unknown"),
-                needs.as_str()
-            )),
-            _ if stage => Some(format!(
-                "stage: task/{slug} is a spike — it has no task agent to start"
-            )),
-            _ => Some(format!(
-                "unstage: task/{slug}'s task agent is already running — retire the task to stop it"
-            )),
-        };
-        if let Some(msg) = problem {
-            return self.reject(slug, candidate, Reason::Plan, msg, report);
+        match self.marker_gate(slug, m)? {
+            Gate::Allow => {}
+            Gate::Skip => return Ok(()),
+            Gate::Refuse(reason, msg) => return self.reject(slug, candidate, reason, msg, report),
         }
         let hub_ref = format!("refs/heads/task/{slug}");
         self.hub
@@ -3252,31 +3221,12 @@ impl<S: Sessions> Player<S> {
         slug: &str,
         tip: &str,
         candidate: &str,
-        status: Option<Status>,
         report: &mut TickReport,
     ) -> Result<(), String> {
-        match self.director_verdict(slug, Move::Accept)? {
-            Some(Verdict::Allow) => {}
-            Some(Verdict::Reject(reason)) => {
-                let msg = if status == Some(Status::Tested) {
-                    format!(
-                        "accept: task/{slug} is a spike: it never merges into main (finish it with `conclude:`)"
-                    )
-                } else {
-                    format!(
-                        "accept: task/{slug} is {} — it must be tested before it can be accepted",
-                        status.map(|s| s.as_str()).unwrap_or("unknown")
-                    )
-                };
-                return self.reject(slug, candidate, reason, msg, report);
-            }
-            Some(Verdict::Ignore | Verdict::Hold) => return Ok(()),
-            None => {
-                let msg = format!(
-                    "accept: task/{slug} is unknown — it must be tested before it can be accepted"
-                );
-                return self.reject(slug, candidate, Reason::Accept, msg, report);
-            }
+        match self.marker_gate(slug, Marker::Accept)? {
+            Gate::Allow => {}
+            Gate::Skip => return Ok(()),
+            Gate::Refuse(reason, msg) => return self.reject(slug, candidate, reason, msg, report),
         }
 
         self.land(slug, tip, candidate, Transition::Accept, report)
@@ -3558,7 +3508,7 @@ impl<S: Sessions> Player<S> {
             .find(|c| {
                 self.hub
                     .commit_subject(c)
-                    .is_some_and(|s| s.starts_with("accept:"))
+                    .is_some_and(|s| Marker::of(&s) == Some(Marker::Accept))
             })
             .and_then(|c| self.hub.commit_body(&c))
             .unwrap_or_default()
@@ -3947,35 +3897,15 @@ impl<S: Sessions> Player<S> {
         slug: &str,
         tip: &str,
         candidate: &str,
-        status: Option<Status>,
         report: &mut TickReport,
     ) -> Result<(), String> {
-        match self.director_verdict(slug, Move::Conclude)? {
-            Some(Verdict::Allow) => {}
-            Some(Verdict::Reject(reason)) => {
-                let msg = if reason == Reason::Ownership {
-                    format!(
-                        "conclude: task/{slug} is not a spike — an ordinary task is finished with `accept:`"
-                    )
-                } else {
-                    format!(
-                        "conclude: task/{slug} is {} — a spike needs a validated finish before it can be concluded",
-                        status.map(|s| s.as_str()).unwrap_or("unknown")
-                    )
-                };
-                return self.reject(slug, candidate, reason, msg, report);
-            }
-            Some(Verdict::Ignore | Verdict::Hold) => return Ok(()),
-            None => {
-                let msg = format!(
-                    "conclude: task/{slug} is unknown — a spike needs a validated finish before it can be concluded"
-                );
-                return self.reject(slug, candidate, Reason::Accept, msg, report);
-            }
+        match self.marker_gate(slug, Marker::Conclude)? {
+            Gate::Allow => {}
+            Gate::Skip => return Ok(()),
+            Gate::Refuse(reason, msg) => return self.reject(slug, candidate, reason, msg, report),
         }
         let Some(note) = records::exploration(&self.hub, tip) else {
-            let msg = format!("conclude: task/{slug} has no verified answer recorded at its tip");
-            return self.reject(slug, candidate, Reason::Accept, msg, report);
+            return self.reject(slug, candidate, Reason::Accept, marker::no_answer(slug), report);
         };
 
         self.hub
@@ -4020,22 +3950,14 @@ impl<S: Sessions> Player<S> {
         slug: &str,
         tip: &str,
         candidate: &str,
-        status: Option<Status>,
         report: &mut TickReport,
     ) -> Result<(), String> {
         // A spike the operator gives up on may also be retired once its
         // finish is validated (spec §14); an ordinary tested task may not.
-        let allowed = match self.director_verdict(slug, Move::Retire)? {
-            Some(Verdict::Allow) => true,
-            Some(Verdict::Ignore | Verdict::Hold) => return Ok(()),
-            Some(Verdict::Reject(_)) | None => false,
-        };
-        if !allowed {
-            let msg = format!(
-                "retire: task/{slug} is {} — retire is only allowed while pending/ready/orphaned (not posted or in flight), conflicted, contested or escalated",
-                status.map(|s| s.as_str()).unwrap_or("unknown")
-            );
-            return self.reject(slug, candidate, Reason::Retire, msg, report);
+        match self.marker_gate(slug, Marker::Retire)? {
+            Gate::Allow => {}
+            Gate::Skip => return Ok(()),
+            Gate::Refuse(reason, msg) => return self.reject(slug, candidate, reason, msg, report),
         }
 
         self.hub
@@ -6169,7 +6091,7 @@ fn status_event(task: &state::TaskState, managed: bool) -> Option<(EventKind, St
         Status::Tested => Some((EventKind::Tested, "finish accepted — tests passed, awaiting director review".to_string())),
         Status::Escalated => Some((EventKind::Escalated, task.escalation.clone().unwrap_or_default())),
         Status::Ready if task.spike.is_some() => Some((EventKind::Ready, format!("spike task/{} is planned: post its question when the operator agrees", task.slug))),
-        Status::Ready if managed => Some((EventKind::Ready, format!("task/{}'s dependencies are all accepted and merged in; it waits for a `stage:` commit before its task agent starts", task.slug))),
+        Status::Ready if managed => Some((EventKind::Ready, format!("task/{}'s dependencies are all accepted and merged in; it waits for a `stage:` marker (`dashboard stage {}`) before its task agent starts", task.slug, task.slug))),
         Status::Ready => Some((EventKind::Ready, format!("task/{}'s dependencies are all accepted and merged in", task.slug))),
         Status::Accepted => Some((EventKind::Accepted, format!("task/{} accepted and merged into main", task.slug))),
         Status::Explored => {

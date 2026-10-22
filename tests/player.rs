@@ -875,3 +875,56 @@ fn main_commit_of_a_lean_architecture_is_exported_cached_and_its_raises_judged()
     assert!(report.rejected[0].message.contains("nope"), "{}", report.rejected[0].message);
     assert_eq!(hub.rev_parse("refs/heads/main").as_deref(), Some(good.as_str()));
 }
+
+#[test]
+fn dashboard_raise_commits_only_a_budget_raise_on_main() {
+    let repo = director_repo();
+    write_lean_arch(repo.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[]);
+    commit(repo.path(), "add the lean architecture");
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    player.tick().expect("tick");
+    let base = repo.git().rev_parse("HEAD").unwrap();
+    let scratch = TempDir::new().unwrap();
+    let exporter = dashboard::lean::Exporter::new(scratch.path().to_path_buf(), dashboard::sandbox::Sandbox::off());
+    let raise = |slug: Option<&str>, reason: &str| dashboard::marker::raise(&hub, &repo.git(), slug, reason, &exporter);
+    let arch = "architecture/Architecture.lean";
+
+    let err = raise(None, "x").unwrap_err();
+    assert!(err.contains("nothing to raise"), "{err}");
+    // Past the step cap, with another file, or raising nothing: refused
+    // with the player's words, and nothing moves.
+    write_file(repo.path(), arch, &LEAN_AB_MANIFEST.replace("max_ast = 100", "max_ast = 200"));
+    let err = raise(Some("ab"), "a grew").unwrap_err();
+    assert!(err.contains("step cap"), "{err}");
+    write_file(repo.path(), arch, &LEAN_AB_MANIFEST.replace("max_ast = 100", "max_ast = 110"));
+    let roadmap = std::fs::read_to_string(repo.path().join("roadmap.toml")).unwrap();
+    write_file(repo.path(), "roadmap.toml", &format!("{roadmap}\n# more\n"));
+    let err = raise(Some("ab"), "a grew").unwrap_err();
+    assert!(err.contains("not \"roadmap.toml\""), "{err}");
+    write_file(repo.path(), "roadmap.toml", &roadmap);
+    write_file(repo.path(), arch, &LEAN_AB_MANIFEST.replace("max_ast = 100", "max_ast = 90"));
+    let err = raise(None, "x").unwrap_err();
+    assert!(err.contains("raise no budget"), "{err}");
+    assert_eq!(repo.git().rev_parse("refs/heads/main").as_deref(), Some(base.as_str()));
+
+    write_file(repo.path(), arch, &LEAN_AB_MANIFEST.replace("max_ast = 100", "max_ast = 110"));
+    let out = raise(Some("ab"), "a grew\nthe operator agreed").expect("raise");
+    assert_eq!(out.raises.len(), 1);
+    assert_eq!(repo.git().rev_parse("refs/heads/main").as_deref(), Some(out.commit.as_str()));
+    assert_eq!(repo.git().run(&["status", "--porcelain"]).unwrap(), "", "index and tree at the raise");
+    assert_eq!(repo.git().commit_subject(&out.commit).as_deref(), Some("raise(ab): a grew"));
+    let report = player.tick().expect("tick");
+    assert_eq!(report.imported.len(), 1, "{report}");
+    let raises = records::budget_raises(&hub);
+    assert_eq!((raises[0].budget.as_str(), raises[0].old, raises[0].new), ("module a max_ast", 100, 110));
+    assert_eq!(raises[0].task.as_deref(), Some("ab"));
+    assert_eq!(raises[0].reason, "a grew\nthe operator agreed");
+
+    // Only on main at the hub's tip.
+    repo.git().run(&["checkout", "-q", "-b", "elsewhere"]).unwrap();
+    write_file(repo.path(), arch, &LEAN_AB_MANIFEST.replace("max_ast = 100", "max_ast = 120"));
+    let err = raise(None, "x").unwrap_err();
+    assert!(err.contains("a raise goes on main"), "{err}");
+}

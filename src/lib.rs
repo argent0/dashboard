@@ -14,6 +14,7 @@ pub mod idl;
 pub mod init;
 pub mod lean;
 pub mod lint;
+pub mod marker;
 pub mod paths;
 pub mod player;
 pub mod prompts;

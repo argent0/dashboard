@@ -439,6 +439,40 @@ impl Git {
         self.run(&["config", key, val]).map(|_| ())
     }
 
+    /// Moves the local `refs/heads/<branch>` to `new`, a commit on top of
+    /// `tip` (the hub's), for the director command `dashboard <cmd>`. The
+    /// local branch may be absent or behind the hub, never ahead: commits
+    /// the player has yet to import come first. A checked-out branch moves
+    /// with its working tree by a fast-forward, on a clean tree.
+    pub fn advance_branch(&self, branch: &str, tip: &str, new: &str, cmd: &str) -> Result<(), String> {
+        let full = format!("refs/heads/{branch}");
+        let local = self.rev_parse(&full);
+        if let Some(local) = &local {
+            if !self.is_ancestor(local, tip) {
+                return Err(format!(
+                    "{branch} has commits the hub's {branch} lacks: let the player import them (or `git reset --hard hub/{branch}` after a rejection) and run `dashboard {cmd}` again"
+                ));
+            }
+        }
+        let head = self.run(&["symbolic-ref", "-q", "HEAD"]).unwrap_or_default();
+        if head == full {
+            let dirty = self
+                .run(&["status", "--porcelain", "--untracked-files=no"])
+                .map_err(|e| e.to_string())?;
+            if !dirty.is_empty() {
+                return Err(format!("{branch} is checked out with uncommitted changes: commit or stash them first"));
+            }
+            self.run(&["merge", "--ff-only", "--quiet", new]).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        let reflog = format!("dashboard {cmd}");
+        let mut args = vec!["update-ref", "-m", reflog.as_str(), full.as_str(), new];
+        if let Some(local) = &local {
+            args.push(local);
+        }
+        self.run(&args).map(|_| ()).map_err(|e| e.to_string())
+    }
+
     /// `git sparse-checkout set --no-cone`: this worktree's patterns become
     /// `patterns` (spec §21). Git writes them to the worktree's own config,
     /// so sibling worktrees keep theirs. A modified or untracked file whose

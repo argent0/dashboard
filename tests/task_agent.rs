@@ -13,6 +13,7 @@ use dashboard::config::Reason;
 use dashboard::events::{self, EventKind};
 use dashboard::git::Git;
 use dashboard::init;
+use dashboard::marker;
 use dashboard::paths::{self, Home};
 use dashboard::player::{self, NullSessions, Player, Sessions, TickReport};
 use dashboard::records::{self, Actor, Transition};
@@ -1487,4 +1488,68 @@ fn a_task_agent_writes_apis_and_test_files_inside_its_scope() {
         let r = post_with("[\"a\", \"b\"]", &[(path, text)]);
         assert!(!ownership(&r), "{path}: {r}");
     }
+}
+
+// --------------------------------------------------------------------------
+// `dashboard stage | unstage | accept` (src/marker.rs)
+// --------------------------------------------------------------------------
+
+fn marker(repo: &DirectorRepo, home: &Home, m: marker::Marker, why: Option<&str>) -> Result<marker::Outcome, String> {
+    let args = marker::Args { answer: None, why: why.map(String::from) };
+    marker::run(&Git::new(home.hub()), &repo.git(), m, "s", &args)
+}
+
+#[test]
+fn the_director_stages_and_accepts_with_commands_and_an_ill_timed_marker_is_refused() {
+    let repo = repo_with_task_agents();
+    let (_home_dir, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", PLAN, "plan: s");
+    player.tick().expect("plan tick");
+    assert_eq!(task(&hub, "s").status, Status::Ready);
+
+    // Refused with the player's own words; nothing is committed.
+    let before = repo.git().rev_parse("refs/heads/task/s");
+    for (m, needle) in [
+        (marker::Marker::Unstage, "unstage: task/s is ready — only a staged task can be unstaged"),
+        (marker::Marker::Accept, "accept: task/s is ready — it must be tested"),
+        (marker::Marker::Conclude, "conclude: task/s is not a spike"),
+    ] {
+        let err = marker(&repo, &home, m, None).expect_err("ill-timed");
+        assert!(err.contains(needle), "{err}");
+    }
+    let err = marker(&repo, &home, marker::Marker::Retire, None).expect_err("no post-mortem");
+    assert!(err.contains("retire needs --why"), "{err}");
+    assert_eq!(repo.git().rev_parse("refs/heads/task/s"), before);
+
+    let out = marker(&repo, &home, marker::Marker::Stage, Some("next up")).expect("stage");
+    assert_eq!(out.message, "stage: s\n\nnext up");
+    assert_eq!(repo.git().rev_parse("HEAD").as_deref(), Some(out.commit.as_str()), "the checked-out branch moves");
+    let report = player.tick().expect("stage tick");
+    assert!(report.imported.iter().any(|(_, c, t)| *t == Transition::Stage && *c == out.commit), "{report}");
+    assert!(report.agents_launched.contains(&"s".to_string()), "{report}");
+    let err = marker(&repo, &home, marker::Marker::Stage, None).expect_err("staged twice");
+    assert!(err.contains("stage: task/s is staged — only a ready task can be staged"), "{err}");
+    let err = marker(&repo, &home, marker::Marker::Unstage, None).expect_err("agent running");
+    assert!(err.contains("task agent is already running"), "{err}");
+
+    // Post, finish, the task agent's accept report: the accept takes its why.
+    agent_post(&repo);
+    player.tick().expect("post tick");
+    let dir = paths::worker_clone(&repo.director_path(), "s");
+    ensure_identity(&dir);
+    write_file(&dir, "src/feature.txt", "done\n");
+    commit(&dir, "finish work");
+    player.tick().expect("finish tick");
+    assert_eq!(task(&hub, "s").status, Status::Tested);
+    let err = marker(&repo, &home, marker::Marker::Accept, None).expect_err("no report yet");
+    assert!(err.contains("pass --why"), "{err}");
+    file_report(&repo, Some("accept"), "it does it.\nAnd only that.").expect("accept report");
+    player.tick().expect("report tick");
+    let out = marker(&repo, &home, marker::Marker::Accept, None).expect("accept");
+    assert_eq!(out.message, "accept: s\n\nit does it.\nAnd only that.");
+    let report = player.tick().expect("accept tick");
+    assert!(report.imported.iter().any(|(_, _, t)| *t == Transition::MergeAccept), "{report}");
+    assert_eq!(task(&hub, "s").status, Status::Accepted);
 }

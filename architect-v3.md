@@ -358,6 +358,7 @@ The suite check fails (a worker finish is rejected with an `arch` budget reason)
 - The commit changes only budget fields in the manifest (for the Lean package: only files under `architecture/`, and the export minus budgets unchanged); mixing in any other edit is an `ownership` rejection.
 - It carries a required `raise:` reason, recorded by the player in `refs/notes/dashboard-budget-raises` (budget, old, new, reason, triggering task, at). `status` shows how many times each budget was raised.
 - A single raise is bounded by a step cap (at most +25% of the old value; for small counts, +1). A larger jump takes several visible raises.
+- `dashboard raise [<slug>] --reason …`, run in the director clone with `main` checked out at the hub's tip, commits the budget edits of its working tree as `raise(<slug>): <reason>` on top of the hub's `main`, after judging them as the player will (only budget fields, within the step cap); edits that raise nothing are refused as an ordinary `main` commit's work.
 - `main` must stay green: a raise never lands together with work that depends on it going red.
 
 ### Lowering and headroom

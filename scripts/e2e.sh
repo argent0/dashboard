@@ -492,7 +492,7 @@ alpha_trimmed() {
   [ "$(git --git-dir "$HOME_DIR/hub.git" rev-parse refs/heads/task/alpha)" = "$(git -C "$DIR_REPO" rev-parse task/alpha)" ]
 }
 wait_until "alpha's trim imported" alpha_trimmed
-git -C "$DIR_REPO" commit -q --allow-empty -m "accept: alpha"
+(cd "$DIR_REPO" && dash accept alpha --why "its check passes") >/dev/null
 
 wait_until "task/alpha accepted" task_status_is alpha accepted
 assert_contains "$(hub_main_body)" "Task: alpha" "hub main's merge commit"
@@ -545,16 +545,20 @@ assert_contains "$wait_out" "escalated" "dashboard wait output"
 assert_contains "$wait_out" "beta" "dashboard wait output"
 
 # --------------------------------------------------------------------------
-# 7. Retire beta: retire: marker with a post-mortem body.
+# 7. Retire beta with `dashboard retire` (the post-mortem is the body),
+#    after `dashboard accept` refuses the ill-timed accept.
 #    Tick -> refs/retired/beta exists and status shows retired with the
 #    post-mortem.
 # --------------------------------------------------------------------------
 
 log "step 7: retire beta"
-git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" checkout -q task/beta
-git -C "$DIR_REPO" merge -q --ff-only hub/task/beta
-git -C "$DIR_REPO" commit -q --allow-empty -m "retire: beta" -m "The check as specified can't be met by the agent; retiring and will replan."
+# An ill-timed marker is refused locally with the player's reason.
+if accept_out=$(cd "$DIR_REPO" && dash accept beta --why "early" 2>&1); then
+  echo "e2e: dashboard accept took an escalated task" >&2; exit 1
+fi
+assert_contains "$accept_out" "accept: task/beta is escalated — it must be tested" "dashboard accept's refusal"
+(cd "$DIR_REPO" && dash retire beta --why "The check as specified can't be met by the agent; retiring and will replan.") >/dev/null
 
 wait_until "refs/retired/beta exists" hub_ref_exists refs/retired/beta
 assert_contains "$(dash_status)" "The check as specified can't be met" "status's retired post-mortem"
@@ -635,10 +639,8 @@ wait_until "spike probe answered round 2" task_status_is probe tested
 assert_contains "$(dash_status)" "round 2, latest answer: yes" "status's spike line after round 2"
 
 log "step 7b: conclude the spike"
-git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" checkout -q task/probe
-git -C "$DIR_REPO" merge -q --ff-only hub/task/probe
-git -C "$DIR_REPO" commit -q --allow-empty -m "conclude: yes" -m "The operator agreed with the answer."
+(cd "$DIR_REPO" && dash conclude probe yes --why "The operator agreed with the answer.") >/dev/null
 wait_until "spike probe explored" task_status_is probe explored
 assert_contains "$(dash_status)" "answer: yes (round 2)" "status's explored spike"
 hub_ref_exists refs/explored/probe || { echo "e2e: refs/explored/probe missing" >&2; exit 1; }
@@ -683,17 +685,13 @@ wait_until "gamma's and delta's sessions both alive" both_alive
 wait_until "task/gamma tested" task_status_is gamma tested
 wait_until "task/delta tested" task_status_is delta tested
 
-git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" checkout -q task/gamma
-git -C "$DIR_REPO" merge -q --ff-only hub/task/gamma
-git -C "$DIR_REPO" commit -q --allow-empty -m "accept: gamma"
+(cd "$DIR_REPO" && dash accept gamma --why "its check passes") >/dev/null
 wait_until "task/gamma accepted" task_status_is gamma accepted
 
-git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" checkout -q task/delta
-git -C "$DIR_REPO" merge -q --ff-only hub/task/delta
 main_at_conflict=$(git --git-dir "$HOME_DIR/hub.git" rev-parse refs/heads/main)
-git -C "$DIR_REPO" commit -q --allow-empty -m "accept: delta"
+(cd "$DIR_REPO" && dash accept delta --why "its check passes") >/dev/null
 wait_until "task/delta conflicted" task_status_is delta conflicted
 wait_out=$(dash wait --timeout 5)
 assert_contains "$wait_out" "conflict" "dashboard wait output"
@@ -767,9 +765,7 @@ eta_resumed() { [ "$(event_count resumed eta)" -ge 1 ]; }
 wait_until "eta resumed" eta_resumed
 wait_until "task/eta tested" task_status_is eta tested
 hub_ref_exists refs/dashboard/escalated/eta && { echo "e2e: eta's escalation ref survived --reset" >&2; exit 1; }
-git -C "$DIR_REPO" fetch -q hub
-git -C "$DIR_REPO" merge -q --ff-only hub/task/eta
-git -C "$DIR_REPO" commit -q --allow-empty -m "accept: eta"
+(cd "$DIR_REPO" && dash accept eta --why "its check passes") >/dev/null
 wait_until "task/eta accepted" task_status_is eta accepted
 
 # --------------------------------------------------------------------------
@@ -804,9 +800,7 @@ git -C "$DIR_REPO" commit -q -m "plan: epsilon"
 wait_until "epsilon is ready" task_status_is epsilon ready
 tick; tick
 session_gone epsilon_agent || { echo "e2e: a ready task's task agent started without a stage:" >&2; exit 1; }
-git -C "$DIR_REPO" fetch -q hub
-git -C "$DIR_REPO" merge -q --ff-only hub/task/epsilon
-git -C "$DIR_REPO" commit -q --allow-empty -m "stage: epsilon" -m "start its task agent"
+(cd "$DIR_REPO" && dash stage epsilon --why "start its task agent") >/dev/null
 wait_until "epsilon is staged" task_status_is epsilon staged
 wait_until "epsilon's task agent session exists" session_alive epsilon_agent
 wait_until "epsilon's worker session exists" session_alive epsilon
@@ -822,10 +816,10 @@ assert_contains "$wait_out" "verdict: accept" "dashboard wait output"
 ask_out=$(dash ask epsilon "why that check?")
 assert_contains "$ask_out" "asked task/epsilon's task agent" "dashboard ask output"
 
-git -C "$DIR_REPO" fetch -q hub
-git -C "$DIR_REPO" merge -q --ff-only hub/task/epsilon
-git -C "$DIR_REPO" commit -q --allow-empty -m "accept: epsilon" -m "the task agent recommends it"
+# The accept's body defaults to the task agent's accept report's why.
+(cd "$DIR_REPO" && dash accept epsilon) >/dev/null
 wait_until "task/epsilon accepted" task_status_is epsilon accepted
+assert_contains "$(hub_main_body)" "fake task agent." "epsilon's merge commit (the accept's why)"
 wait_until "epsilon's task agent session ended" session_gone epsilon_agent
 
 # --------------------------------------------------------------------------
@@ -883,15 +877,11 @@ printf 'title = "zeta"\nphase = "p1"\nmodules = ["zeta", "app"]\nbrief = "a modu
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: zeta"
 wait_until "zeta is ready" task_status_is zeta ready
-git -C "$DIR_REPO" fetch -q hub
-git -C "$DIR_REPO" merge -q --ff-only hub/task/zeta
-git -C "$DIR_REPO" commit -q --allow-empty -m "stage: zeta" -m "start its task agent"
+(cd "$DIR_REPO" && dash stage zeta --why "start its task agent") >/dev/null
 wait_until "zeta's worker session exists" session_alive zeta
 wait_until "task/zeta tested" task_status_is zeta tested
 
-git -C "$DIR_REPO" fetch -q hub
-git -C "$DIR_REPO" merge -q --ff-only hub/task/zeta
-git -C "$DIR_REPO" commit -q --allow-empty -m "accept: zeta" -m "arch check passes in the view"
+(cd "$DIR_REPO" && dash accept zeta --why "arch check passes in the view") >/dev/null
 wait_until "task/zeta accepted" task_status_is zeta accepted
 git --git-dir "$HOME_DIR/hub.git" cat-file -e refs/heads/main:zeta/lib.rs || { echo "e2e: zeta/lib.rs missing on main" >&2; exit 1; }
 if git --git-dir "$HOME_DIR/hub.git" cat-file -e refs/heads/main:cache/built 2>/dev/null; then
@@ -973,9 +963,7 @@ printf 'title = "a"\nphase = "p1"\nmodules = ["a"]\nbrief = "scoped to module a"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: a"
 wait_until "a is ready" task_status_is a ready
-git -C "$DIR_REPO" fetch -q hub
-git -C "$DIR_REPO" merge -q --ff-only hub/task/a
-git -C "$DIR_REPO" commit -q --allow-empty -m "stage: a" -m "start its task agent"
+(cd "$DIR_REPO" && dash stage a --why "start its task agent") >/dev/null
 wait_until "a's worker session exists" session_alive a
 
 scope_out=$(cd "$DIR_REPO/.dashboard/workers/a" && dash scope)
@@ -1005,9 +993,7 @@ git -C "$DIR_REPO" commit -q -am "docs: b"
 hub_has_b_docs() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:b/README.md | grep -q revised; }
 wait_until "b's docs on main" hub_has_b_docs
 git -C "$DIR_REPO" checkout -q task/a
-git -C "$DIR_REPO" fetch -q hub
-git -C "$DIR_REPO" merge -q --ff-only hub/task/a
-git -C "$DIR_REPO" commit -q --allow-empty -m "accept: a" -m "the task agent recommends it"
+(cd "$DIR_REPO" && dash accept a --why "the task agent recommends it") >/dev/null
 a_merge_failed() { [ "$(event_count merge_failed a)" -ge 1 ]; }
 wait_until "a's landing fails on b_only" a_merge_failed
 assert_contains "$(dash wait --all | grep -A20 -E '^#[0-9]+ merge_failed +a( |$)')" "b_only" "a's merge_failed event"

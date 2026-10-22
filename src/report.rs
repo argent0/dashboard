@@ -297,6 +297,14 @@ fn render(slug: &str, owed: &Owed, filed: &Filed) -> String {
     )
 }
 
+/// The `why` of a report's text as `render` writes it.
+pub fn why_of(text: &str) -> Option<&str> {
+    let start = text.find("\nwhy: ")? + "\nwhy: ".len();
+    let rest = &text[start..];
+    let why = rest.find("\nsuite: ").map_or(rest, |end| &rest[..end]).trim();
+    (!why.is_empty()).then_some(why)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +368,19 @@ mod tests {
         assert!(got.text.contains("verdict: sent-back\nwhy: because.\nsuite: n/a\nconcerns: none here"));
         assert!(take(g, "s").is_none(), "consumed");
         assert!(submit(g, &draft(None)).is_err(), "the step is closed");
+    }
+
+    #[test]
+    fn the_why_reads_back_from_the_rendered_text() {
+        let filed = check(&[Owed::asked("review r1".into())], &Draft {
+            verdict: Some("accept".into()),
+            why: "it holds.\nTwo lines.".into(),
+            suite: Some("keep t1".into()),
+            ..Draft::default()
+        })
+        .unwrap();
+        let text = render("s", &Owed::asked("review r1".into()), &filed);
+        assert_eq!(why_of(&text), Some("it holds.\nTwo lines."));
+        assert_eq!(why_of("slug: s"), None);
     }
 }

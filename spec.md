@@ -134,6 +134,19 @@ diff says it isn't work, and the prefix says which event it is. This is the
 only commit-message convention; all other messages are free-form, short
 and topical.
 
+The director's markers (`stage:`, `unstage:`, `accept:`, `retire:` on a
+task, `conclude:` on a spike) are built by `dashboard stage|unstage|accept|
+retire|conclude <slug>`, run in the director clone: it fetches the hub,
+asks the player's own gate (`marker::gate`, from §9's table) whether the
+task's status takes that marker, and commits it on top of the hub's tip of
+`task/<slug>` with the subject the player reads (`<marker>: <slug>`,
+`conclude: <answer>`). An ill-timed marker is refused there with the
+player's reason and nothing is committed. The local branch moves like a
+trim's (§6.5). `--why` is the body: `accept` defaults it to the task
+agent's latest accept report's why (§17); `retire` (the post-mortem) and
+`conclude` require it; `conclude` takes the answer the player verified
+(§14), and a given answer must be that one.
+
 **Rejection.** The player leaves the hub branch untouched, stores the
 offending commit under `refs/rejected/<slug>/<n>` as evidence, records the
 reason so `dashboard` shows it, and relays it to the worker's tmux session
@@ -452,9 +465,9 @@ failed validation is a rejection with the listed reason (§10).
 | **contest** / **reply** | `contest:` marker (worker); the reply (task agent or director) | §18 | §18 |
 | **send back** | adds `reviews/r<N>.md` + new/updated tests (director, or its task agent §17) | task is `tested`; run set now **fails**; re-pins; relays the note | `review` |
 | **trim** | deletes/edits the `files` of checks the task added, removes their entries from `architecture/Tests/<slug>.lean` and `<slug>.worker.lean`; leaves `tasks/<slug>/` alone (director: `dashboard trim`) | task is `tested`; touches nothing else; both files only lose entries; run set **passes**; re-pins; stays `tested` (§6.5) | `accept` |
-| **accept** | `accept:` marker (director) | task is `tested`; the player lands it (§11), merging `main` in first if it moved: a conflict leaves it `conflicted`, a suite failure caused by the merge sends it back to the worker | `accept` |
+| **accept** | `accept:` marker (director: `dashboard accept`) | task is `tested`; the player lands it (§11), merging `main` in first if it moved: a conflict leaves it `conflicted`, a suite failure caused by the merge sends it back to the worker | `accept` |
 | **resolve** | merge of the recorded `main` commit into the task tip (director) | task is `conflicted`; merges exactly the `main` commit the conflict was recorded against; differs from git's own merge only on the recorded paths; re-pins; the player then lands the accept (§11) | `history`, `ownership` |
-| **retire** | `retire:` marker, body = post-mortem (director) | task is not posted or in flight, or is conflicted, contested or escalated; player moves the branch to `refs/retired/<slug>` and ends the worker session | `retire` |
+| **retire** | `retire:` marker, body = post-mortem (director: `dashboard retire`) | task is not posted or in flight, or is conflicted, contested or escalated; player moves the branch to `refs/retired/<slug>` and ends the worker session | `retire` |
 
 Any agent commit that breaks the history rules (§5) is rejected with reason
 `history`, whatever transition it was meant to be; a director commit that
@@ -699,7 +712,7 @@ copies `tasks/<slug>/` from the candidate onto it, so claim scripts under
 | **launch** | — | baseline claims still pass; pins only `tasks/<slug>/` (the project's tests are the worker's to change); sets the base | — |
 | **finish** | worker: code, `findings/<n>.md`, `claims/<n>.toml` | pins; only `claims/`/`findings/` of this round under `tasks/<slug>/`; findings non-empty; `answer` allowed; every claim runs and passes as above; a non-`inconclusive` answer has a passing spike claim with `supports` equal to it. Any failing claim rejects the whole finish | `pins`, `claims` |
 | **send back** | director adds `questions/<n+1>.toml` (+ optional baseline); operator approves | adds nothing else; `refines` in range; baseline claims pass on the base; within `max_review_rounds`. No failing test needed. Re-pins | `ownership`, `review` |
-| **conclude** | `conclude:` marker, spike is `tested` | moves the branch to `refs/explored/<slug>` (like retire), ends the session | `accept`, `ownership` |
+| **conclude** | `conclude:` marker (director: `dashboard conclude`), spike is `tested` | moves the branch to `refs/explored/<slug>` (like retire), ends the session | `accept`, `ownership` |
 
 `accept:` on a spike is rejected (`accept`); `retire:` is also allowed on a
 `tested` spike. A `block:` escalates it as usual. The player reads
@@ -862,7 +875,8 @@ with the operator.
 **Lifecycle.**
 
 - *Launch*: a `ready` task never starts on its own. The director releases
-  it with an empty `stage: <why>` commit on its branch; when an
+  it with an empty `stage: <slug>` commit on its branch (`dashboard
+  stage <slug> [--why …]`); when an
   agent-managed task is `staged` the player
   creates the task agent's clone and starts its session with the post step;
   a task found `tested` with no task agent gets one with the review step.
@@ -966,13 +980,14 @@ dropped and the agent told. The player notes the block on the task tip
 (`refs/notes/dashboard-agent-reports`, a list) and emits an `agent_report`
 event carrying it. `status` shows each task agent's session, liveness and
 latest verdict. The director drops what it marks drop (`dashboard trim`, §6.5) and accepts on an
-`accept` verdict, asks (`dashboard ask`) or takes an `unsure` to the
+`accept` verdict (`dashboard accept <slug>`, whose body defaults to that
+report's why), asks (`dashboard ask`) or takes an `unsure` to the
 operator; the decision stays the director's.
 
 **Events.** `agent_launched`, `agent_report`, `agent_died`. For an
 agent-managed task, `tested` and `contested` are not emitted: they're the task
 agent's to act on, and the director hears its report instead. `ready` is
-emitted: it waits for the director's `stage:`.
+emitted: it waits for the director's `stage:` (`dashboard stage`).
 
 ## 18. Contests
 

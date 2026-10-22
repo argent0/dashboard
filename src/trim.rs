@@ -57,7 +57,7 @@ pub fn run(hub: &Git, director: &Git, slug: &str, names: &[String], exporter: &E
         .map_err(|e| format!("the trimmed suite: {e}"))?
         .suite;
     verify(&suite, &after, &plan.dropped)?;
-    advance(director, slug, &tip, &commit)?;
+    director.advance_branch(&format!("task/{slug}"), &tip, &commit, "trim")?;
     Ok(Outcome { commit, plan })
 }
 
@@ -337,38 +337,6 @@ pub fn message(slug: &str, plan: &Plan) -> String {
         }
     }
     msg
-}
-
-/// Moves the director's `task/<slug>` to `new`, a commit on top of `tip`
-/// (the hub's). The local branch may be absent or behind the hub, never
-/// ahead: commits the player has yet to import come first. A checked-out
-/// branch moves with its working tree by a fast-forward, on a clean tree.
-pub fn advance(git: &Git, slug: &str, tip: &str, new: &str) -> Result<(), String> {
-    let branch = format!("refs/heads/task/{slug}");
-    let local = git.rev_parse(&branch);
-    if let Some(local) = &local {
-        if !git.is_ancestor(local, tip) {
-            return Err(format!(
-                "task/{slug} has commits the hub's task/{slug} lacks: let the player import them (or `git reset --hard hub/task/{slug}` after a rejection) and trim again"
-            ));
-        }
-    }
-    let head = git.run(&["symbolic-ref", "-q", "HEAD"]).unwrap_or_default();
-    if head == branch {
-        let dirty = git
-            .run(&["status", "--porcelain", "--untracked-files=no"])
-            .map_err(|e| e.to_string())?;
-        if !dirty.is_empty() {
-            return Err(format!("task/{slug} is checked out with uncommitted changes: commit or stash them first"));
-        }
-        git.run(&["merge", "--ff-only", "--quiet", new]).map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    let mut args = vec!["update-ref", "-m", "dashboard trim", branch.as_str(), new];
-    if let Some(local) = &local {
-        args.push(local);
-    }
-    git.run(&args).map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

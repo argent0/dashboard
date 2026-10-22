@@ -142,7 +142,7 @@ impl Event {
         let slug = self.slug.as_deref().unwrap_or("<slug>");
         match self.kind {
             EventKind::Tested => Some(format!(
-                "review it: git fetch hub && git log hub/task/{slug}, then send back or accept"
+                "review it: git fetch hub && git log hub/task/{slug}, then send back, or `dashboard accept {slug} --why \"...\"` (a spike: `dashboard conclude {slug} --why \"...\"`)"
             )),
             EventKind::Escalated if self.message.starts_with("relaunch limit (") => {
                 let flag = if self.message.contains("the task agent was relaunched") {
@@ -151,21 +151,21 @@ impl Event {
                     ""
                 };
                 Some(format!(
-                    "take it to the operator: once they've fixed what keeps killing it (agent_cmd, login, a dialog, a usage limit), dashboard relaunch {slug}{flag} --reset resumes the task; else retire and replan"
+                    "take it to the operator: once they've fixed what keeps killing it (agent_cmd, login, a dialog, a usage limit), dashboard relaunch {slug}{flag} --reset resumes the task; else `dashboard retire {slug} --why \"<post-mortem>\"` and replan"
                 ))
             }
             EventKind::Escalated => {
-                Some("discuss with the operator, then retire and replan".to_string())
+                Some(format!("discuss with the operator, then `dashboard retire {slug} --why \"<post-mortem>\"` and replan"))
             }
             EventKind::Resumed => None, // informational: back in flight
             EventKind::Conflict => Some(format!(
                 "git fetch hub && git checkout task/{slug} && git merge --ff-only hub/task/{slug}, then git merge <that main commit>, resolve only those paths, commit"
             )),
-            EventKind::MergeFailed => Some(
-                "the worker fixes it; wait for tested, then review and accept again".to_string(),
-            ),
+            EventKind::MergeFailed => Some(format!(
+                "the worker fixes it; wait for tested, then review and `dashboard accept {slug}` again"
+            )),
             EventKind::Contested => Some(format!(
-                "reply on task/{slug} in one commit adding tasks/{slug}/contests/c<N>.md (plus fixed tests if it's right), or retire"
+                "reply on task/{slug} in one commit adding tasks/{slug}/contests/c<N>.md (plus fixed tests if it's right), or `dashboard retire {slug} --why \"...\"`"
             )),
             EventKind::MainImpure => Some(
                 "plan a task that makes these checks leave their worktree clean; until it lands, work failing only on them is held".to_string(),
@@ -184,7 +184,7 @@ impl Event {
             ),
             EventKind::SuiteSlow => None, // informational
             EventKind::Ready => Some(format!(
-                "git fetch hub && git merge (or checkout) hub/task/{slug}; with task agents on, start it with an empty `stage: <why>` commit on the branch, else post"
+                "with task agents on, start it with `dashboard stage {slug}`; else post it: git fetch hub && git merge (or checkout) hub/task/{slug}"
             )),
             EventKind::DirectorRejected => {
                 Some("fetch hub and fix with a new commit / reset".to_string())
@@ -199,7 +199,7 @@ impl Event {
             )),
             EventKind::AgentLaunched => None, // informational: the task agent posts or reviews it
             EventKind::AgentReport => Some(format!(
-                "accept: drop the checks its suite line marks drop with `dashboard trim {slug} <check>…`, then commit `accept: {slug}` with its why as the body; unsure: `dashboard ask {slug} \"...\"` or take it to the operator; posted, sent-back, replied, answer: nothing to do"
+                "accept: drop the checks its suite line marks drop with `dashboard trim {slug} <check>…`, then `dashboard accept {slug}` (its why becomes the body); unsure: `dashboard ask {slug} \"...\"` or take it to the operator; posted, sent-back, replied, answer: nothing to do"
             )),
             EventKind::AgentDied => Some(format!(
                 "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug} --agent; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug} --agent{RELAUNCH_CAP}"

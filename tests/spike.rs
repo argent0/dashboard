@@ -1281,3 +1281,42 @@ fn status_lists_spikes_apart_from_the_progress_counts() {
         "{out}"
     );
 }
+
+// --------------------------------------------------------------------------
+// `dashboard conclude` (src/marker.rs)
+// --------------------------------------------------------------------------
+
+#[test]
+fn the_director_concludes_with_the_verified_answer() {
+    use dashboard::marker::{self, Args, Marker};
+    let repo = director_repo();
+    let (_h, home) = init_hub(&repo);
+    let hub = Git::new(home.hub());
+    let mut player = open_player(&home);
+    plan_and_post(&repo, &mut player, "probe");
+    let conclude = |answer: Option<&str>, why: Option<&str>| {
+        let args = Args { answer: answer.map(String::from), why: why.map(String::from) };
+        marker::run(&hub, &repo.git(), Marker::Conclude, "probe", &args)
+    };
+    let err = conclude(None, Some("x")).expect_err("not tested yet");
+    assert!(err.contains("a spike needs a validated finish"), "{err}");
+    let err = marker::run(&hub, &repo.git(), Marker::Stage, "probe", &Args::default()).expect_err("a spike");
+    assert!(err.contains("only a ready task can be staged"), "{err}");
+
+    finish_round_one(&repo, &mut player);
+    let err = conclude(Some("maybe"), Some("x")).expect_err("not an answer");
+    assert!(err.contains("\"maybe\" is no answer") && err.contains("yes, no, inconclusive"), "{err}");
+    let err = conclude(Some("no"), Some("x")).expect_err("not the verified one");
+    assert!(err.contains("verified \"yes\""), "{err}");
+    let err = conclude(Some("yes"), None).expect_err("no why");
+    assert!(err.contains("conclude needs --why"), "{err}");
+    let err = marker::run(&hub, &repo.git(), Marker::Accept, "probe", &Args { answer: None, why: Some("x".into()) })
+        .expect_err("accept on a spike");
+    assert!(err.contains("is a spike: it never merges"), "{err}");
+
+    let out = conclude(None, Some("Operator agreed.")).expect("conclude");
+    assert_eq!(out.message, "conclude: yes\n\nOperator agreed.");
+    let report = player.tick().expect("conclude tick");
+    assert!(report.imported.iter().any(|(r, _, t)| r == "refs/explored/probe" && *t == Transition::Conclude), "{report}");
+    assert_eq!(status_of(&hub, "probe"), Status::Explored);
+}

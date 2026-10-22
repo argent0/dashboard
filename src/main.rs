@@ -10,6 +10,7 @@
 use clap::{Parser, Subcommand};
 use dashboard::git::Git;
 use dashboard::paths::Home;
+use dashboard::marker::{Args as MarkerArgs, Marker};
 use dashboard::{config, events, git, init, paths, player, queue, render, state, ui};
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -202,6 +203,60 @@ enum Command {
         #[command(subcommand)]
         kind: DraftKind,
     },
+    /// From the director clone: release a ready task (spec.md §17): its
+    /// task agent launches. Fetches the hub and commits `stage: <slug>` on
+    /// task/<slug>, on top of the hub's tip, once the player would take it.
+    Stage {
+        slug: String,
+        /// Why now, as the marker's body.
+        #[arg(long)]
+        why: Option<String>,
+    },
+    /// From the director clone: put a staged task back to ready while no
+    /// task agent exists (`unstage: <slug>`).
+    Unstage {
+        slug: String,
+        #[arg(long)]
+        why: Option<String>,
+    },
+    /// From the director clone: accept a tested task (spec.md §9, §11);
+    /// the player lands it. Commits `accept: <slug>` with the why as its
+    /// body; by default the task agent's latest accept report's why.
+    Accept {
+        slug: String,
+        #[arg(long)]
+        why: Option<String>,
+    },
+    /// From the director clone: retire a task (spec.md §9). Commits
+    /// `retire: <slug>` with the post-mortem as its body, the only record
+    /// of why it died.
+    Retire {
+        slug: String,
+        /// The post-mortem.
+        #[arg(long)]
+        why: String,
+    },
+    /// From the director clone: conclude a tested spike (spec.md §14).
+    /// Commits `conclude: <answer>`, the answer the player verified (a
+    /// given one must be it, and one the question allows).
+    Conclude {
+        slug: String,
+        answer: Option<String>,
+        /// Why the answer stands, as agreed with the operator.
+        #[arg(long)]
+        why: String,
+    },
+    /// From the director clone, on main at the hub's tip: commit the
+    /// budget edits in the working tree as a raise (architect-v3.md,
+    /// "Budget increase path"): `raise(<slug>): <reason>`, judged first as
+    /// the player will (only budget fields, within the step cap).
+    Raise {
+        /// The task that hit the budget.
+        slug: Option<String>,
+        /// The measured overage, discussed with the operator.
+        #[arg(long)]
+        reason: String,
+    },
     /// Print the task's scope from a worker's or task agent's clone: its
     /// modules, the paths it may write, what else its working tree holds
     /// (read-only) and the checks that judge it.
@@ -276,6 +331,14 @@ fn main() {
         ),
         Some(Command::Trim { slug, checks }) => run_trim(args.home, &slug, &checks),
         Some(Command::Draft { kind }) => run_draft(args.home, kind),
+        Some(Command::Stage { slug, why }) => run_marker(args.home, Marker::Stage, &slug, MarkerArgs { answer: None, why }),
+        Some(Command::Unstage { slug, why }) => run_marker(args.home, Marker::Unstage, &slug, MarkerArgs { answer: None, why }),
+        Some(Command::Accept { slug, why }) => run_marker(args.home, Marker::Accept, &slug, MarkerArgs { answer: None, why }),
+        Some(Command::Retire { slug, why }) => run_marker(args.home, Marker::Retire, &slug, MarkerArgs { answer: None, why: Some(why) }),
+        Some(Command::Conclude { slug, answer, why }) => {
+            run_marker(args.home, Marker::Conclude, &slug, MarkerArgs { answer, why: Some(why) })
+        }
+        Some(Command::Raise { slug, reason }) => run_raise(args.home, slug.as_deref(), &reason),
         Some(Command::Scope) => run_scope(args.home),
         Some(Command::Test { checks, no_wait, timeout }) => run_test(args.home, &checks, no_wait, timeout),
         Some(Command::Build { nodes }) => run_build(args.home, &nodes),
@@ -736,7 +799,7 @@ fn run_trim(home: Option<PathBuf>, slug: &str, checks: &[String]) {
     for (path, why) in &plan.kept {
         println!("  kept    {path} ({why})");
     }
-    println!("the player imports it on its next tick and runs the run set; then commit accept:");
+    println!("the player imports it on its next tick and runs the run set; then `dashboard accept {slug}`");
 }
 
 // --------------------------------------------------------------------------
@@ -780,6 +843,32 @@ fn run_draft(home: Option<PathBuf>, kind: DraftKind) {
             d.slug, d.slug
         );
     }
+}
+
+// --------------------------------------------------------------------------
+// dashboard stage | unstage | accept | retire | conclude | raise
+// --------------------------------------------------------------------------
+
+fn run_marker(home: Option<PathBuf>, m: Marker, slug: &str, args: MarkerArgs) {
+    let (_, hub, director) = director_clone(home, m.name());
+    let out = dashboard::marker::run(&hub, &director, m, slug, &args).unwrap_or_else(|e| fail(e));
+    let subject = out.message.lines().next().unwrap_or_default();
+    println!("{subject} on task/{slug} in {}", &out.commit[..out.commit.len().min(12)]);
+    for line in out.message.lines().skip(2) {
+        println!("  {line}");
+    }
+    println!("the player imports it on its next tick");
+}
+
+fn run_raise(home: Option<PathBuf>, slug: Option<&str>, reason: &str) {
+    let (home, hub, director) = director_clone(home, "raise");
+    let runner = cli_runner(&home, &hub_roadmap(&hub));
+    let out = dashboard::marker::raise(&hub, &director, slug, reason, runner.exporter()).unwrap_or_else(|e| fail(e));
+    println!("raise on main in {}", &out.commit[..out.commit.len().min(12)]);
+    for r in &out.raises {
+        println!("  {}: {} -> {}", r.budget, r.old, r.new);
+    }
+    println!("the player imports it on its next tick and runs the suite");
 }
 
 /// `dashboard test`: see `queue.rs`.

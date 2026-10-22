@@ -1712,3 +1712,44 @@ fn trim_drops_a_worker_check_and_its_whole_file() {
     let err = trim(&repo, &home, "tw", &["wk_own"]).unwrap_err();
     assert!(err.contains("no check \"wk_own\""), "{err}");
 }
+
+// --------------------------------------------------------------------------
+// `dashboard accept | retire` (src/marker.rs)
+// --------------------------------------------------------------------------
+
+fn marker(repo: &DirectorRepo, home: &Home, m: dashboard::marker::Marker, slug: &str, why: Option<&str>) -> Result<dashboard::marker::Outcome, String> {
+    let args = dashboard::marker::Args { answer: None, why: why.map(String::from) };
+    dashboard::marker::run(&Git::new(home.hub()), &repo.git(), m, slug, &args)
+}
+
+#[test]
+fn the_director_accepts_and_retires_with_commands() {
+    use dashboard::marker::Marker;
+    let (repo, _home_dir, home, mut player) = tested_for_trim("ma");
+    let hub = Git::new(home.hub());
+    let tip = repo.git().rev_parse("refs/heads/task/ma");
+
+    let err = marker(&repo, &home, Marker::Retire, "ma", Some("why")).expect_err("a tested task");
+    assert!(err.contains("retire: task/ma is tested — retire is only allowed"), "{err}");
+    let err = marker(&repo, &home, Marker::Accept, "ma", None).expect_err("no report");
+    assert!(err.contains("pass --why"), "{err}");
+    assert_eq!(repo.git().rev_parse("refs/heads/task/ma"), tip, "a refusal commits nothing");
+
+    // Off the branch: only its ref moves.
+    checkout_branch(repo.path(), "main");
+    plan(&repo, &mut player, "mr", "title = \"mr\"\nphase = \"p1\"\nmodules = [\"a\"]\n");
+    let out = marker(&repo, &home, Marker::Accept, "ma", Some("it holds")).expect("accept");
+    assert_eq!(out.message, "accept: ma\n\nit holds");
+    assert_eq!(repo.git().rev_parse("refs/heads/task/ma").as_deref(), Some(out.commit.as_str()));
+    assert!(repo.git().is_empty_commit(&out.commit));
+    let report = player.tick().expect("accept tick");
+    assert!(report.imported.iter().any(|(_, _, t)| *t == Transition::MergeAccept), "{report}");
+
+    let out = marker(&repo, &home, Marker::Retire, "mr", Some("a dead end")).expect("retire");
+    player.tick().expect("retire tick");
+    assert_eq!(repo.git().rev_parse("HEAD").as_deref(), Some(out.commit.as_str()), "the checked-out branch moves");
+    assert_eq!(hub.rev_parse("refs/retired/mr").as_deref(), Some(out.commit.as_str()));
+    assert_eq!(hub.commit_body(&out.commit).unwrap_or_default().trim(), "a dead end");
+    let err = marker(&repo, &home, Marker::Retire, "mr", Some("again")).expect_err("retired");
+    assert!(err.contains("task/mr is"), "{err}");
+}

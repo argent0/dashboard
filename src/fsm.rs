@@ -115,6 +115,20 @@ pub enum Verdict {
     Hold,
 }
 
+impl Ctx {
+    /// `slug`'s situation in `hub_state`, or none for a task the hub
+    /// doesn't know.
+    pub fn of(hub_state: &crate::state::HubState, slug: &str) -> Option<Ctx> {
+        let task = hub_state.tasks.iter().find(|t| t.slug == slug)?;
+        Some(Ctx {
+            status: task.status,
+            managed: crate::state::task_agent_managed(&hub_state.roadmap, &task.config),
+            spike: task.spike.is_some(),
+            agent: task.agent.is_some(),
+        })
+    }
+}
+
 /// A new task may be planned only where no branch exists yet; everything
 /// else goes through `decide`.
 pub fn may_plan(branch_exists: bool) -> bool {
