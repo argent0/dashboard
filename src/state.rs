@@ -203,15 +203,7 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         .map(|r| r.name)
         .collect();
     let main_over_budget = {
-        let results: Vec<checks::CheckResult> = checks::cached(hub, &main_tip)
-            .into_iter()
-            .filter(|r| r.isolation == isolation && r.timeout == roadmap.budget.check_timeout)
-            .collect();
-        let suite = checks::SuiteResult {
-            pass: true,
-            checks: results,
-            error: None,
-        };
+        let suite = main_suite(hub, &main_tip, &roadmap);
         suite
             .budget_overrun(&roadmap.budget)
             .map(|o| {
@@ -311,6 +303,24 @@ pub fn derive(hub: &Git, live_session: &dyn Fn(&str) -> bool) -> Result<HubState
         held: records::held_slugs(hub),
         project,
     })
+}
+
+/// `main`'s cached suite run at `main_tip` under the roadmap's current
+/// policy (its sandbox and `check_timeout`): what `main_over_budget` and
+/// `dashboard draft speedup` read. Never runs anything.
+pub fn main_suite(hub: &Git, main_tip: &str, roadmap: &RoadmapConfig) -> checks::SuiteResult {
+    let isolation = crate::sandbox::Sandbox::from_config(&roadmap.sandbox)
+        .map(|s| s.fingerprint())
+        .unwrap_or_default();
+    let results: Vec<checks::CheckResult> = checks::cached(hub, main_tip)
+        .into_iter()
+        .filter(|r| r.isolation == isolation && r.timeout == roadmap.budget.check_timeout)
+        .collect();
+    checks::SuiteResult {
+        pass: true,
+        checks: results,
+        error: None,
+    }
 }
 
 /// The tip to read `slug`'s state from: the retirement, else the live task

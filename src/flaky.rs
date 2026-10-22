@@ -23,6 +23,31 @@ fn names_test(entry: &str, name: &str) -> bool {
     entry == name || entry.ends_with(&format!("::{name}"))
 }
 
+/// The tests of `inventory` (`list_cmd` lines) that `outputs` name, as
+/// whole words: by their full name or their last `::` segment. Sorted,
+/// unique, without the `: test` suffix. What `dashboard draft flaky` reads
+/// the `[[replace]]` names from.
+pub fn named_in(inventory: &[String], outputs: &[String]) -> Vec<String> {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mentions = |text: &str, name: &str| {
+        text.match_indices(name).any(|(i, _)| {
+            !text[..i].chars().next_back().is_some_and(word)
+                && !text[i + name.len()..].chars().next().is_some_and(word)
+        })
+    };
+    let found: BTreeSet<String> = inventory
+        .iter()
+        .map(|e| normalize(e))
+        .filter(|e| !e.is_empty())
+        .filter(|e| {
+            let last = e.rsplit("::").next().unwrap_or(e);
+            outputs.iter().any(|o| mentions(o, e) || mentions(o, last))
+        })
+        .map(str::to_string)
+        .collect();
+    found.into_iter().collect()
+}
+
 /// What a finish's inventory breaks, as human-readable lines (empty when it
 /// holds): every test on `base` must still be there unless it is an `old`
 /// one, and every `new` test must exist. Inventories are compared as sets,
@@ -147,6 +172,14 @@ mod tests {
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems[0].contains("a::keep"));
         assert!(problems[1].contains("new_one"));
+    }
+
+    #[test]
+    fn outputs_name_tests_as_whole_words() {
+        let inv = inv(&["m::flaky_one", "m::one", "keep", "m::fl"]);
+        let out = vec!["---- m::flaky_one stdout ----\npanicked".to_string(), "test keep ... FAILED".into()];
+        assert_eq!(named_in(&inv, &out), ["keep", "m::flaky_one"]);
+        assert!(named_in(&inv, &["all fine".to_string()]).is_empty());
     }
 
     #[test]

@@ -12,6 +12,35 @@ use std::collections::BTreeMap;
 /// of `[budget] suite_fail`. A constant, like the tolerance.
 pub const SLOW_SHARE_PERCENT: u64 = 10;
 
+/// Whether check `name` is slow in `over` (main's overrun) for a
+/// test-speedup's evidence: killed, or at least `SLOW_SHARE_PERCENT` of
+/// `suite_fail`.
+pub fn is_slow(name: &str, over: &checks::Overrun, budget: &BudgetConfig) -> bool {
+    let suite_fail_ms = budget.suite_fail * 1000;
+    over.timed_out.contains(name)
+        || (suite_fail_ms > 0
+            && over
+                .millis
+                .get(name)
+                .is_some_and(|m| *m * 100 >= suite_fail_ms * SLOW_SHARE_PERCENT))
+}
+
+/// Every check slow in `over`: the killed ones first (by name), then the
+/// rest, slowest first. What `dashboard draft speedup` names.
+pub fn slow_checks(over: &checks::Overrun, budget: &BudgetConfig) -> Vec<String> {
+    let mut rest: Vec<(&String, &u64)> = over
+        .millis
+        .iter()
+        .filter(|(n, _)| !over.timed_out.contains(*n) && is_slow(n, over, budget))
+        .collect();
+    rest.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    over.timed_out
+        .iter()
+        .cloned()
+        .chain(rest.into_iter().map(|(n, _)| n.clone()))
+        .collect()
+}
+
 /// What a finish changes in the suite definition beyond what a test-speedup
 /// may: only a check's `cmd`, `retry_failed` and `retry_on` (and the test
 /// tree itself, which the path check covers) are its to change. Everything
@@ -191,6 +220,21 @@ mod tests {
 
     fn main_ms(rows: &[(&str, u64)]) -> BTreeMap<String, u64> {
         rows.iter().map(|(n, m)| (n.to_string(), *m)).collect()
+    }
+
+    #[test]
+    fn slow_checks_are_the_killed_then_the_slowest() {
+        let budget = BudgetConfig { check_timeout: 5, suite_warn: 0, suite_fail: 100 };
+        let over = checks::Overrun {
+            timed_out: ["z".to_string()].into_iter().collect(),
+            total_over: true,
+            millis: main_ms(&[("z", 5_000), ("a", 10_000), ("b", 30_000), ("fast", 9_999)]),
+            why: String::new(),
+        };
+        assert_eq!(slow_checks(&over, &budget), ["z", "b", "a"]);
+        assert!(!is_slow("fast", &over, &budget));
+        let no_fail = BudgetConfig { suite_fail: 0, ..budget };
+        assert_eq!(slow_checks(&over, &no_fail), ["z"]);
     }
 
     #[test]

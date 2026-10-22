@@ -752,6 +752,26 @@ test per line.
 - *Not enforced*: weakened assertions or a helper that neuters other tests;
   the task agent's review reads the diff for that.
 
+**Drafting the plan.** `dashboard draft flaky <check> [<slug>] [--phase
+<id>]`, run in the director clone, writes the plan from the flake ledger
+(§16): it fetches the hub and creates `task/<slug>` (default
+`fix-flaky-<check>`) on the hub's `main` with one plan commit adding
+`tasks/<slug>/task.toml`, which the player imports like any plan. It
+derives `[[replace]]` from the tests of the inventory (`list_cmd`, run on
+`main`) that the check's failing outputs name, as whole words (`new` is
+`<name>_stable`); `fix_paths` from the check's `files` (or else the
+`test_paths` files) that name those tests, else all the check's `files`;
+`[[evidence]]` and the stability `[check]` (`<check>-stable`) from the
+check's `cmd`, 20 runs each (`min_pass = 1`, `max_pass = 19` for the
+evidence, `min_pass = 20` for the check); and a `brief` carrying the
+ledger entries, the last failing output and the standing advice: helpers
+first, keep assertions as strong. A field it can't derive gets a
+placeholder marked `# TODO(director)`, and the command names it. It refuses
+a check with no pass on retry in the ledger, a check absent from `main`'s
+suite and a suite without `list_cmd`. The phase defaults to the first
+phase of `roadmap.toml` with an open task, else the last. The director
+reviews the plan, replans it if needed and stages it.
+
 ### 15.1 Test speed-ups
 
 A suite that is already over its `[budget]` (a check killed at `check_timeout`,
@@ -791,6 +811,16 @@ the slow checks, `[[slow]] check = "<suite check name>"`, and has no `[check]`
   (`refs/notes/dashboard-speedups`), where the task agent's review prompt
   reads it; the director decides at `accept`.
 - **The task agent** posts `prompt.md` alone, as for a flaky-test-fix.
+- **Drafting the plan.** `dashboard draft speedup [<slug>] [--phase <id>]`,
+  run in the director clone, plans it from `main`'s cached suite run under
+  the current `[budget]` and `[sandbox]` (the one `main_over_budget`
+  reports), never re-measured: one `[[slow]]` per check slow there by the
+  post's rule (every killed one, then each at 10% of `suite_fail` or more,
+  slowest first), no `modules`, no `[check]`, and a `brief` with main's
+  overrun and the timings. It creates `task/<slug>` (default
+  `test-speedup`, then `test-speedup-<n>`) as for a flaky-test-fix (§15),
+  and refuses while `main` has no recorded over-budget run, when no check
+  is slow by that rule, and without `list_cmd`.
 
 ## 16. Check retries and the flake ledger
 
@@ -809,7 +839,8 @@ goes in the *flake ledger* (`refs/flakes/<scope>/<n>`, notes under
 `refs/notes/dashboard-flakes`): the check, the retries used and the failing
 outputs. `status` shows `passed on retry k/N`, `flaky: N` per task and a
 list of recent entries, so the director can plan a hygiene task, e.g. a
-`flaky-test-fix`, from evidence instead of anecdote.
+`flaky-test-fix` drafted by `dashboard draft flaky <check>` (§15), from
+evidence instead of anecdote.
 
 ## 17. Task agents
 

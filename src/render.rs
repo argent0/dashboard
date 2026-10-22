@@ -562,6 +562,7 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
         if state.main_impure.is_empty() && !state.held.is_empty() {
             out.push(format!("  held: {}", state.held.join(", ")));
         }
+        out.push("  plan the fix: dashboard draft speedup".to_string());
         out.push(String::new());
     }
 
@@ -633,6 +634,7 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
                 truncate(seen.trim(), width.saturating_sub(40).max(10))
             ));
         }
+        out.push("  plan a fix: dashboard draft flaky <check>".to_string());
         out.push(String::new());
     }
 

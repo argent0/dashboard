@@ -5,6 +5,7 @@
 pub mod arch;
 pub mod checks;
 pub mod config;
+pub mod draft;
 pub mod events;
 pub mod flaky;
 pub mod fsm;

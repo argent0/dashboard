@@ -2669,14 +2669,8 @@ impl<S: Sessions> Player<S> {
                 short(&main_tip)
             ));
         };
-        let suite_fail_ms = self.runner.budget().suite_fail * 1000;
-        let is_slow = |name: &str| {
-            over.timed_out.contains(name)
-                || (suite_fail_ms > 0
-                    && over.millis.get(name).is_some_and(|m| {
-                        *m * 100 >= suite_fail_ms * speedup::SLOW_SHARE_PERCENT
-                    }))
-        };
+        let budget = self.runner.budget();
+        let is_slow = |name: &str| speedup::is_slow(name, over, &budget);
         for s in &cfg.slow {
             if !over.millis.contains_key(&s.check) {
                 return Some(format!(

@@ -171,7 +171,7 @@ impl Event {
                 "plan a task that makes these checks leave their worktree clean; until it lands, work failing only on them is held".to_string(),
             ),
             EventKind::MainOverBudget => Some(
-                "plan a `test-speedup` task naming the slow checks ([[slow]] check = \"<name>\"), or raise [budget] in roadmap.toml; until it lands, work failing only on them (or slow only because main is) is held".to_string(),
+                "`dashboard draft speedup` in the director clone plans the `test-speedup` naming the slow checks; review and stage it, or raise [budget] in roadmap.toml instead; until it lands, work failing only on them (or slow only because main is) is held".to_string(),
             ),
             EventKind::MainFailing => Some(
                 "fix main (a director commit, or a task on the failing checks' modules); until it passes, work failing only on those checks is held".to_string(),

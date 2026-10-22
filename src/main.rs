@@ -69,6 +69,35 @@ enum ArchAction {
 }
 
 #[derive(Subcommand)]
+enum DraftKind {
+    /// A test-speedup naming, in `[[slow]]`, every check slow on main's
+    /// recorded over-budget suite run (every killed one, then each at 10%
+    /// of suite_fail or more). Refuses while main is within its [budget].
+    Speedup {
+        /// The new task's slug (default: test-speedup, or test-speedup-<n>).
+        slug: Option<String>,
+        /// The phase (default: the first phase of roadmap.toml with open
+        /// tasks, else the last).
+        #[arg(long)]
+        phase: Option<String>,
+    },
+    /// A flaky-test-fix for suite check <check>, from its passes on retry in
+    /// the flake ledger: `[[replace]]` from the tests its failing output
+    /// names (the inventory of `list_cmd`, run on main), `fix_paths` from
+    /// the files naming them, `[[evidence]]` and the stability `[check]`
+    /// from its `cmd`. Refuses a check with no recorded flaky pass.
+    Flaky {
+        /// The flaky suite check.
+        check: String,
+        /// The new task's slug (default: fix-flaky-<check>).
+        slug: Option<String>,
+        /// The phase (default: as for speedup).
+        #[arg(long)]
+        phase: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Create this project's hub from the director clone containing (or
     /// above) the current directory.
@@ -163,6 +192,16 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         checks: Vec<String>,
     },
+    /// From the director clone: draft the plan of a test-speedup or a
+    /// flaky-test-fix (spec.md §15, §15.1) from what the player recorded.
+    /// Fetches the hub and creates task/<slug> on the hub's main with one
+    /// plan commit adding tasks/<slug>/task.toml; the player imports it on
+    /// its next tick. Prints what it derived and any field left as a
+    /// `TODO(director)` placeholder: review, replan if needed, then stage.
+    Draft {
+        #[command(subcommand)]
+        kind: DraftKind,
+    },
     /// Print the task's scope from a worker's or task agent's clone: its
     /// modules, the paths it may write, what else its working tree holds
     /// (read-only) and the checks that judge it.
@@ -236,6 +275,7 @@ fn main() {
             dashboard::report::Draft { verdict, why, check, suite, concerns },
         ),
         Some(Command::Trim { slug, checks }) => run_trim(args.home, &slug, &checks),
+        Some(Command::Draft { kind }) => run_draft(args.home, kind),
         Some(Command::Scope) => run_scope(args.home),
         Some(Command::Test { checks, no_wait, timeout }) => run_test(args.home, &checks, no_wait, timeout),
         Some(Command::Build { nodes }) => run_build(args.home, &nodes),
@@ -655,7 +695,9 @@ fn run_report(home: Option<PathBuf>, draft: dashboard::report::Draft) {
 // dashboard trim
 // --------------------------------------------------------------------------
 
-fn run_trim(home: Option<PathBuf>, slug: &str, checks: &[String]) {
+/// The home, hub and director clone for a director command (`cmd`), which
+/// must run in the director clone.
+fn director_clone(home: Option<PathBuf>, cmd: &str) -> (Home, git::Git, git::Git) {
     let cwd = std::env::current_dir().unwrap_or_else(|e| fail(format!("cannot read current directory: {e}")));
     let home = paths::resolve_home(home, &cwd).unwrap_or_else(|e| fail(e));
     let hub = git::Git::new(home.hub());
@@ -669,10 +711,15 @@ fn run_trim(home: Option<PathBuf>, slug: &str, checks: &[String]) {
         std::fs::canonicalize(a).ok().is_some_and(|a| std::fs::canonicalize(b).ok() == Some(a))
     };
     if !same(&here, &director) {
-        fail(format!("dashboard trim runs in the director clone ({director})"));
+        fail(format!("dashboard {cmd} runs in the director clone ({director})"));
     }
+    (home, hub, git::Git::new(&director))
+}
+
+fn run_trim(home: Option<PathBuf>, slug: &str, checks: &[String]) {
+    let (home, hub, director) = director_clone(home, "trim");
     let runner = cli_runner(&home, &hub_roadmap(&hub));
-    let out = dashboard::trim::run(&hub, &git::Git::new(&director), slug, checks, runner.exporter())
+    let out = dashboard::trim::run(&hub, &director, slug, checks, runner.exporter())
         .unwrap_or_else(|e| fail(e));
     let plan = &out.plan;
     println!(
@@ -690,6 +737,49 @@ fn run_trim(home: Option<PathBuf>, slug: &str, checks: &[String]) {
         println!("  kept    {path} ({why})");
     }
     println!("the player imports it on its next tick and runs the run set; then commit accept:");
+}
+
+// --------------------------------------------------------------------------
+// dashboard draft
+// --------------------------------------------------------------------------
+
+fn run_draft(home: Option<PathBuf>, kind: DraftKind) {
+    let (home, hub, director) = director_clone(home, "draft");
+    let runner = cli_runner(&home, &hub_roadmap(&hub));
+    let out = match &kind {
+        DraftKind::Speedup { slug, phase } => {
+            dashboard::draft::speedup(&hub, &director, slug.as_deref(), phase.as_deref(), runner.exporter())
+        }
+        DraftKind::Flaky { check, slug, phase } => {
+            dashboard::draft::flaky(&hub, &director, check, slug.as_deref(), phase.as_deref(), &runner)
+        }
+    }
+    .unwrap_or_else(|e| fail(e));
+    let d = &out.draft;
+    println!(
+        "planned task/{} ({}) in {}: tasks/{}/task.toml",
+        d.slug,
+        if d.phase.is_empty() { "no phase" } else { d.phase.as_str() },
+        &out.commit[..out.commit.len().min(12)],
+        d.slug
+    );
+    for line in &d.derived {
+        println!("  derived {line}");
+    }
+    for line in &d.todo {
+        println!("  TODO    {line}");
+    }
+    println!();
+    print!("{}", d.toml);
+    println!();
+    if d.todo.is_empty() {
+        println!("the player imports it on its next tick; review it (`git show task/{}`), replan with a commit if needed, then stage", d.slug);
+    } else {
+        println!(
+            "the player imports it on its next tick; complete the TODO(director) fields with a replan commit on task/{} (`git checkout task/{}`), then stage",
+            d.slug, d.slug
+        );
+    }
 }
 
 /// `dashboard test`: see `queue.rs`.
