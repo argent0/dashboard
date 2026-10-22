@@ -122,8 +122,8 @@ Enforced by the player on import; a violating commit is never imported.
   unchanged and stay inside the task's scope. The director commits to a
   task branch only through the transitions in §9.
 - **`main` is player-only**, except for director commits touching only
-  `roadmap.toml`, `prompts.kdl` (§19) or the doc paths declared in
-  `roadmap.toml` (`docs_paths`). The player runs the whole suite on these
+  `roadmap.toml`, `prompts.kdl` (§19), the Lean package `architecture/`
+  or the doc paths declared in `roadmap.toml` (`docs_paths`). The player runs the whole suite on these
   like any other `main` commit.
 
 **Marker commits.** A few transitions are events with no content: *block*,

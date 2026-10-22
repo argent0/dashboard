@@ -44,13 +44,26 @@ pub struct Loaded {
     pub api_dirs: BTreeMap<String, PathBuf>,
     /// Problems reading an API's IDL (reported by `bindings`).
     pub errors: Vec<String>,
+    /// The test files: the suite's `test_paths` and the `files` of every
+    /// check the director or a task agent declared (a worker's own checks
+    /// add none). A test stands in for an API's generator, so it may mint
+    /// that API's evidence; production code may reach into none of them.
+    pub test_files: Vec<String>,
 }
 
 impl Loaded {
     /// A Lean export: bindings go under an API's first path (a directory,
     /// or its parent).
     pub fn from_export(root: &Path, e: lean::Exported) -> Loaded {
-        let mut out = Loaded { cfg: e.arch, idls: e.idls, ..Default::default() };
+        let mut test_files = e.suite.test_paths.clone();
+        for c in &e.suite.checks {
+            if !c.source.as_deref().is_some_and(|s| s.ends_with(".worker.lean")) {
+                test_files.extend(c.files.iter().cloned());
+            }
+        }
+        test_files.sort();
+        test_files.dedup();
+        let mut out = Loaded { cfg: e.arch, idls: e.idls, test_files, ..Default::default() };
         for a in &out.cfg.apis {
             let Some(first) = a.paths.first() else { continue };
             let p = PathBuf::from(first.trim_end_matches('/'));
@@ -736,8 +749,9 @@ pub fn check(root: &Path, loaded: &Loaded, sandbox: &Sandbox, scratch: &Path) ->
 }
 
 /// The consumer contract (no wildcard over an API's constructors, no wire
-/// helper reading a T) in every module's and root's own files, plus any
-/// `lint_cmd`.
+/// helper reading a T, no mint of a consumed token outside a test file) in
+/// every module's and root's own files, production code reaching into no
+/// test file, plus any `lint_cmd`.
 fn lint(
     root: &Path,
     loaded: &Loaded,
@@ -754,6 +768,28 @@ fn lint(
         .map(|m| (m.name.as_str(), m.lang.as_str(), m.lint_cmd.as_ref()))
         .chain(cfg.roots.iter().map(|r| (r.name.as_str(), r.lang.as_str(), None)))
         .collect();
+    let tests = &loaded.test_files;
+    let is_test = |f: &Path| path_under_test_paths(&f.to_string_lossy(), tests);
+    // Kotlin reaches a file by its package, so collect what the test files
+    // declare and which packages production code declares too.
+    let (mut kt_names, mut kt_test_pkgs, mut kt_prod_pkgs) = (Vec::new(), Vec::new(), Vec::new());
+    let test_kt = tests.iter().flat_map(|t| expand(root, std::slice::from_ref(t)).unwrap_or_default());
+    for f in test_kt.filter(|f| f.extension().is_some_and(|e| e == "kt" || e == "kts")) {
+        let Ok(src) = std::fs::read_to_string(root.join(f)) else { continue };
+        let (pkg, names) = crate::lint::kotlin_declared(&src);
+        kt_test_pkgs.push(pkg);
+        kt_names.extend(names);
+    }
+    for (name, lang, _) in &nodes {
+        if *lang != "kotlin" {
+            continue;
+        }
+        for f in files_of.get(name).into_iter().flatten().filter(|f| !is_test(f)) {
+            let Ok(src) = std::fs::read_to_string(root.join(f)) else { continue };
+            kt_prod_pkgs.push(crate::lint::kotlin_declared(&src).0);
+        }
+    }
+    let kt_test_only: Vec<String> = kt_test_pkgs.into_iter().filter(|p| !kt_prod_pkgs.contains(p)).collect();
     for (name, lang, lint_cmd) in nodes {
         let Some(files) = files_of.get(name) else { continue };
         let consumed: Vec<&ApiBindings> = bs
@@ -764,8 +800,15 @@ fn lint(
             let Ok(src) = std::fs::read(root.join(f)) else { continue };
             let text = String::from_utf8_lossy(&src);
             let mut found = crate::lint::wire_leaks(&text);
-            for b in &consumed {
-                found.extend(crate::lint::mint_calls(&text, &b.idl.token_names()));
+            // A test stands in for the generator: it may mint.
+            if !is_test(f) {
+                for b in &consumed {
+                    found.extend(crate::lint::mint_calls(&text, &b.idl.token_names()));
+                }
+                found.extend(crate::lint::test_reach(lang, &f.to_string_lossy(), &text, tests));
+                if lang == "kotlin" {
+                    found.extend(crate::lint::kotlin_test_imports(&text, &kt_names, &kt_test_only));
+                }
             }
             if let Some(l) = language(lang, f) {
                 found.extend(crate::lint::serialized_boundary(lang, l.clone(), &src));

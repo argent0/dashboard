@@ -6123,8 +6123,9 @@ fn valid_slug(s: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// `path` is allowed on a director `main` commit: exactly `roadmap.toml`, or
-/// under a `docs_paths` entry (an exact file match, or a directory prefix).
+/// `path` is allowed on a director `main` commit: exactly `roadmap.toml` or
+/// `prompts.kdl`, under `architecture/`, or under a `docs_paths` entry (an
+/// exact file match, or a directory prefix).
 fn path_allowed(path: &str, docs_paths: &[String]) -> bool {
     if path == "roadmap.toml" || path == prompts::FILE || config::is_arch_path(path) {
         return true;

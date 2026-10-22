@@ -179,8 +179,12 @@ The three compiled forms:
   as constructor parameters). `max_rules` counts the comparisons and
   memberships across an API's `where` clauses.
 - **Evidence** (`token ProductRef : i64 permanent`): a `T` only the API's
-  generator mints (`ProductRef::mint`; a consumer file calling `mint` is a
-  lint finding). A permanent token clones. `versioned stale=Retired` carries
+  generator mints (`ProductRef::mint`; a consumer file naming `mint`, called
+  or bare, is a lint finding). A test file (the suite's `test_paths`, the
+  `files` of a director's or task agent's check) stands in for the
+  generator and mints freely; production code reaching one (a Rust `mod`
+  outside `#[cfg(test)]`, `include!`, a TypeScript import, a Kotlin import
+  of its declarations) is a lint finding, so minted evidence stays in tests. A permanent token clones. `versioned stale=Retired` carries
   `(id, version)` (`store` adds `version()` for the owner's `where version =
   ?`) and every `fn` taking it must return a sum with `Retired`; `linear
   spent=Ctor` is taken by value in Rust (no `Clone`: single use by the

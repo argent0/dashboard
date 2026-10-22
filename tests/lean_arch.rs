@@ -231,6 +231,23 @@ fn refinements_and_tokens_are_elaborated_exported_budgeted_and_linted() {
     assert!(problems.iter().any(|p| p == "api nutrition-db: tokens 3 exceeds budget 2"), "{problems:?}");
     assert!(problems.iter().any(|p| p == "nutrition/lib.rs:1: mints the evidence token ProductRef; only the generator of its api may"), "{problems:?}");
     assert!(!problems.iter().any(|p| p.starts_with("db/lib.rs")), "{problems:?}");
+    // A task check's files stand in for the generator and may mint; a
+    // worker's own check exempts nothing; production code reaching a test
+    // file, or naming `mint` bare, is caught.
+    let task = format!("{}  files = [\"nutrition/tests/stand.rs\"]\n", lean_task_tests("stand", "true", "[nutrition]"));
+    let own = format!("{}  files = [\"nutrition/own.rs\"]\n", lean_task_tests("own", "true", "[nutrition]"));
+    write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", PROOFS_IDL), ("nutrition-web", PROOFS_WEB)], &[("Tests/t", &task), ("Tests/t.worker", &own)]);
+    write_file(r, "nutrition/tests/stand.rs", "fn f() { let _p = ProductRef::mint(1); }\n");
+    write_file(r, "nutrition/own.rs", "fn f() { let _p = ProductRef::mint(1); }\n");
+    write_file(r, "nutrition/lib.rs", "#[path = \"tests/stand.rs\"]\nmod stand;\nconst ISSUE: fn(i64) -> ProductRef = ProductRef::mint;\n");
+    let (problems, _) = report(r, &arch::load(r).unwrap());
+    assert!(!problems.iter().any(|p| p.starts_with("nutrition/tests/stand.rs")), "{problems:?}");
+    assert!(problems.iter().any(|p| p == "nutrition/own.rs:1: mints the evidence token ProductRef; only the generator of its api may"), "{problems:?}");
+    assert!(problems.iter().any(|p| p == "nutrition/lib.rs:2: production code reaches the test file nutrition/tests/stand.rs; a test's minted evidence stays in the test"), "{problems:?}");
+    assert!(problems.iter().any(|p| p == "nutrition/lib.rs:3: mints the evidence token ProductRef; only the generator of its api may"), "{problems:?}");
+    for f in ["architecture/Tests/t.lean", "architecture/Tests/t.worker.lean", "nutrition/tests/stand.rs", "nutrition/own.rs"] {
+        std::fs::remove_file(r.join(f)).unwrap();
+    }
     // A ref's `display` and `store` forward the wrapped type's, which must
     // declare them.
     write_file(r, "nutrition/lib.rs", "");

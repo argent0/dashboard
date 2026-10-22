@@ -7,8 +7,10 @@
 // when an arm names one of its constructors qualified by the API's sum type
 // (or a variant by its element).
 
+use crate::config::path_under_test_paths;
 use crate::idl::Idl;
 use regex::Regex;
+use std::path::{Component, Path, PathBuf};
 use tree_sitter::{Language, Node, Parser};
 
 #[derive(Debug, PartialEq)]
@@ -200,15 +202,15 @@ pub fn wire_leaks(src: &str) -> Vec<Finding> {
         .collect()
 }
 
-/// Calls of a token's `mint` (`ProductRef::mint(`, `ProductRef.mint(`) in a
-/// file that may not mint it: evidence is the generator's to issue. By
-/// name, like the other lints.
+/// References to a token's `mint` (`ProductRef::mint(`, `Funds.mint`, a
+/// bare `let issue = ProductRef::mint;`) in a file that may not mint it:
+/// evidence is the generator's to issue. By name, like the other lints.
 pub fn mint_calls(src: &str, tokens: &[&str]) -> Vec<Finding> {
     if tokens.is_empty() {
         return Vec::new();
     }
     let names = tokens.iter().map(|t| regex::escape(t)).collect::<Vec<_>>().join("|");
-    let re = Regex::new(&format!(r"\b({names})(::|\.)mint\(")).unwrap();
+    let re = Regex::new(&format!(r"\b({names})\s*(::|\.)\s*mint\b")).unwrap();
     src.lines()
         .enumerate()
         .filter_map(|(i, l)| {
@@ -216,6 +218,137 @@ pub fn mint_calls(src: &str, tokens: &[&str]) -> Vec<Finding> {
                 line: i + 1,
                 message: format!("mints the evidence token {}; only the generator of its api may", &c[1]),
             })
+        })
+        .collect()
+}
+
+/// `a/b/../c` as `a/c`.
+fn normalize(p: &Path) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(s) => out.push(s.to_str().unwrap_or("")),
+            _ => {}
+        }
+    }
+    out.join("/")
+}
+
+fn reach_finding(line: usize, target: &str) -> Finding {
+    Finding {
+        line: line + 1,
+        message: format!("production code reaches the test file {target}; a test's minted evidence stays in the test"),
+    }
+}
+
+/// Production code reaching into a test file (`test_files`, root-relative):
+/// a Rust `mod` or `include!` resolving to one outside `#[cfg(test)]`, a
+/// TypeScript relative import of one. A test may mint evidence (it stands in
+/// for the generator), so its code stays out of the product.
+pub fn test_reach(lang: &str, file: &str, src: &str, test_files: &[String]) -> Vec<Finding> {
+    if test_files.is_empty() {
+        return Vec::new();
+    }
+    let path = Path::new(file);
+    let dir = path.parent().unwrap_or(Path::new(""));
+    let hit = |cands: &[PathBuf]| cands.iter().map(|c| normalize(c)).find(|c| path_under_test_paths(c, test_files));
+    let mut out = Vec::new();
+    match lang {
+        "rust" => {
+            let module = Regex::new(r"^\s*(?:#\[.*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(r#)?(\w+)\s*;").unwrap();
+            let path_attr = Regex::new(r#"#\[\s*path\s*=\s*"([^"]+)"\s*\]"#).unwrap();
+            let include = Regex::new(r#"include(?:_str|_bytes)?!\s*\(\s*"([^"]+)"\s*\)"#).unwrap();
+            let lines: Vec<&str> = src.lines().collect();
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let own_dir = if matches!(stem, "lib" | "main" | "mod") { dir.to_path_buf() } else { dir.join(stem) };
+            for (i, l) in lines.iter().enumerate() {
+                if let Some(c) = include.captures(l) {
+                    if let Some(t) = hit(&[dir.join(&c[1])]) {
+                        out.push(reach_finding(i, &t));
+                    }
+                }
+                let Some(c) = module.captures(l) else { continue };
+                // The attributes on the line and the ones stacked above it.
+                let mut attrs = vec![l.to_string()];
+                let mut j = i;
+                while j > 0 && lines[j - 1].trim_start().starts_with("#[") {
+                    j -= 1;
+                    attrs.push(lines[j].to_string());
+                }
+                if attrs.iter().any(|a| a.contains("cfg(test)")) {
+                    continue;
+                }
+                let name = &c[2];
+                let cands = match attrs.iter().find_map(|a| path_attr.captures(a)) {
+                    Some(p) => vec![dir.join(&p[1])],
+                    None => vec![own_dir.join(format!("{name}.rs")), own_dir.join(name).join("mod.rs")],
+                };
+                if let Some(t) = hit(&cands) {
+                    out.push(reach_finding(i, &t));
+                }
+            }
+        }
+        "typescript" => {
+            let re = Regex::new(r#"(?:\bfrom|\bimport|\brequire)\s*\(?\s*['"](\.{1,2}/[^'"]*)['"]"#).unwrap();
+            for (i, l) in src.lines().enumerate() {
+                for c in re.captures_iter(l) {
+                    let p = dir.join(&c[1]);
+                    let s = p.to_string_lossy().to_string();
+                    let mut cands = vec![p.clone()];
+                    for ext in ["ts", "tsx", "js", "mts"] {
+                        cands.push(PathBuf::from(format!("{s}.{ext}")));
+                        cands.push(p.join(format!("index.{ext}")));
+                    }
+                    if let Some(base) = s.strip_suffix(".js") {
+                        cands.push(PathBuf::from(format!("{base}.ts")));
+                        cands.push(PathBuf::from(format!("{base}.tsx")));
+                    }
+                    if let Some(t) = hit(&cands) {
+                        out.push(reach_finding(i, &t));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// A Kotlin file's package and its top-level names, qualified
+/// (`a.b.Stand`): what a production file would import to reach it.
+pub fn kotlin_declared(src: &str) -> (String, Vec<String>) {
+    let pkg = Regex::new(r"^\s*package\s+([\w.]+)").unwrap();
+    let decl = Regex::new(
+        r"^(?:(?:public|internal|private|data|sealed|abstract|open|enum|inline|value|annotation|suspend|const|operator|infix|tailrec|external)\s+)*(?:fun\s+interface|class|object|interface|fun|val|var|typealias)\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?(\w+)",
+    )
+    .unwrap();
+    let package = src.lines().find_map(|l| pkg.captures(l).map(|c| c[1].to_string())).unwrap_or_default();
+    let names = src
+        .lines()
+        .filter_map(|l| decl.captures(l))
+        .map(|c| if package.is_empty() { c[1].to_string() } else { format!("{package}.{}", &c[1]) })
+        .collect();
+    (package, names)
+}
+
+/// Kotlin imports of a test file's declarations (`names`, qualified), or a
+/// star import of a package only test files declare (`test_only`).
+pub fn kotlin_test_imports(src: &str, names: &[String], test_only: &[String]) -> Vec<Finding> {
+    let re = Regex::new(r"^\s*import\s+(\w+(?:\.\w+)*)(\.\*)?").unwrap();
+    src.lines()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let c = re.captures(l)?;
+            let q = &c[1];
+            let hit = if c.get(2).is_some() {
+                test_only.iter().any(|p| p == q)
+            } else {
+                names.iter().any(|n| q == n || q.starts_with(&format!("{n}.")))
+            };
+            hit.then(|| reach_finding(i, q))
         })
         .collect()
 }
@@ -294,6 +427,33 @@ mod tests {
         assert_eq!(found.iter().map(|f| f.line).collect::<Vec<_>>(), [1, 2]);
         assert!(found[0].message.contains("ProductRef"));
         assert!(mint_calls("ProductRef::mint(1)", &[]).is_empty());
+        // A bare reference issues the token as surely as a call.
+        let found = mint_calls("const ISSUE: fn(i64) -> ProductRef = ProductRef::mint;\nlet f = Funds . mint;\nlet m = ProductRef::minted;", &["ProductRef", "Funds"]);
+        assert_eq!(found.iter().map(|f| f.line).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    #[test]
+    fn production_reaching_a_test_file_is_found() {
+        let tests = ["crates/m/tests/".to_string(), "crates/m/src/stand.rs".to_string(), "web/m/stand.test.ts".to_string()];
+        let rs = "mod world;\nmod stand;\n#[cfg(test)]\nmod stand;\n#[path = \"../tests/m.rs\"]\nmod m;\ninclude!(\"../tests/x.rs\");\n";
+        let lines: Vec<usize> = test_reach("rust", "crates/m/src/lib.rs", rs, &tests).iter().map(|f| f.line).collect();
+        assert_eq!(lines, [2, 6, 7]);
+        // `mod stand;` in a non-mod file resolves under its own directory.
+        assert!(test_reach("rust", "crates/m/src/world.rs", "mod stand;", &tests).is_empty());
+        let ts = "import { a } from \"./stand.test\";\nimport { b } from \"./world\";\nconst c = await import(\"./stand.test.js\");\n";
+        let lines: Vec<usize> = test_reach("typescript", "web/m/main.ts", ts, &tests).iter().map(|f| f.line).collect();
+        assert_eq!(lines, [1, 3]);
+        assert!(test_reach("rust", "crates/m/src/lib.rs", rs, &[]).is_empty());
+    }
+
+    #[test]
+    fn kotlin_imports_of_test_declarations_are_found() {
+        let (pkg, names) = kotlin_declared("package m.stand\n\nclass StandWorld(val x: Int) {\n    fun inner() = 1\n}\nfun issue(): Int = 1\nprivate val SEED = 2\n");
+        assert_eq!(pkg, "m.stand");
+        assert_eq!(names, ["m.stand.StandWorld", "m.stand.issue", "m.stand.SEED"]);
+        let src = "import m.stand.StandWorld\nimport m.stand.StandWorldX\nimport m.stand.issue\nimport m.stand.*\nimport m.world.*\n";
+        let lines: Vec<usize> = kotlin_test_imports(src, &names, &["m.stand".to_string()]).iter().map(|f| f.line).collect();
+        assert_eq!(lines, [1, 3, 4]);
     }
 
     #[test]
