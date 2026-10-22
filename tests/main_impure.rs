@@ -233,7 +233,7 @@ fn a_finish_failing_on_anything_else_is_still_struck() {
     // No src/feature.txt: the task check fails for real, alongside `env`.
     let worker = worker_git(&repo);
     write_file(&worker.dir, "other.txt", "not it\n");
-    worker.run(&["add", "other.txt"]).unwrap();
+    worker.run(&["add", "--sparse", "other.txt"]).unwrap();
     worker.run(&["commit", "-q", "-m", "finish"]).unwrap();
 
     let report = player.tick().unwrap();
