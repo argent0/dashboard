@@ -950,6 +950,10 @@ pub struct ArchConfig {
     /// Build caches (`node_modules`, `target`) every view links to: symlinks
     /// into the checkout, never copied and never counted toward a budget.
     pub linked: Vec<String>,
+    /// `shared` files a tool may rewrite inside a check's view (a workspace
+    /// lock trimmed to the members present): the view's purity check skips
+    /// them, the worktree's stays whole.
+    pub view_rewritable: Vec<String>,
     /// Every file under these must be owned by a module, an API, a root or
     /// `shared` (ownership completeness).
     pub source_paths: Vec<String>,
@@ -1243,6 +1247,15 @@ impl ArchConfig {
                 path_under_test_paths(l, &[p.to_string()]) || path_under_test_paths(p, &[l.to_string()])
             }) {
                 return Err(format!("linked {l:?}: overlaps module or API path {p:?}"));
+            }
+        }
+        for r in &self.view_rewritable {
+            let r = r.trim_end_matches('/');
+            if r.is_empty() || r.starts_with('/') || r.split('/').any(|c| c == ".." || c == ".") {
+                return Err(format!("view_rewritable {r:?}: must be a relative path without . or .."));
+            }
+            if !path_under_test_paths(r, &self.shared) {
+                return Err(format!("view_rewritable {r:?}: must lie under a shared path"));
             }
         }
         Ok(())

@@ -55,6 +55,7 @@ architecture where
   max_modules = 27
   shared = ["Cargo.toml", "Cargo.lock"]
   linked = ["node_modules", "target"]
+  view_rewritable = ["Cargo.lock"]
   source_paths = ["engine", "web/src"]
 
 module database where
@@ -327,7 +328,7 @@ Steps 2 and 3 depend only on the API from step 1, not on each other, so they can
 - Suite checks per module: the constructor / `T` budget, the AST and byte budgets, and the no-wildcard rule.
   - The no-wildcard rule needs a per-language check (compiler or linter); which one is a project choice, not part of this design.
   - Rust: `clippy::wildcard_enum_match_arm` and `clippy::match_wildcard_for_single_variants` at deny.
-- Module tests run in a jail view: a fresh directory holding only the module's files, its APIs' files and `shared`, plus a symlink back into the checkout for each existing `linked` path (build caches like `node_modules` and `target`, never copied, never in a budget). `linked` may not overlap any module or API path. A missing cache is skipped, so the suite check's `cmd` builds the caches before `dashboard arch check`. `test_cmd` and `build_cmd` get `DASHBOARD_MODULE` and `DASHBOARD_ROOT`; `dashboard build` compiles a module in the same view (spec §21).
+- Module tests run in a jail view: a fresh directory holding only the module's files, its APIs' files and `shared`, plus a symlink back into the checkout for each existing `linked` path (build caches like `node_modules` and `target`, never copied, never in a budget). `linked` may not overlap any module or API path. `view_rewritable` lists `shared` files a tool rewrites in a view (cargo trims a workspace lock to the members present): a check's view purity check (spec §20) skips them, and the worktree's check covers them in full. A missing cache is skipped, so the suite check's `cmd` builds the caches before `dashboard arch check`. `test_cmd` and `build_cmd` get `DASHBOARD_MODULE` and `DASHBOARD_ROOT`; `dashboard build` compiles a module in the same view (spec §21).
 - Opaque `T`s are checked by the API check: each `T` is a wrapped newtype with no derive, no public inner field and no accessors, or another API's type.
 
 ## Budget increase path

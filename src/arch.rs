@@ -1029,6 +1029,14 @@ mod tests {
             assert!(with_linked(linked).contains(err), "{linked}");
         }
         assert!(with_linked("").contains("relative"));
+        let rewritable = |p: &str| {
+            let mut m = manifest();
+            m["view_rewritable"] = json!([p]);
+            arch_config_from_json(m)
+        };
+        assert!(rewritable("shared.txt").is_ok());
+        assert!(rewritable("a/lib.rs").unwrap_err().contains("under a shared path"));
+        assert!(rewritable("../x").unwrap_err().contains("relative"));
         let mut dup = manifest();
         dup["api"].as_array_mut().unwrap().push(json!({"name": "x", "generator": "a", "consumer": "b", "paths": ["api"]}));
         assert!(arch_config_from_json(dup).unwrap_err().contains("one API per connected pair"));

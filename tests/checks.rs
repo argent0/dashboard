@@ -520,6 +520,27 @@ fn a_view_check_that_writes_leaks_unless_the_path_is_ignored() {
 }
 
 #[test]
+fn a_view_may_rewrite_its_view_rewritable_files_and_the_worktree_stays_strict() {
+    let repo = director_repo();
+    let arch = AB_SHARED.replace("  shared = [\"shared.txt\"]\n", "  shared = [\"shared.txt\"]\n  view_rewritable = [\"shared.txt\"]\n");
+    write_lean_arch(repo.path(), &arch, &[("ab", LEAN_AB_IDL)], &[("Tests", AB_SUITE)]);
+    write_file(repo.path(), "a/lib.rs", "pub fn f() {}\n");
+    write_file(repo.path(), "b/lib.rs", "pub fn g() {}\n");
+    write_file(repo.path(), "api/gen.rs", "\n");
+    write_file(repo.path(), "shared.txt", "1\n");
+    let commit = commit(repo.path(), "a rewritable shared file");
+    let (_home_dir, home) = init_hub(&repo);
+    let runner = Runner::new(&home);
+    let rewrite = "echo 2 > shared.txt";
+    let r = runner.run_check(&commit, &Check { covers: vec!["a".into()], ..check("trims", rewrite, 2, 2) });
+    assert!(r.pass, "{r:?}");
+    let r = runner.run_check(&commit, &Check { covers: vec!["a".into()], ..check("writes", "echo x > a/new.txt", 1, 1) });
+    assert!(r.leaked.iter().any(|l| l.contains("a/new.txt")), "{r:?}");
+    let r = runner.run_check(&commit, &check("whole", rewrite, 1, 1));
+    assert!(r.leaked.iter().any(|l| l.contains("shared.txt")), "{r:?}");
+}
+
+#[test]
 fn a_diff_touching_shared_runs_the_whole_suite() {
     let (repo, _home_dir, home, base) = ab_hub();
     let runner = Runner::new(&home);

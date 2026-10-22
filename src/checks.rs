@@ -759,6 +759,17 @@ impl Runner {
         ] {
             git.run(args).map_err(|e| e.to_string())?;
         }
+        // A tool may rewrite these in a view; `leaks` skips them there.
+        if !e.arch.view_rewritable.is_empty() {
+            let mut ls = vec!["ls-files", "-z", "--"];
+            ls.extend(e.arch.view_rewritable.iter().map(|s| s.as_str()));
+            let files = git.run(&ls).map_err(|e| e.to_string())?;
+            let mut skip = vec!["update-index", "--skip-worktree", "--"];
+            skip.extend(files.split('\0').filter(|f| !f.is_empty()));
+            if skip.len() > 3 {
+                git.run(&skip).map_err(|e| e.to_string())?;
+            }
+        }
         Ok(dir)
     }
 

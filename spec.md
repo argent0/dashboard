@@ -948,7 +948,10 @@ guarantee.
   the worktree, and for a check that runs in a view (§6.2) in the view too
   (a throwaway git repo carrying the worktree's `.gitignore` files); a
   changed tracked file or a new untracked one (ignored build output aside)
-  means the check is impure. It fails whatever its exit code,
+  means the check is impure. In a view, the architecture's
+  `view_rewritable` files (under `shared`, e.g. a workspace lock that
+  cargo trims to the crates present) may change: each view is rebuilt per
+  check, so that rewrite stays inside it. It fails whatever its exit code,
   its remaining runs are skipped, and it isn't retried. An impure check can
   never stand in for a required failure: a post whose task check is impure is
   a `post` strike, a send-back whose suite fails only impurely a `review`

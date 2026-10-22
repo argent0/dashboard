@@ -98,6 +98,7 @@ structure Settings where
   max_roots : Nat := 0
   shared : List String := []
   linked : List String := []
+  view_rewritable : List String := []
   source_paths : List String := []
   deriving Repr, Inhabited
 

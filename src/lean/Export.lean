@@ -196,7 +196,8 @@ def exportAll : CoreM Json := do
       errors := errors.push s!"more than one `suite where` block: {ns}"
       pure {}
   let arch := Json.mkObj [("max_modules", base.max_modules), ("max_roots", base.max_roots),
-    ("shared", strs base.shared), ("linked", strs base.linked), ("source_paths", strs base.source_paths),
+    ("shared", strs base.shared), ("linked", strs base.linked),
+    ("view_rewritable", strs base.view_rewritable), ("source_paths", strs base.source_paths),
     ("module", Json.arr modules), ("root", Json.arr roots), ("api", Json.arr apis)]
   return Json.mkObj [("arch", arch), ("idls", Json.mkObj idls.toList),
     ("suite", suiteV.toJson), ("checks", Json.arr checks),
