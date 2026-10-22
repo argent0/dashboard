@@ -941,6 +941,64 @@ impl Runner {
         }
     }
 
+    /// `dashboard build` (spec §21): runs the `build_cmd` of each of the
+    /// task's `modules`, or of the named ones, at `commit`. A module builds
+    /// in its view (generators first), a root in the full worktree, both
+    /// jailed like a check, with `DASHBOARD_MODULE` and `DASHBOARD_ROOT`
+    /// set; output streams to the caller. Stops at the first failure and
+    /// records nothing.
+    pub fn build(&self, commit: &str, modules: &[String], names: &[String]) -> Result<(), String> {
+        if let Some(n) = names.iter().find(|n| !modules.contains(n)) {
+            return Err(format!("{n:?} is outside the task's modules: {}", modules.join(", ")));
+        }
+        let chosen = if names.is_empty() { modules } else { names };
+        self.prepare(commit)?;
+        let e = crate::records::exported_at(&self.hub, commit, Some(&self.exporter))?
+            .ok_or_else(|| format!("no {} at {commit}", config::ARCH_LEAN_MANIFEST))?;
+        let mut steps: Vec<(String, Option<String>, bool)> = Vec::new();
+        for m in e.arch.topological().into_iter().filter(|m| chosen.contains(m)) {
+            let cmd = e.arch.modules.iter().find(|x| x.name == m).and_then(|x| x.build_cmd.clone());
+            steps.push((m, cmd, true));
+        }
+        for r in e.arch.roots.iter().filter(|r| chosen.contains(&r.name)) {
+            steps.push((r.name.clone(), r.build_cmd.clone(), false));
+        }
+        for (n, cmd, module) in steps {
+            let Some(cmd) = cmd else {
+                println!("{n}: no build_cmd");
+                continue;
+            };
+            let dir = if module {
+                println!("building {n} (view)");
+                let paths = crate::arch::view_paths(&e.arch, &e.idls, &[n.as_str()], &[]);
+                let safe: String = n.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+                let dir = self.views.join(format!("build-{safe}"));
+                crate::arch::build_view(&self.work, &e.arch, &paths, &dir)?;
+                dir
+            } else {
+                println!("building {n} (full worktree)");
+                self.work.clone()
+            };
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let status = self
+                .sandbox
+                .command(&cmd, &dir)
+                .env("DASHBOARD_MODULE", &n)
+                .env("DASHBOARD_ROOT", &self.work)
+                .stdin(Stdio::null())
+                .status();
+            if module {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            match status {
+                Ok(s) if s.success() => {}
+                Ok(s) => return Err(format!("{n}: build_cmd exited {}", s.code().map_or("on a signal".into(), |c| c.to_string()))),
+                Err(err) => return Err(format!("{n}: build_cmd: {err}")),
+            }
+        }
+        Ok(())
+    }
+
     /// The run set of a task on `modules` at `commit` (spec §6.6): Lean's
     /// `impacted` (noted on the architecture tree), resolved against the
     /// commit's suite. The whole suite when `modules` is empty, or when

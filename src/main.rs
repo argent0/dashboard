@@ -144,6 +144,19 @@ enum Command {
         #[arg(long)]
         timeout: Option<u64>,
     },
+    /// Build the task's modules, or the named ones, from a worker's or task
+    /// agent's worktree (spec §21): snapshots the working tree, then runs
+    /// each module's `build_cmd` in its view, generators first, and each
+    /// root's in a full worktree of the snapshot. Compiles only, streams
+    /// the output and records no verdict; runs here even when `[player]
+    /// runs = "queued"`. Jailed like a check: a build that needs the
+    /// network needs `[sandbox] network = true`. Exits 1 at the first
+    /// failure.
+    Build {
+        /// Modules and roots to build, each among the task's `modules`.
+        #[arg(num_args = 0..)]
+        nodes: Vec<String>,
+    },
     /// Architecture checks (architect-v3.md): budgets and module boundaries
     /// from the Lean package `architecture/`. Meant to run as an ordinary
     /// suite check.
@@ -181,6 +194,7 @@ fn main() {
         Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
         Some(Command::Scope) => run_scope(args.home),
         Some(Command::Test { checks, no_wait, timeout }) => run_test(args.home, &checks, no_wait, timeout),
+        Some(Command::Build { nodes }) => run_build(args.home, &nodes),
         Some(Command::Arch { action: ArchAction::Check { root } }) => run_arch_check(&root),
         Some(Command::Arch { action: ArchAction::Gen { root, check } }) => run_arch_gen(&root, check),
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
@@ -768,6 +782,17 @@ fn run_test(home: Option<PathBuf>, checks: &[String], no_wait: bool, timeout: Op
             std::process::exit(2);
         }
     }
+}
+
+fn run_build(home: Option<PathBuf>, nodes: &[String]) {
+    let c = task_clone(home);
+    let hub = git::Git::new(c.home.hub());
+    let runner = cli_runner(&c.home, &hub_roadmap(&hub));
+    let (commit, local) = snapshot_for_run(&c, &hub, &runner);
+    let (_, modules) = task_modules(&hub, &c.slug);
+    let built = runner.build(&commit, &modules, nodes);
+    let _ = hub.delete_ref(&local);
+    built.unwrap_or_else(|e| fail(e));
 }
 
 /// Resolves the home and opens a tmux-backed player, exiting on error.

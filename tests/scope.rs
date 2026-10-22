@@ -25,10 +25,15 @@ check b_only where\n  cmd = \"false\"\n  covers = [b]\n";
 /// `modules = ["a"]`, posted (`s-check`: `test -f a/feature.txt`) and
 /// launched; returns the worker's clone.
 fn launched(runs: &str) -> (DirectorRepo, TempDir, Home, Player<NullSessions>, PathBuf) {
+    launched_with(runs, &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), "\"a\"")
+}
+
+/// `launched` on another manifest, with `s` on `modules = [<modules>]`.
+fn launched_with(runs: &str, manifest: &str, modules: &str) -> (DirectorRepo, TempDir, Home, Player<NullSessions>, PathBuf) {
     let repo = director_repo();
     let roadmap = std::fs::read_to_string(repo.path().join("roadmap.toml")).unwrap();
     write_file(repo.path(), "roadmap.toml", &roadmap.replace("runs = \"parallel\"", &format!("runs = \"{runs}\"")));
-    write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[("Tests", SUITE)]);
+    write_lean_arch(repo.path(), manifest, &[("ab", LEAN_AB_IDL)], &[("Tests", SUITE)]);
     for (f, t) in [("a/lib.rs", ""), ("b/lib.rs", ""), ("api/.keep", ""), ("stories/s.sh", "true\n")] {
         write_file(repo.path(), f, t);
     }
@@ -37,8 +42,8 @@ fn launched(runs: &str) -> (DirectorRepo, TempDir, Home, Player<NullSessions>, P
     let report = init::init(repo.path(), Some("proj"), Some(home_dir.path().join("home"))).expect("init");
     let home = Home { root: report.home };
     let mut player = Player::open(Home { root: home.root.clone() }, NullSessions::default()).expect("open");
-    let plan = "title = \"s\"\nphase = \"p1\"\nmodules = [\"a\"]\n";
-    director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", plan, "plan: s");
+    let plan = format!("title = \"s\"\nphase = \"p1\"\nmodules = [{modules}]\n");
+    director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", &plan, "plan: s");
     player.tick().expect("plan tick");
     write_file(repo.path(), "tasks/s/prompt.md", "make a/feature.txt\n");
     write_file(repo.path(), "tasks/s/task.toml", &format!("{plan}\n[check]\nname = \"s-check\"\ncmd = \"test -f a/feature.txt\"\n"));
@@ -227,4 +232,63 @@ fn a_full_tree_needs_no_widening() {
     assert_eq!(code, 0, "{text}");
     assert!(!text.contains("opened:"), "{text}");
     assert!(text.contains("ok   s_own"), "{text}");
+}
+
+/// The `a`/`b` manifest with `build_cmd`s: `a`'s proves its view lacks
+/// `b`, root `app`'s proves the full worktree has both; `b` has none.
+fn build_manifest(a_cmd: &str) -> String {
+    let app = "test -e b/lib.rs && test -e a/lib.rs && echo built-app";
+    LEAN_AB_MANIFEST.replace("max_ast = 100\n", &format!("max_ast = 100\n  build_cmd = {a_cmd:?}\n"))
+        + &format!("{APP_ROOT}  build_cmd = {app:?}\n")
+}
+
+const BUILD_A: &str = "test ! -e b/lib.rs && echo built-a";
+
+#[test]
+fn build_compiles_modules_in_their_views_and_roots_in_the_full_tree() {
+    let (_repo, _home_dir, home, _player, clone) = launched_with("parallel", &build_manifest(BUILD_A), "\"a\", \"app\"");
+    assert!(!clone.join("b").exists());
+    let (code, text) = dash(&clone, &home, "build");
+    assert_eq!(code, 0, "{text}");
+    let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{s}: {text}"));
+    assert!(at("building a (view)") < at("built-a") && at("built-a") < at("building app (full worktree)") && at("building app (full worktree)") < at("built-app"), "{text}");
+    let (code, text) = dash_args(&clone, &home, &["build", "a"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("built-a") && !text.contains("built-app"), "{text}");
+    assert!(Git::new(home.hub()).for_each_ref("refs/dashboard/test/*").is_empty());
+}
+
+#[test]
+fn build_refuses_a_node_outside_the_task() {
+    let (_repo, _home_dir, home, _player, clone) = launched_with("parallel", &build_manifest(BUILD_A), "\"a\", \"app\"");
+    let (code, text) = dash_args(&clone, &home, &["build", "b"]);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("\"b\" is outside the task's modules: a, app"), "{text}");
+}
+
+#[test]
+fn build_reports_a_node_without_build_cmd() {
+    let (_repo, _home_dir, home, _player, clone) = launched_with("parallel", &build_manifest(BUILD_A), "\"a\", \"b\"");
+    let (code, text) = dash(&clone, &home, "build");
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("built-a") && text.contains("b: no build_cmd"), "{text}");
+}
+
+#[test]
+fn build_runs_locally_when_runs_is_queued() {
+    let (_repo, _home_dir, home, _player, clone) = launched_with("queued", &build_manifest(BUILD_A), "\"a\"");
+    let (code, text) = dash(&clone, &home, "build");
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("built-a"), "{text}");
+    let queued = std::fs::read_dir(home.queue()).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(queued, 0, "no request filed");
+    assert!(Git::new(home.hub()).for_each_ref("refs/dashboard/test/*").is_empty());
+}
+
+#[test]
+fn build_stops_at_the_first_failure() {
+    let (_repo, _home_dir, home, _player, clone) = launched_with("parallel", &build_manifest("false"), "\"a\", \"app\"");
+    let (code, text) = dash(&clone, &home, "build");
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("a: build_cmd exited 1") && !text.contains("building app"), "{text}");
 }
