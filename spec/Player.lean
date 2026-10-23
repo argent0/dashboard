@@ -10,6 +10,7 @@ It imports the data of both languages and none of their syntax, so their
 keywords stay free as names here.
 -/
 import Architect.Types
+import Architect.Tests.Types
 import Planner.Types
 
 namespace Spec

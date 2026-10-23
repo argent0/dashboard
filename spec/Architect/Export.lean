@@ -6,6 +6,7 @@ Only the generated runner imports this (it imports `Lean`); API files don't.
 -/
 import Lean
 import Architect
+import Architect.Tests
 
 open Lean
 

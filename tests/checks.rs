@@ -452,7 +452,7 @@ module a where\n  lang = rust\n  paths = [\"a\"]\n  test_cmd = \"test -e a/lib.r
 module b where\n  lang = rust\n  paths = [\"b\"]\n\n\
 api ab : a → b where\n  paths = [\"api\"]\n";
 
-const AB_SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+const AB_SUITE: &str = "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 check only_a where\n  cmd = \"test ! -e b/lib.rs && test -e a/lib.rs\"\n  covers = [a]\n\n\
 check sees_both where\n  cmd = \"test -e a/lib.rs && test -e b/lib.rs && test -e api/gen.rs\"\n  covers = [a, b]\n\n\
 check global where\n  cmd = \"test -e b/lib.rs\"\n  covers = all\n";
@@ -571,7 +571,7 @@ module b where\n  lang = rust\n  paths = [\"b\"]\n  test_cmd = \"echo >> {l}/b &
 api ab : a → b where\n  paths = [\"api\"]\n"
     );
     let suite = format!(
-        "import Architecture\nopen Dashboard\n\n\
+        "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 check a1 where\n  cmd = \"echo >> {l}/a1 && grep -q ok a/src.rs && grep -q ok a/tests/a1.rs && test ! -e a/tests/a2.rs\"\n  covers = [a]\n  files = [\"a/tests/a1.rs\"]\n\n\
 check a2 where\n  cmd = \"echo >> {l}/a2 && grep -q ok a/src.rs && grep -q ok a/tests/a2.rs\"\n  covers = [a]\n  files = [\"a/tests/a2.rs\"]\n\n\
 check b1 where\n  cmd = \"echo >> {l}/b1 && grep -q ok b/src.rs && grep -q ok b/tests/b1.rs\"\n  covers = [b]\n  files = [\"b/tests/b1.rs\"]\n"

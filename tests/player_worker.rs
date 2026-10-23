@@ -1282,7 +1282,7 @@ fn finish_touching_an_api_file_or_the_manifest_is_rejected_with_pins() {
 
 /// Main's suite on the `a`/`b` architecture: `unit` (all) and `story`
 /// covering both, with its own file `stories/s.sh`.
-const AB_SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+const AB_SUITE: &str = "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 check unit where\n  cmd = \"true\"\n  covers = all\n\n\
 check story where\n  cmd = \"sh stories/s.sh\"\n  covers = [a, b]\n  files = [\"stories/s.sh\"]\n";
 
@@ -1399,7 +1399,7 @@ fn ab_shared() -> String {
 
 /// Main's suite: `unit` (all) and `b_only` covering `b`, which fails
 /// once `a/feature.txt` and `b/moved.txt` both exist in the tree.
-const RUN_SET_SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+const RUN_SET_SUITE: &str = "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 check unit where\n  cmd = \"true\"\n  covers = all\n\n\
 check b_only where\n  cmd = \"test ! -e \\\"$DASHBOARD_ROOT/a/feature.txt\\\" || test ! -e b/moved.txt\"\n  covers = [b]\n";
 
@@ -1532,7 +1532,7 @@ fn the_worker_tree_holds_only_the_tasks_files() {
 
 /// Main's suite with `b_story` too: a check outside `a`'s run set whose
 /// file, `stories/b.sh`, is absent from `a`'s worker tree.
-const AB_B_SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+const AB_B_SUITE: &str = "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 check unit where\n  cmd = \"true\"\n  covers = all\n\n\
 check story where\n  cmd = \"sh stories/s.sh\"\n  covers = [a, b]\n  files = [\"stories/s.sh\"]\n\n\
 check b_story where\n  cmd = \"sh stories/b.sh\"\n  covers = [b]\n  files = [\"stories/b.sh\"]\n";

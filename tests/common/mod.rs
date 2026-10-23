@@ -267,7 +267,7 @@ pub fn write_lean_arch(repo: &Path, manifest: &str, apis: &[(&str, &str)], tests
 
 /// A suite for the `a`/`b` architecture: `ab_story` covering both with its
 /// own `stories` files, `arch` covering all, and `test_paths = ["stories"]`.
-pub const LEAN_AB_TESTS: &str = "import Architecture\nopen Dashboard\n\n\
+pub const LEAN_AB_TESTS: &str = "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 suite where\n  test_paths = [\"stories\"]\n\n\
 check ab_story where\n  cmd = \"true\"\n  covers = [a, b]\n  files = [\"stories\"]\n\n\
 check arch where\n  cmd = \"true\"\n  covers = all\n";
@@ -280,7 +280,7 @@ pub fn lean_check(name: &str, cmd: &str, covers: &str) -> String {
 /// A per-task suite file (`Tests/<slug>.lean` or `.worker.lean`) holding one
 /// check.
 pub fn lean_task_tests(name: &str, cmd: &str, covers: &str) -> String {
-    format!("import Architecture\nopen Dashboard\n\n{}", lean_check(name, cmd, covers))
+    format!("import Architecture\nimport Architect.Tests\nopen Dashboard\n\n{}", lean_check(name, cmd, covers))
 }
 
 /// `director_repo()`'s manifest: no modules, one root `app` over `src/`,
@@ -323,7 +323,7 @@ fn lean_strs(xs: &[String]) -> String {
 /// Lean declarations; a check without `covers` gets `default_covers`.
 fn lean_checks(toml_text: &str, with_block: bool, default_covers: &str) -> String {
     let t: toml::Table = toml::from_str(toml_text).expect("fixture suite TOML");
-    let mut out = String::from("import Architecture\nopen Dashboard\n\n");
+    let mut out = String::from("import Architecture\nimport Architect.Tests\nopen Dashboard\n\n");
     if with_block {
         let paths: Vec<String> = t
             .get("test_paths")

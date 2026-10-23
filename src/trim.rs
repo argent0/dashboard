@@ -343,7 +343,7 @@ pub fn message(slug: &str, plan: &Plan) -> String {
 mod tests {
     use super::*;
 
-    const TEXT: &str = "import Architecture\nopen Dashboard\n\n\
+    const TEXT: &str = "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 -- keeps\ncheck «keep-me» where\n  cmd = \"true\"\n  covers = [a]\n\n\
 /-- Scaffolding,\n  over two lines. -/\ncheck drop_me where\n  cmd = \"sh x.sh\"\n\n  covers = [a]\n  files = [\"x.sh\"]\n\n\
 check «check» where\n  cmd = \"true\"\n  covers = all\n";
@@ -355,7 +355,7 @@ check «check» where\n  cmd = \"true\"\n  covers = all\n";
         assert_eq!(removed, ["drop_me"]);
         assert_eq!(
             out,
-            "import Architecture\nopen Dashboard\n\n-- keeps\ncheck «keep-me» where\n  cmd = \"true\"\n  covers = [a]\n\n\
+            "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n-- keeps\ncheck «keep-me» where\n  cmd = \"true\"\n  covers = [a]\n\n\
 check «check» where\n  cmd = \"true\"\n  covers = all\n"
         );
         let (out, removed) = remove_checks(TEXT, &["check", "keep-me", "absent"]);

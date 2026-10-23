@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 /// Main's suite: `unit` (all), `story` covering both modules with its own
 /// file, and `b_only` covering `b`, which always fails.
-const SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+const SUITE: &str = "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 check unit where\n  cmd = \"true\"\n  covers = all\n\n\
 check story where\n  cmd = \"sh stories/s.sh\"\n  covers = [a, b]\n  files = [\"stories/s.sh\"]\n\n\
 check b_only where\n  cmd = \"false\"\n  covers = [b]\n";
@@ -177,7 +177,7 @@ fn a_queued_run_takes_check_names() {
 
 /// `s`'s worker file declaring `s_own` (covering `a`), whose file is
 /// `stories/own.sh`, outside the worker's tree.
-const S_OWN: &str = "import Architecture\nopen Dashboard\n\n\
+const S_OWN: &str = "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 check s_own where\n  cmd = \"sh stories/own.sh\"\n  covers = [a]\n  files = [\"stories/own.sh\"]\n";
 
 fn staged(clone: &PathBuf) -> String {

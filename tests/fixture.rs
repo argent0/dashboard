@@ -24,7 +24,7 @@ fixture own where\n  users = [a]\n  paths = [\"fixtures/a\"]\n\n\
 fixture both where\n  users = [a, b]\n  paths = [\"fixtures/ab\"]\n  max_bytes = 100\n";
 
 /// `b_story` sees the shared fixture and never `a`'s own.
-const SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+const SUITE: &str = "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 check unit where\n  cmd = \"true\"\n  covers = all\n\n\
 check a_story where\n  cmd = \"test -f fixtures/a/stand.txt && grep -q ok fixtures/ab/h.txt\"\n  covers = [a]\n\n\
 check b_story where\n  cmd = \"test ! -e fixtures/a && grep -q ok fixtures/ab/h.txt\"\n  covers = [b]\n";
@@ -49,7 +49,7 @@ fn hub_with_task(modules: &str) -> (DirectorRepo, TempDir, Home, Player<NullSess
 fn post(repo: &DirectorRepo, extra: &[(&str, &str)], check_files: &str) {
     write_file(repo.path(), "tasks/s/prompt.md", "make a/feature.txt\n");
     let check = format!(
-        "import Architecture\nopen Dashboard\n\ncheck s_check where\n  cmd = \"test -f a/feature.txt\"\n  covers = [a]\n  files = {check_files}\n"
+        "import Architecture\nimport Architect.Tests\nopen Dashboard\n\ncheck s_check where\n  cmd = \"test -f a/feature.txt\"\n  covers = [a]\n  files = {check_files}\n"
     );
     write_file(repo.path(), &tests_file("s"), &check);
     for (f, t) in extra {
@@ -76,7 +76,7 @@ fn a_post_breaking_a_shared_fixture_is_rejected_and_its_users_join_the_run_set()
     write_file(
         repo.path(),
         &tests_file("s"),
-        "import Architecture\nopen Dashboard\n\ncheck s_check where\n  cmd = \"sh a/tests/new.sh\"\n  covers = [a]\n  files = [\"a/tests/new.sh\"]\n",
+        "import Architecture\nimport Architect.Tests\nopen Dashboard\n\ncheck s_check where\n  cmd = \"sh a/tests/new.sh\"\n  covers = [a]\n  files = [\"a/tests/new.sh\"]\n",
     );
     commit(repo.path(), "post: s, the fixture extended");
     let report = player.tick().expect("post tick");

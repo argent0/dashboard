@@ -1,8 +1,8 @@
 /-
 The architecture's syntax (architect-v3.md): the commands a director writes
 in `architecture/` (`architecture`, `module`, `root`, `api`, `fixture`,
-`check`, `suite`, `idl`, `frame` … `where`), each elaborating to the data of
-`Architect.Types`. Every word atom of a `syntax` line here is a token in
+`idl`, `frame` … `where`), each elaborating to the data of
+`Architect.Types`. The suite's commands live in `Architect.Tests.Syntax`. Every word atom of a `syntax` line here is a token in
 every file that imports it, so a name spelled like one needs `«…»`.
 
 Vendored as `architecture/Architect/Syntax.lean`. Plain Lean (no
@@ -67,38 +67,6 @@ macro_rules
     let s := Lean.Syntax.mkStrLit (identText n)
     let vs ← (k.zip v).mapM fun (key, val) => fixtureField key val
     `(def $n : Dashboard.Fixture := { name := $s, $[$k:ident := $vs],* })
-
-syntax (name := archCheck) "check " ident " where" manyIndent(group(ident " = " term)) : command
-syntax (name := archSuite) "suite" " where" manyIndent(group(ident " = " term)) : command
-
-/-- `covers = all` sets `all`; `covers = [a, b]` coerces each element to a
-`Component`, so modules and roots mix. A check named like a module is a
-redeclaration. -/
-macro_rules
-  | `(check $n:ident where $[$k:ident = $v:term]*) => do
-    let s := Lean.Syntax.mkStrLit (identText n)
-    let mut ks : Array Lean.Ident := #[]
-    let mut vs : Array (Lean.TSyntax `term) := #[]
-    for key in k, val in v do
-      if key.getId.eraseMacroScopes != `covers then
-        ks := ks.push key
-        vs := vs.push val
-      else if val.raw.isIdent && val.raw.getId.eraseMacroScopes == `all then
-        ks := ks.push (Lean.mkIdent `all)
-        vs := vs.push (← `(true))
-      else
-        match val with
-        | `([$xs,*]) =>
-          let elems ← xs.getElems.mapM fun x => `(($x : Dashboard.Component))
-          ks := ks.push key
-          vs := vs.push (← `([$elems,*]))
-        | _ => Lean.Macro.throwErrorAt val "covers is `all` or a list of modules and roots: covers = [a, b]"
-    `(def $n : Dashboard.Check := { name := $s, $[$ks:ident := $vs],* })
-
-macro_rules
-  | `(suite where $[$k:ident = $v:term]*) => do
-    let id := Lean.mkIdent `suite
-    `(def $id : Dashboard.Suite := { $[$k:ident := $v:term],* })
 
 -- ---------------------------------------------------------------------------
 -- The IDL DSL

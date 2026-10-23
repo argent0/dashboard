@@ -2,13 +2,15 @@
 The plan's data (spec §8.2, §10, §14, §15): the types a project's tasks
 package writes, `tasks/Roadmap.lean` (phases, limits, the player's settings)
 and `tasks/<slug>/Task.lean` (one task). It names the architecture's nodes,
-so it imports `Architect.Types`; it imports no syntax, so
+so it imports `Architect.Types` (and `Architect.Tests.Types` for a flaky
+fix's check); it imports no syntax, so
 `tasks/Roadmap.lean`, importing it alone, writes every field by its name
 (`strikes := { suite := 3 }`).
 
 Vendored as `architecture/Planner/Types.lean`.
 -/
 import Architect.Types
+import Architect.Tests.Types
 
 namespace Dashboard
 
@@ -145,8 +147,8 @@ inductive Task
   /-- An answer to a pinned question, backed by claims; never merges (§14). -/
   | spike (h : Header)
   /-- Replaces a flaky test with a stable one (§15): `fix_paths` are unpinned,
-  `stable` is the check proving the replacement stable (`check` is a DSL
-  keyword), `evidence` proves the flake. -/
+  `stable` is the check proving the replacement stable, `evidence` proves
+  the flake. -/
   | flakyFix (h : Header) (stable : Check) (fix_paths : List String)
       (replace : List Replace) (evidence : List Evidence)
   /-- Makes the `slow` suite checks faster (§15.1). -/

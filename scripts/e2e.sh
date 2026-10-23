@@ -326,7 +326,7 @@ FAKE_TASK_AGENT_EOF
 task_tests() {
   mkdir -p "$(dirname "$1")"
   esc=$(printf '%s' "$3" | sed 's/\\/\\\\/g; s/"/\\"/g')
-  printf 'import Architecture\nopen Dashboard\n\ncheck «%s» where\n  cmd = "%s"\n  covers = %s\n%s' "$2" "$esc" "${4:-[app]}" "${5:-}" >"$1"
+  printf 'import Architecture\nimport Architect.Tests\nopen Dashboard\n\ncheck «%s» where\n  cmd = "%s"\n  covers = %s\n%s' "$2" "$esc" "${4:-[app]}" "${5:-}" >"$1"
 }
 
 mkdir -p "$AGENT_LOGS"
@@ -956,7 +956,7 @@ if [ -e b/README.md ]; then echo full; elif [ -e architecture/Tests.lean ]; then
 "__BIN__" build a --home "__HOME__" >"$L/a.build" 2>&1 || true
 echo ok > a/a.txt
 mkdir -p architecture/Tests stories
-printf 'import Architecture\nopen Dashboard\n\ncheck a_own where\n  cmd = "sh stories/a_own.sh"\n  covers = [a]\n  files = ["stories/a_own.sh"]\n' > architecture/Tests/a.worker.lean
+printf 'import Architecture\nimport Architect.Tests\nopen Dashboard\n\ncheck a_own where\n  cmd = "sh stories/a_own.sh"\n  covers = [a]\n  files = ["stories/a_own.sh"]\n' > architecture/Tests/a.worker.lean
 echo 'test -f a/a.txt' > stories/a_own.sh
 "__BIN__" test --home "__HOME__" >"$L/a.test" 2>&1 || true
 touch "$L/a.done"

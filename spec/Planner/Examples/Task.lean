@@ -36,18 +36,17 @@ elab "#writable " ns:ident* : command => do
 
 #writable Header Replace Evidence Dashboard.Task
 
-/-- error: Dashboard.StrikeLimits: [suite] are tokens here; a director writes them only as «…» -/
-#guard_msgs in
 #writable StrikeLimits
+
+/-- error: Dashboard.Token: [store] are tokens here; a director writes them only as «…» -/
+#guard_msgs in
+#writable Token
 
 module core where
   lang = rust
 
-check stable where
-  cmd = "cargo test x"
-  covers = [core]
-  runs = 20
-  min_pass = 20
+def stable : Check :=
+  { name := "stable", cmd := "cargo test x", covers := [core], runs := 20, min_pass := 20 }
 
 def header (s : Slug) : Header :=
   { slug := s, title := "Title", phase := "p1", milestone := false, dependsOn := ["alpha"],

@@ -1434,7 +1434,7 @@ fn a_worker_push_while_contested_is_ignored_not_struck() {
 
 /// Main's suite on the `a`/`b` architecture: `unit` (all) and `story`
 /// covering `b` with its own file `stories/b.sh`.
-const AB_SUITE: &str = "import Architecture\nopen Dashboard\n\n\
+const AB_SUITE: &str = "import Architecture\nimport Architect.Tests\nopen Dashboard\n\n\
 check unit where\n  cmd = \"true\"\n  covers = all\n\n\
 check story where\n  cmd = \"sh stories/b.sh\"\n  covers = [b]\n  files = [\"stories/b.sh\"]\n";
 
