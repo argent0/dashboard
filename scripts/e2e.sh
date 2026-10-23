@@ -838,7 +838,7 @@ git -C "$DIR_REPO" merge -q --ff-only hub/main
 # The module test only means something in `arch check`'s view: as the
 # suite's implicit `zeta` check (outside a view) it passes.
 cat >"$DIR_REPO/architecture/Architecture.lean" <<'EOF'
-import Dashboard
+import Architect
 open Dashboard
 
 architecture where

@@ -780,7 +780,7 @@ fn player_once_via_binary_prints_a_report() {
 fn a_budget_raise_needs_a_reason_and_a_small_step_and_is_noted_and_shown() {
     use dashboard::{render, state};
     let manifest = |ast: u32| {
-        format!("import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\nmodule a where\n  lang = rust\n  paths = [\"a\"]\n  max_ast = {ast}\n")
+        format!("import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\nmodule a where\n  lang = rust\n  paths = [\"a\"]\n  max_ast = {ast}\n")
     };
     let repo = director_repo();
     write_file(repo.path(), "architecture/Architecture.lean", &manifest(100));

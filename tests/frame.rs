@@ -13,7 +13,7 @@ use dashboard::sandbox::Sandbox;
 use std::path::Path;
 use std::process::Command;
 
-const MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
+const MANIFEST: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
 module core where\n  lang = rust\n  paths = [\"core\"]\n\n\
 module alpha where\n  lang = rust\n  paths = [\"alpha\"]\n\n\
 module beta where\n  lang = rust\n  paths = [\"beta\"]\n\n\

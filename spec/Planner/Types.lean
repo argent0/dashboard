@@ -2,13 +2,13 @@
 The plan's data (spec §8.2, §10, §14, §15): the types a project's tasks
 package writes, `tasks/Roadmap.lean` (phases, limits, the player's settings)
 and `tasks/<slug>/Task.lean` (one task). It names the architecture's nodes,
-so it imports `Dashboard.ArchTypes`; it imports no syntax, so
+so it imports `Architect.Types`; it imports no syntax, so
 `tasks/Roadmap.lean`, importing it alone, writes every field by its name
 (`strikes := { suite := 3 }`).
 
-Vendored as `architecture/Dashboard/PlanTypes.lean`.
+Vendored as `architecture/Planner/Types.lean`.
 -/
-import Dashboard.ArchTypes
+import Architect.Types
 
 namespace Dashboard
 

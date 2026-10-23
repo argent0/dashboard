@@ -5,7 +5,7 @@ the shape `dashboard` reads (`config::ArchConfig` plus every `idl::Idl`).
 Only the generated runner imports this (it imports `Lean`); API files don't.
 -/
 import Lean
-import Dashboard
+import Architect
 
 open Lean
 

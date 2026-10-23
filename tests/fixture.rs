@@ -15,7 +15,7 @@ use dashboard::player::{NullSessions, Player};
 use tempfile::TempDir;
 
 /// Modules `a` and `b`, a fixture `own` of `a` alone and `both` shared.
-const MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n\n\
+const MANIFEST: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n\n\
 module a where\n  lang = rust\n  paths = [\"a\"]\n  test_cmd = \"for f in a/tests/*.sh; do [ -e $f ] || continue; sh $f || exit 1; done\"\n\n\
 module b where\n  lang = rust\n  paths = [\"b\"]\n\n\
 root app where\n  lang = rust\n  paths = [\"src\"]\n\n\

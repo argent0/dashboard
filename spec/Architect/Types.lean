@@ -4,7 +4,7 @@ The architecture's data (architect-v3.md): the types a project's
 meaning of the IDL's prims. Together they make the manifest: settings,
 modules, roots, APIs, fixtures, checks, suite, IDLs and frames.
 
-Vendored by `dashboard arch gen` as `architecture/Dashboard/ArchTypes.lean`;
+Vendored by `dashboard arch gen` as `architecture/Architect/Types.lean`;
 a copy that differs from the installed dashboard's fails `dashboard arch
 check`. Plain Lean with no `syntax`: a file importing it alone (the spec's
 model, `tasks/Roadmap.lean`) keeps every word free as a name.

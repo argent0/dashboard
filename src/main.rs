@@ -57,7 +57,7 @@ enum ArchAction {
         root: PathBuf,
     },
     /// Regenerate every API's bindings from its IDL, and the vendored
-    /// `architecture/Dashboard` library. On a root without
+    /// `architecture/Architect` and `Planner` libraries. On a root without
     /// `architecture/`, write a starter package (no modules, one
     /// `covers = all` check). With --check, write nothing and exit 1 if
     /// anything is stale.

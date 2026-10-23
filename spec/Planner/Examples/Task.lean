@@ -6,8 +6,8 @@ named types is spelled like a token; one example per kind writes every
 field by its name.
 -/
 import Lean
-import Dashboard
-import Dashboard.PlanTypes
+import Architect
+import Planner.Types
 
 namespace Spec.Examples.Task
 open Lean Elab Command Dashboard

@@ -2,7 +2,7 @@
 A roadmap as `tasks/Roadmap.lean` writes it: importing the plan's data
 alone, every field by its name. Elaborating is the test.
 -/
-import Dashboard.PlanTypes
+import Planner.Types
 
 namespace Spec.Examples.Roadmap
 open Dashboard

@@ -3,16 +3,21 @@ open Lake DSL
 
 /-
 The spec package: the single source of truth for the loop and the
-architecture (handover.md). `Dashboard` holds the files `dashboard arch gen`
-vendors into a project, under the module names the project sees; `Spec`
-holds the model, which imports their data alone (`Dashboard.ArchTypes`,
-`Dashboard.PlanTypes`).
+architecture (handover.md), one library per domain. `Architect` and
+`Planner` hold what a director writes with; `dashboard arch gen` vendors
+`Architect`, `Architect.*` and `Planner.Types` into a project under these
+same module names. `Player` is the model, importing their data alone.
 -/
 package spec
 
 @[default_target]
-lean_lib Dashboard where
-  globs := #[.andSubmodules `Dashboard]
+lean_lib Architect where
+  globs := #[.andSubmodules `Architect]
 
 @[default_target]
-lean_lib Spec
+lean_lib Planner where
+  globs := #[.submodules `Planner]
+
+@[default_target]
+lean_lib Player where
+  globs := #[.andSubmodules `Player]

@@ -2,13 +2,13 @@
 The architecture's syntax (architect-v3.md): the commands a director writes
 in `architecture/` (`architecture`, `module`, `root`, `api`, `fixture`,
 `check`, `suite`, `idl`, `frame` … `where`), each elaborating to the data of
-`Dashboard.ArchTypes`. Every word atom of a `syntax` line here is a token in
+`Architect.Types`. Every word atom of a `syntax` line here is a token in
 every file that imports it, so a name spelled like one needs `«…»`.
 
-Vendored as `architecture/Dashboard/ArchSyntax.lean`. Plain Lean (no
+Vendored as `architecture/Architect/Syntax.lean`. Plain Lean (no
 `import Lean`), so an API file elaborates fast.
 -/
-import Dashboard.ArchTypes
+import Architect.Types
 
 namespace Dashboard
 

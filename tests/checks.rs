@@ -447,7 +447,7 @@ fn changing_the_retry_policy_invalidates_the_cached_verdict() {
 // Run sets and views (spec §6.6)
 // --------------------------------------------------------------------------
 
-const AB_SHARED: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n  shared = [\"shared.txt\"]\n\n\
+const AB_SHARED: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n  shared = [\"shared.txt\"]\n\n\
 module a where\n  lang = rust\n  paths = [\"a\"]\n  test_cmd = \"test -e a/lib.rs\"\n\n\
 module b where\n  lang = rust\n  paths = [\"b\"]\n\n\
 api ab : a → b where\n  paths = [\"api\"]\n";
@@ -565,7 +565,7 @@ fn a_diff_touching_shared_runs_the_whole_suite() {
 fn view_cache_hub(log: &std::path::Path) -> (DirectorRepo, TempDir, Home, String) {
     let l = log.display();
     let arch = format!(
-        "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n  shared = [\"shared.txt\"]\n\n\
+        "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n  shared = [\"shared.txt\"]\n\n\
 module a where\n  lang = rust\n  paths = [\"a\"]\n  test_cmd = \"echo >> {l}/a && grep -q ok a/src.rs && grep -q ok a/tests/a1.rs && grep -q ok a/tests/a2.rs\"\n\n\
 module b where\n  lang = rust\n  paths = [\"b\"]\n  test_cmd = \"echo >> {l}/b && grep -q ok b/src.rs\"\n\n\
 api ab : a → b where\n  paths = [\"api\"]\n"

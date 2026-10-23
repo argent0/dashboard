@@ -581,11 +581,11 @@ mod tests {
 
     #[test]
     fn entries_follow_their_kind() {
-        let m = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n-- A.\nmodule «a» where\n  lang = rust\n  paths = [\"a\"]\n\n-- The root.\nroot app where\n  lang = rust\n\napi «a-app» : «a» → app where\n  paths = [\"apis/a-app\"]\n";
+        let m = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n-- A.\nmodule «a» where\n  lang = rust\n  paths = [\"a\"]\n\n-- The root.\nroot app where\n  lang = rust\n\napi «a-app» : «a» → app where\n  paths = [\"apis/a-app\"]\n";
         let out = insert_entries(m, Some("-- B.\nmodule «b» where\n  lang = rust\n"), &["api «b-a» : «b» → «a» where\n  paths = [\"apis/b-a\"]\n".to_string()]);
         assert_eq!(
             out,
-            "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n-- A.\nmodule «a» where\n  lang = rust\n  paths = [\"a\"]\n\n\
+            "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n-- A.\nmodule «a» where\n  lang = rust\n  paths = [\"a\"]\n\n\
              -- B.\nmodule «b» where\n  lang = rust\n\n-- The root.\nroot app where\n  lang = rust\n\n\
              api «a-app» : «a» → app where\n  paths = [\"apis/a-app\"]\n\napi «b-a» : «b» → «a» where\n  paths = [\"apis/b-a\"]\n"
         );

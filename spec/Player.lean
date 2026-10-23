@@ -9,8 +9,8 @@ its tree (`Oracles`): the model reads a manifest or a plan only through them.
 It imports the data of both languages and none of their syntax, so their
 keywords stay free as names here.
 -/
-import Dashboard.ArchTypes
-import Dashboard.PlanTypes
+import Architect.Types
+import Planner.Types
 
 namespace Spec
 open Dashboard

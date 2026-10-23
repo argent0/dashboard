@@ -11,7 +11,7 @@ use common::*;
 use dashboard::arch::{self, check, sync_bindings};
 use dashboard::sandbox::Sandbox;
 
-const MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
+const MANIFEST: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
 module foldable where\n  lang = rust\n  paths = [\"engine/instances\"]\n\n\
 module client where\n  lang = typescript\n  paths = [\"web/client\"]\n\n\
 module sandbox where\n  lang = typescript\n  paths = [\"web/sandbox\"]\n  \
@@ -89,7 +89,7 @@ fn a_typescript_api_owning_container_classes_is_still_refused() {
     assert!(dashboard::lean::available(), "needs `lake`");
     let d = tempfile::tempdir().unwrap();
     let r = d.path();
-    let manifest = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n\n\
+    let manifest = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n\n\
 module client where\n  lang = typescript\n  paths = [\"web/client\"]\n\n\
 module sandbox where\n  lang = typescript\n  paths = [\"web/sandbox\"]\n\n\
 api «client-sandbox» : client → sandbox where\n  paths = [\"apis/client-sandbox\"]\n";

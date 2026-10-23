@@ -12,7 +12,7 @@ use common::*;
 use dashboard::arch::{self, check, sync_bindings};
 use dashboard::sandbox::Sandbox;
 
-const MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n  shared = [\"engine/Cargo.toml\"]\n\n\
+const MANIFEST: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n  shared = [\"engine/Cargo.toml\"]\n\n\
 module foldable where\n  lang = rust\n  paths = [\"engine/instances\"]\n\n\
 module db where\n  lang = rust\n  paths = [\"engine/src\"]\n  \
 test_cmd = \"cd engine && CARGO_TARGET_DIR=$DASHBOARD_ROOT/engine/target cargo test --offline -q 2>&1 | tail -30\"\n\n\

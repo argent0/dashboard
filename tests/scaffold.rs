@@ -19,7 +19,7 @@ use tempfile::TempDir;
 
 /// Two modules over `mods/`, the root `app`, one API `a → b`, and a
 /// `lock.txt` every build appends to (a lockfile in `shared`).
-const MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n  shared = [\"lock.txt\"]\n  source_paths = [\"mods\"]\n\n\
+const MANIFEST: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n  shared = [\"lock.txt\"]\n  source_paths = [\"mods\"]\n\n\
 -- The first.\nmodule «a» where\n  lang = rust\n  paths = [\"mods/a\"]\n\n\
 -- The second.\nmodule «b» where\n  lang = rust\n  paths = [\"mods/b\"]\n\n\
 root app where\n  lang = rust\n  paths = [\"src\"]\n\n\

@@ -84,7 +84,7 @@ fn lean_type_checks_the_manifest_and_the_tool_checks_the_rest() {
     assert!(headroom.iter().any(|h| h.contains("string max_len 300/400")), "{headroom:?}");
 }
 
-const MANIFEST3: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
+const MANIFEST3: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
 module foldable where\n  lang = rust\n  paths = [\"foldable\"]\n\n\
 module db where\n  lang = rust\n  paths = [\"db\"]\n\n\
 module nutrition where\n  lang = rust\n  paths = [\"nutrition\"]\n\n\
@@ -142,7 +142,7 @@ fn fns_sums_elements_and_containers_export_with_their_measures() {
     assert!(problems.iter().any(|p| p.contains("generator db must consume foldable-db")), "{problems:?}");
 }
 
-const PROOFS_MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
+const PROOFS_MANIFEST: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
 module db where\n  lang = rust\n  paths = [\"db\"]\n\n\
 module nutrition where\n  lang = rust\n  paths = [\"nutrition\"]\n\n\
 module web where\n  lang = rust\n  paths = [\"web\"]\n\n\
@@ -270,7 +270,7 @@ fn refinements_and_tokens_are_elaborated_exported_budgeted_and_linted() {
     }
 }
 
-const REFS_MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
+const REFS_MANIFEST: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
 module testing where\n  lang = typescript\n  paths = [\"testing\"]\n\n\
 module approval where\n  lang = typescript\n  paths = [\"approval\"]\n\n\
 module «store» where\n  lang = typescript\n  paths = [\"store\"]\n\n\
@@ -400,10 +400,10 @@ fn a_fresh_package_builds_from_the_lake_cache() {
     lean::export(&pkg(&d), &Sandbox::off()).expect("export");
     let cache = lean::lake_cache_dir().unwrap().join("build");
     assert!(cache.is_dir(), "{}", cache.display());
-    let olean = "lib/lean/Dashboard.olean";
+    let olean = "lib/lean/Architect.olean";
     let e = project();
     write_lean_arch(e.path(), LEAN_AB_MANIFEST, &[("ab", LEAN_AB_IDL)], &[("Tests", LEAN_AB_TESTS)]);
     lean::export(&pkg(&e), &Sandbox::off()).expect("export from the cache");
     let mtime = |p: std::path::PathBuf| std::fs::metadata(&p).and_then(|m| m.modified()).unwrap();
-    assert_eq!(mtime(pkg(&e).join(".lake/build").join(olean)), mtime(cache.join(olean)), "Dashboard.olean was rebuilt, not seeded");
+    assert_eq!(mtime(pkg(&e).join(".lake/build").join(olean)), mtime(cache.join(olean)), "Architect.olean was rebuilt, not seeded");
 }

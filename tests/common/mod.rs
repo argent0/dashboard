@@ -241,7 +241,7 @@ pub fn worker_empty_commit(hub_path: &Path, slug: &str, msg: &str) -> String {
 
 /// A minimal Lean architecture: two Rust modules `a` and `b` and one API
 /// `ab` between them (`api/`), with `a`'s AST budget set.
-pub const LEAN_AB_MANIFEST: &str = "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n\n\
+pub const LEAN_AB_MANIFEST: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n\n\
 module a where\n  lang = rust\n  paths = [\"a\"]\n  max_ast = 100\n\n\
 module b where\n  lang = rust\n  paths = [\"b\"]\n\n\
 api ab : a → b where\n  paths = [\"api\"]\n";
@@ -286,7 +286,7 @@ pub fn lean_task_tests(name: &str, cmd: &str, covers: &str) -> String {
 /// `director_repo()`'s manifest: no modules, one root `app` over `src/`,
 /// so every fixture task can name `modules = ["app"]`.
 pub const STARTER_MANIFEST: &str =
-    "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 0\n\nroot app where\n  lang = rust\n  paths = [\"src\"]\n";
+    "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 0\n\nroot app where\n  lang = rust\n  paths = [\"src\"]\n";
 
 /// The root `app` over `src/`, to append to another manifest.
 pub const APP_ROOT: &str = "\nroot app where\n  lang = rust\n  paths = [\"src\"]\n";
