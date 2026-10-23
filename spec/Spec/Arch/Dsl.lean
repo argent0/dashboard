@@ -18,7 +18,7 @@ inductive Lang
   | rust
   | typescript
   | kotlin
-  deriving Repr, BEq, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 def Lang.toString : Lang → String
   | .rust => "rust"
@@ -41,7 +41,7 @@ structure Module where
   test_cmd : Option String := none
   lint_cmd : Option String := none
   build_cmd : Option String := none
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- A composition root: calls modules and forwards their values. Budgeted
 like a module, story-tested only: no `test_cmd`, no view; `build_cmd`
@@ -53,13 +53,13 @@ structure Root where
   max_ast : Nat := 0
   max_bytes : Nat := 0
   build_cmd : Option String := none
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- What may consume an API: a module or a root. -/
 inductive Node
   | ofModule (m : Module)
   | ofRoot (r : Root)
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 instance : Coe Module Node := ⟨.ofModule⟩
 instance : Coe Root Node := ⟨.ofRoot⟩
@@ -87,7 +87,7 @@ structure Api where
   max_bytes_len : Nat := 0
   max_rules : Nat := 0
   max_tokens : Nat := 0
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- The name of an API, for an `idl` block to refer to it. -/
 def apiName (a : Api) : String := a.name
@@ -104,7 +104,7 @@ structure Fixture where
   paths : List String := []
   max_bytes : Nat := 0
   stand_in : Option Api := none
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- The manifest's top-level fields. -/
 structure Settings where
@@ -114,7 +114,7 @@ structure Settings where
   linked : List String := []
   view_rewritable : List String := []
   source_paths : List String := []
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 -- ---------------------------------------------------------------------------
 -- The suite (spec §6): checks in `Tests.lean` and `Tests/*.lean`
@@ -134,13 +134,13 @@ structure Check where
   covers : List Node := []
   all : Bool := false
   files : List String := []
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- The `suite where` block of `Tests.lean`. -/
 structure Suite where
   test_paths : List String := []
   list_cmd : Option String := none
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- The run set of a task on `nodes` (spec §6.6): every check covering one
 of them, plus every `covers = all` check. The reference definition. -/
@@ -158,7 +158,7 @@ inductive Prim
   | int64
   | float64
   | boolean
-  deriving Repr, BEq, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- An operand of a `where` refinement. -/
 inductive Atom
@@ -168,7 +168,7 @@ inductive Atom
   | num (text : String)  -- a numeric literal, as written
   | str (s : String)
   | bool (b : Bool)
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- The decidable fragment a `where` refinement is written in (architect-v3.md,
 "Proofs supplied by the caller"). The same tree is the reference type's `Prop`
@@ -179,13 +179,13 @@ inductive Pred
   | and (p q : Pred)
   | or (p q : Pred)
   | not (p : Pred)
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 inductive TypeKind
   | prim (p : Prim)
   | refTo (owner ty : String)
   | tuple (ps : List Prim)  -- a product of two to four prims, `i64 × i64`
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 structure TypeDecl where
   name : String
@@ -193,14 +193,14 @@ structure TypeDecl where
   display : Bool := false
   store : Bool := false
   pred : Option Pred := none
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- How the fact a token proves can change between minting and use. -/
 inductive TokenKind
   | permanent              -- never, once true
   | versioned (stale : String)  -- it carries (id, version); every fn taking it returns `stale`
   | linear (spent : String)     -- single use; every fn taking it returns `spent`
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- Evidence: a T only the API's generator mints. -/
 structure Token where
@@ -208,29 +208,29 @@ structure Token where
   prim : Prim
   kind : TokenKind
   store : Bool := false
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 structure Ctor where
   name : String
   args : List String := []
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 structure Variant where
   name : String
   fields : List Prim := []
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 structure Element where
   name : String
   variants : List Variant := []
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 inductive Class
   | Foldable
   | Functor
   | Traversable
   | Monoid
-  deriving Repr, BEq, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 def Class.toString : Class → String
   | .Foldable => "Foldable"
@@ -241,29 +241,29 @@ def Class.toString : Class → String
 inductive ContainerKind
   | generic (classes : List Class)
   | ofElement (elem owner seq : String)
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 structure Container where
   name : String
   kind : ContainerKind
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 structure Instance where
   cls : Class
   owner : String
   seq : String
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 structure Sum where
   name : String
   ctors : List Ctor := []
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 structure Fn where
   name : String
   inputs : List String := []
   returns : String
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 structure Idl where
   apiName : String
@@ -275,7 +275,7 @@ structure Idl where
   instances : List Instance := []
   sums : List Sum := []
   fns : List Fn := []
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 -- ---------------------------------------------------------------------------
 -- The frame data a `frame` block exports
@@ -292,14 +292,14 @@ structure FrameFn where
   returns : String
   callees : List String := []
   branchOn : Option String := none
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- A frame-local product: readable fields, for values the module computes
 inside itself. -/
 structure Record where
   name : String
   fields : List String := []
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
 
 /-- A module's frame (`architecture/Frames/<module>.lean`): the functions
 its code is made of, generated as a pinned skeleton whose bodies are holes
@@ -314,7 +314,151 @@ structure Frame where
   fns : List FrameFn := []
   records : List Record := []
   sums : List Sum := []
-  deriving Repr, Inhabited
+  deriving Repr, DecidableEq, Inhabited
+
+-- ---------------------------------------------------------------------------
+-- The tasks package (spec §8.2, §10, §14, §15): `tasks/Roadmap.lean` and
+-- `tasks/<slug>/Task.lean`
+-- ---------------------------------------------------------------------------
+
+/-- A task's name, fixed at branch creation and never reused (spec §8.1).
+Its spelling is the decoder's concern; the model compares slugs only. -/
+structure Slug where
+  name : String
+  deriving Repr, DecidableEq, Inhabited
+
+instance : Coe String Slug := ⟨Slug.mk⟩
+
+/-- A phase of the roadmap. `hidden` leaves it out of `status`'s phase list
+and milestones; its tasks still count toward overall progress. -/
+structure Phase where
+  id : String
+  title : Option String := none
+  goal : Option String := none
+  hidden : Bool := false
+  deriving Repr, DecidableEq, Inhabited
+
+/-- `[limits.strikes]` (spec §10): one counter per rejection reason. -/
+structure StrikeLimits where
+  history : Nat := 2
+  ownership : Nat := 2
+  pins : Nat := 2
+  scope : Nat := 2
+  suite : Nat := 2
+  plan : Nat := 2
+  post : Nat := 2
+  review : Nat := 2
+  accept : Nat := 2
+  retire : Nat := 2
+  claims : Nat := 2
+  /-- A flaky-test-fix post whose evidence shows no flake: the first miss
+  retires the task. -/
+  evidence : Nat := 1
+  /-- A suite past its `[budget]`. -/
+  budget : Nat := 2
+  deriving Repr, DecidableEq, Inhabited
+
+/-- `[limits]` (spec §10, §17, §18): send-backs, contests and relaunches
+beyond these escalate. -/
+structure Limits where
+  max_review_rounds : Nat := 2
+  max_contest_rounds : Nat := 2
+  max_relaunches : Nat := 2
+  strikes : StrikeLimits := {}
+  deriving Repr, DecidableEq, Inhabited
+
+/-- `[budget]`: seconds the project suite may take; 0 is off. -/
+structure Budget where
+  check_timeout : Nat := 0
+  suite_warn : Nat := 0
+  suite_fail : Nat := 0
+  deriving Repr, DecidableEq, Inhabited
+
+/-- `[sandbox]` (spec §20): the jail every check runs in. -/
+structure Sandbox where
+  enabled : Bool := true
+  network : Bool := false
+  writable : List String := []
+  deriving Repr, DecidableEq, Inhabited
+
+/-- `[player] runs` (spec §4). -/
+inductive Runs
+  | sequential
+  | parallel
+  | queued
+  deriving Repr, DecidableEq, Inhabited
+
+/-- `[player]`: the commands that launch sessions and the lock files a task
+agent may commit. -/
+structure Player where
+  agent_cmd : String := "claude --dangerously-skip-permissions"
+  task_agent_cmd : String := "claude --dangerously-skip-permissions"
+  idle_after : Nat := 900
+  lock_files : List String := []
+  lock_regen : List (String × String) := []
+  runs : Runs := .sequential
+  deriving Repr, DecidableEq, Inhabited
+
+/-- `tasks/Roadmap.lean`: the roadmap's settings, on `main` only. -/
+structure Roadmap where
+  title : Option String := none
+  phases : List Phase := []
+  docs_paths : List String := []
+  limits : Limits := {}
+  player : Player := {}
+  sandbox : Sandbox := {}
+  budget : Budget := {}
+  deriving Repr, DecidableEq, Inhabited
+
+/-- What every task declares, whatever its kind. `modules` names the modules
+and roots the task changes: its worker's scope and its run set (spec §6.6).
+`dependsOn` names slugs: a dependency's declaration lives on its own branch
+until it is accepted. `brief` is pasted into the task agent's prompt (§17). -/
+structure Header where
+  slug : Slug
+  title : String
+  phase : String
+  milestone : Bool := false
+  dependsOn : List Slug := []
+  modules : List Node := []
+  brief : String := ""
+  deriving Repr, DecidableEq, Inhabited
+
+/-- One replacement of a flaky-test-fix: the flaky test and its stable twin. -/
+structure Replace where
+  old : String
+  new : String
+  deriving Repr, DecidableEq, Inhabited
+
+/-- Evidence of a flake on `main` (spec §15): of `runs` runs of `cmd`,
+between `min_pass` and `max_pass` pass. -/
+structure Evidence where
+  name : String
+  cmd : String
+  runs : Nat := 1
+  min_pass : Nat := 1
+  max_pass : Nat
+  deriving Repr, DecidableEq, Inhabited
+
+/-- A task declaration, one constructor per kind (spec §8.2, §14, §15, §15.1).
+A kind's own fields live only on its constructor. -/
+inductive Task
+  /-- Ordinary code that merges into `main`; its task check is the checks its
+  post adds to `architecture/Tests/<slug>.lean`. -/
+  | task (h : Header)
+  /-- An answer to a pinned question, backed by claims; never merges (§14). -/
+  | spike (h : Header)
+  /-- Replaces a flaky test with a stable one (§15): `fix_paths` are unpinned,
+  `stable` is the check proving the replacement stable (`check` is a DSL
+  keyword), `evidence` proves the flake. -/
+  | flakyFix (h : Header) (stable : Check) (fix_paths : List String)
+      (replace : List Replace) (evidence : List Evidence)
+  /-- Makes the `slow` suite checks faster (§15.1). -/
+  | speedup (h : Header) (slow : List String)
+  deriving Repr, DecidableEq, Inhabited
+
+def Task.header : Task → Header
+  | .task h | .spike h | .flakyFix h .. | .speedup h _ => h
 
 -- ---------------------------------------------------------------------------
 -- The reference semantics the native declarations are built on
