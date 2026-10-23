@@ -1,7 +1,7 @@
 /-
 Examples for the vocabulary: every one elaborates in `lake build`.
 -/
-import Spec.Hub
+import Spec.Player
 
 namespace Spec.Examples
 open Dashboard Spec
