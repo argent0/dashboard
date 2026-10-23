@@ -899,8 +899,8 @@ fn add_pinned_path(hub: &Git, commit: &str, path: &str, map: &mut BTreeMap<Strin
 /// The pinned path -> blob hash map for `slug`, computed fresh from the
 /// commit `set_pins` last recorded (`None` if pins were never taken):
 /// the Lean package (`architecture/`, the suite files included), every
-/// `test_paths` entry of the suite *at that commit*, and everything under
-/// `tasks/<slug>/`. A spike pins only
+/// `test_paths` entry of the suite and every fixture *at that commit*, and
+/// everything under `tasks/<slug>/`. A spike pins only
 /// `tasks/<slug>/` (spec §14): it never merges, so the project's tests are
 /// the worker's to change while exploring.
 pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
@@ -942,16 +942,34 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
             for api in arch.api_paths() {
                 add_pinned_path(hub, &commit, &api, &mut map);
             }
+            // A frame's skeleton is generated from its Lean file: the
+            // worker fills the holes beside it.
+            for fr in &arch.frames {
+                add_pinned_path(hub, &commit, &fr.gen_dir(), &mut map);
+            }
+            // Fixtures are test side: a test-speedup's to change, like
+            // `test_paths`.
+            if !speedup {
+                for f in arch.fixture_paths() {
+                    add_pinned_path(hub, &commit, &f, &mut map);
+                }
+            }
         }
     }
 
     // A flaky-test-fix unpins exactly its `fix_paths` (plain files): the
-    // worker replaces the flaky test there. Everything else stays pinned.
+    // worker replaces the flaky test there. The test files new to the branch
+    // (absent at its merge base with `main`) are the worker's own
+    // replacement, so a re-pin leaves them out too. Everything else stays
+    // pinned.
     if let Some(cfg) =
         task_config_at(hub, &commit, slug).filter(|c| c.kind == TaskKind::FlakyTestFix)
     {
         for p in &cfg.fix_paths {
             map.remove(p);
+        }
+        if let (Ok(base), Ok(suite)) = (hub.run(&["merge-base", "refs/heads/main", &commit]), suite_at(hub, &commit, None)) {
+            map.retain(|p, _| !config::path_under_test_paths(p, &suite.test_paths) || hub.blob_hash(base.trim(), p).is_some());
         }
     }
 
@@ -1034,6 +1052,24 @@ pub fn impacted_at(
     map.insert(key, names.clone());
     let _ = hub.notes_add(RUNSETS_NOTES, &tree, &(serde_json::to_string(&map).unwrap_or_default() + "\n"));
     Ok(names)
+}
+
+/// The users of every fixture `commit` changes against its merge base with
+/// `main` (the whole branch: a post or a contest reply editing a fixture
+/// runs none of its users' checks), or against `diff_from`, beyond
+/// `modules`: the modules a task's run set widens by.
+pub fn fixture_widening(hub: &Git, arch: &config::ArchConfig, commit: &str, modules: &[String], diff_from: Option<&str>) -> Vec<String> {
+    if arch.fixtures.is_empty() {
+        return Vec::new();
+    }
+    let mut paths: Vec<String> = Vec::new();
+    if let Ok(base) = hub.run(&["merge-base", "refs/heads/main", commit]) {
+        paths.extend(hub.diff_names(base.trim(), commit).into_iter().map(|(_, p)| p));
+    }
+    if let Some(from) = diff_from {
+        paths.extend(hub.diff_names(from, commit).into_iter().map(|(_, p)| p));
+    }
+    arch.fixture_users(paths.iter().map(|p| p.as_str())).into_iter().filter(|u| !modules.contains(u)).collect()
 }
 
 /// The suite at `commit` (spec §6.2): the checks of `architecture/Tests.lean`
@@ -1131,7 +1167,9 @@ pub fn scope_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::lean:
     let run_set = if cfg.modules.is_empty() {
         e.suite.checks.iter().map(|c| c.name.clone()).collect()
     } else {
-        impacted_at(hub, tip, &cfg.modules, exporter)?
+        let mut widened = cfg.modules.clone();
+        widened.extend(fixture_widening(hub, &e.arch, tip, &cfg.modules, None));
+        impacted_at(hub, tip, &widened, exporter)?
     };
     Ok(Scope { modules: cfg.modules, paths, worker_file, why, run_set })
 }
@@ -1144,8 +1182,9 @@ pub struct Workspace {
     /// against `scope.paths`: `architecture`, `tasks/<slug>`, `api <name>`
     /// (paths and impl files of every API a node in `modules` generates,
     /// consumes or refs), `files of <check>` for each run-set check,
-    /// `test_paths`, `.gitignore`, and the agent config (`.claude/`,
-    /// `CLAUDE.md`) the worker's agent reads.
+    /// `fixture <name>` for each fixture a node of `modules` or a run-set
+    /// check's covers uses, `test_paths`, `.gitignore`, and the agent config
+    /// (`.claude/`, `CLAUDE.md`) the worker's agent reads.
     pub readonly: Vec<(String, String)>,
 }
 
@@ -1167,8 +1206,13 @@ pub fn workspace_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::l
             a.paths.iter().chain(&a.impls).for_each(|p| add(p, format!("api {}", a.name)));
         }
     }
+    let mut nodes: Vec<&str> = scope.modules.iter().map(|m| m.as_str()).collect();
     for c in e.suite.checks.iter().filter(|c| scope.run_set.contains(&c.name)) {
         c.files.iter().for_each(|p| add(p, format!("files of {}", c.name)));
+        nodes.extend(c.covers.iter().map(|n| n.as_str()));
+    }
+    for f in e.arch.fixtures_of(&nodes) {
+        f.paths.iter().for_each(|p| add(p, format!("fixture {}", f.name)));
     }
     e.suite.test_paths.iter().for_each(|p| add(p, "test_paths".into()));
     add(&".gitignore".to_string(), ".gitignore".into());
@@ -1246,7 +1290,9 @@ pub fn sparse_pattern(path: &str) -> String {
 /// reply) may write, read at `tip` (spec §17): its own `Tests/<slug>.lean`,
 /// `tasks/<slug>/`, the `files` of the checks in the task's run set, the
 /// APIs whose generator and consumer are both in its modules (their Lean
-/// file and paths), `test_paths` and the roadmap's `[player] lock_files`.
+/// file and paths), the frame of each of its modules (`Frames/<m>.lean`
+/// and its skeleton), every fixture one of its modules uses (every fixture
+/// with no modules), `test_paths` and the roadmap's `[player] lock_files`.
 /// Paths and directory prefixes.
 pub fn agent_scope_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::lean::Exporter>) -> Vec<String> {
     let mut out = vec![config::tests_file(slug), format!("tasks/{slug}/")];
@@ -1255,13 +1301,28 @@ pub fn agent_scope_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate:
         let names: Vec<String> = if modules.is_empty() {
             e.suite.checks.iter().map(|c| c.name.clone()).collect()
         } else {
-            impacted_at(hub, tip, &modules, exporter).unwrap_or_default()
+            let mut widened = modules.clone();
+            widened.extend(fixture_widening(hub, &e.arch, tip, &modules, None));
+            impacted_at(hub, tip, &widened, exporter).unwrap_or_default()
         };
         let names: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
         out.extend(e.suite.files_of(&names));
         for a in e.arch.apis.iter().filter(|a| modules.contains(&a.generator) && modules.contains(&a.consumer)) {
             out.push(crate::lean::api_file(&a.name));
             out.extend(a.paths.iter().cloned());
+        }
+        // Each module's frame: its Lean file and the skeleton it generates.
+        for m in &modules {
+            out.push(crate::frame::lean_file(m));
+        }
+        for fr in e.arch.frames.iter().filter(|f| modules.contains(&f.module)) {
+            out.push(fr.gen_dir());
+        }
+        if modules.is_empty() {
+            out.extend(e.arch.fixture_paths());
+        } else {
+            let nodes: Vec<&str> = modules.iter().map(|m| m.as_str()).collect();
+            out.extend(e.arch.fixtures_of(&nodes).into_iter().flat_map(|f| f.paths.iter().cloned()));
         }
         out.extend(e.suite.test_paths.iter().cloned());
     }

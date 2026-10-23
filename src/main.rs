@@ -67,6 +67,16 @@ enum ArchAction {
         #[arg(long)]
         check: bool,
     },
+    /// The call graph of the modules' frames (architecture/Frames/): one
+    /// `module.fn -> callee` line per declared call, then each API fn with
+    /// the frame fns calling it, and the fns of an API a framed module
+    /// consumes that no frame fn calls.
+    Calls {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Only this module's frame.
+        module: Option<String>,
+    },
     /// In the director clone, on main at the hub's tip: add module <name>
     /// to architecture/Architecture.lean from the project's scaffold
     /// (architecture/scaffold/: module.lean, optional api.lean, files/ with
@@ -367,6 +377,7 @@ fn main() {
         Some(Command::Build { nodes }) => run_build(args.home, &nodes),
         Some(Command::Arch { action: ArchAction::Check { root } }) => run_arch_check(&root),
         Some(Command::Arch { action: ArchAction::Gen { root, check } }) => run_arch_gen(&root, check),
+        Some(Command::Arch { action: ArchAction::Calls { root, module } }) => run_arch_calls(&root, module.as_deref()),
         Some(Command::Arch { action: ArchAction::AddModule { name, apis } }) => {
             run_arch_add(args.home, dashboard::scaffold::Request { module: Some(name), apis })
         }
@@ -1239,6 +1250,37 @@ fn run_arch_check(root: &std::path::Path) {
         std::process::exit(1);
     }
     println!("architecture ok");
+}
+
+fn run_arch_calls(root: &std::path::Path, module: Option<&str>) {
+    let loaded = load_arch(root);
+    let cfg = &loaded.cfg;
+    if let Some(m) = module
+        && !cfg.frames.iter().any(|f| f.module == m)
+    {
+        eprintln!("no frame for {m} (architecture/Frames/{m}.lean)");
+        std::process::exit(1);
+    }
+    let edges: Vec<(String, String)> = dashboard::frame::edges(cfg)
+        .into_iter()
+        .filter(|(from, _)| module.is_none_or(|m| from.split('.').next() == Some(m)))
+        .collect();
+    for (from, to) in &edges {
+        println!("{from} -> {to}");
+    }
+    let framed: Vec<&str> = cfg.frames.iter().map(|f| f.module.as_str()).filter(|m| module.is_none_or(|x| x == *m)).collect();
+    for a in cfg.apis.iter().filter(|a| framed.contains(&a.consumer.as_str())) {
+        let Some(idl) = loaded.idls.get(&a.name) else { continue };
+        for f in &idl.fns {
+            let target = format!("{}.{}", a.name, f.name);
+            let callers: Vec<&str> = edges.iter().filter(|(_, to)| *to == target).map(|(from, _)| from.as_str()).collect();
+            if callers.is_empty() {
+                println!("{target}: called by no frame fn of {}", a.consumer);
+            } else {
+                println!("{target} <- {}", callers.join(", "));
+            }
+        }
+    }
 }
 
 fn load_arch(root: &std::path::Path) -> dashboard::arch::Loaded {

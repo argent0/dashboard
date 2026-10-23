@@ -747,7 +747,7 @@ impl Idl {
 
     /// `(name, constructors)` of every sum: the named ones, then the
     /// default sum (`pascal(api)`) if the API has one.
-    fn sum_list(&self) -> Vec<(String, &[Ctor])> {
+    pub(crate) fn sum_list(&self) -> Vec<(String, &[Ctor])> {
         let mut out: Vec<(String, &[Ctor])> = self.sums.iter().map(|s| (s.name.clone(), s.ctors.as_slice())).collect();
         if !self.ctors.is_empty() {
             out.push((pascal(&self.api), self.ctors.as_slice()));
@@ -1027,6 +1027,7 @@ impl Idl {
                 o.push_str(&format!("    fn {}(&mut self{}) -> {};\n", snake(&f.name), params, f.returns));
             }
             o.push_str("}\n\n");
+            o.push_str(&self.rust_stand_in());
             if wire {
                 o.push_str(&format!(
                     "/// Serves one call `{{\"fn\": <name>, \"args\": [...]}}`: the reply is the sum's JSON,\n\
@@ -1055,6 +1056,52 @@ impl Idl {
         }
         o.push_str(&self.rust_laws());
         o
+    }
+
+    /// `<api>_stand_in!(Name, path::to::binding)`: a scripted stand-in for
+    /// the call surface, for tests (a fixture with `stand_in = <api>`). Per
+    /// fn a queue of closures, each answering one call in order; an empty
+    /// queue panics naming the fn; `calls` logs the fn names. `Default`, so
+    /// a fn added later leaves `Name::default()` compiling. The path
+    /// argument names the binding from the caller's crate (`super::api` in
+    /// a fixture its test crates mount), and the per-API name keeps two
+    /// APIs' macros apart.
+    fn rust_stand_in(&self) -> String {
+        let en = pascal(&self.api);
+        let mac = format!("{}_stand_in", self.api.replace('-', "_"));
+        let ty = |t: &str| format!("$($m)::+::{t}");
+        let mut fields = String::new();
+        let mut methods = String::new();
+        for f in &self.fns {
+            let name = snake(&f.name);
+            let ins: Vec<String> = f.inputs.iter().map(|t| ty(t)).collect();
+            let ret = ty(&f.returns);
+            fields.push_str(&format!(
+                "            pub {name}: ::std::collections::VecDeque<Box<dyn FnMut({}) -> {ret}>>,\n",
+                ins.join(", ")
+            ));
+            let names = param_names(&f.inputs, snake);
+            let params: String = names.iter().zip(&ins).map(|(n, t)| format!(", {n}: {t}")).collect();
+            methods.push_str(&format!(
+                "            fn {name}(&mut self{params}) -> {ret} {{\n                \
+                 self.calls.push(\"{name}\");\n                \
+                 let mut f = self.{name}.pop_front().unwrap_or_else(|| panic!(\"{api} stand-in: no scripted reply left for {name}\"));\n                \
+                 f({})\n            }}\n",
+                names.join(", "),
+                api = self.api
+            ));
+        }
+        format!(
+            "/// A scripted stand-in for the {api} call surface, for tests:\n\
+             /// `{mac}!(Stand, super::api);` then push one closure per expected call.\n\
+             #[macro_export]\n\
+             macro_rules! {mac} {{\n    \
+             ($name:ident, $($m:ident)::+) => {{\n        \
+             #[derive(Default)]\n        \
+             pub struct $name {{\n{fields}            pub calls: Vec<&'static str>,\n        }}\n        \
+             impl $($m)::+::{en} for $name {{\n{methods}        }}\n    }};\n}}\n\n",
+            api = self.api
+        )
     }
 
     /// `x.to_value()`, or the container helper for a container argument.
@@ -2168,7 +2215,7 @@ fn ts_raw_decode(r: Repr, max_len: u64, v: &str, what: &str) -> String {
 
 /// Parameter names for a fn's inputs: the type's snake case, numbered when
 /// a type repeats.
-fn param_names(inputs: &[String], case: fn(&str) -> String) -> Vec<String> {
+pub(crate) fn param_names(inputs: &[String], case: fn(&str) -> String) -> Vec<String> {
     let mut out = Vec::new();
     for (i, t) in inputs.iter().enumerate() {
         let base = case(t);
@@ -2215,7 +2262,7 @@ fn rust_repr(r: Repr) -> &'static str {
 }
 
 /// `RowSet` -> `row_set`.
-fn snake(s: &str) -> String {
+pub(crate) fn snake(s: &str) -> String {
     let mut o = String::new();
     for (i, c) in s.chars().enumerate() {
         if c.is_ascii_uppercase() && i > 0 {

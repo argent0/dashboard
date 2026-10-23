@@ -8,6 +8,7 @@ pub mod config;
 pub mod draft;
 pub mod events;
 pub mod flaky;
+pub mod frame;
 pub mod fsm;
 pub mod git;
 pub mod idl;

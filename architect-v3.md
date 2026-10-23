@@ -306,6 +306,73 @@ Laws (property tests over `i64` and `String` elements with generated functions; 
 
 **Files:** `impl` (per `[[api]]`) lists the hand-written instance files. They must lie under the generator module's paths: owned, budgeted and the worker's to edit (no `pins` strike), unlike the API's own paths. The generated Rust binding mounts each with `#[path]` beneath itself, so the instance sees the class trait as `super::Foldable`. A module's jail view also holds every API its APIs ref, transitively, with their `impl` files, so a consumer's tests use the real instance. `dashboard arch check` fails a declared class with no `impl Class for Container` in the API's `impl` files. In TypeScript there is no class module: the consumer's binding holds a generated `Seq<A>` class with exactly the classes it may use (the owner's, plus instances of APIs the same module consumes), its laws in `gen/<api>.laws.test.ts`, and elements as discriminated unions of readable records. On the wire a container is a JSON array of `{"v": variant, "f": [raw fields]}`. Kotlin has no element/container generator yet.
 
+## Frames
+
+A module's code may be declared further, down to its functions, in
+`architecture/Frames/<module>.lean` (Rust modules so far):
+
+```lean
+frame alpha where
+  src "crates/alpha/src"
+  bindings "crate::apis"        -- where the crate mounts its APIs' bindings
+  fn decide : Id → Plan → Decision calls rate, «core-alpha».load branch Plan
+  fn rate : Score → Tally
+  record Tally : i64 → bool     -- frame-local, readable types
+  sum Outcome | Won : Tally | Lost
+```
+
+- **Signatures** name prims, the frame's `record`s and `sum`s, and the
+  types of every API the module sees (`api.T` where two share a name).
+- **`calls`** lists a fn's callees: frame fns, or `api.fn` of an API the
+  module consumes. **`branch S`** makes the body a `match` on its `S`
+  input with one hole per constructor.
+- **Generated** by `dashboard arch gen`, pinned like a binding, under
+  `<src>/frame/` (`mod.rs`, `skeleton.rs`, `holes.rs`): per fn a context
+  trait `<Fn>Ctx` holding exactly its callees, the `Frame` struct holding
+  the consumed APIs (`Frame::new(&mut core_alpha, …)`) and routing each
+  context call, the entry fns doing the declared `match`, the impl of each
+  API the module generates when its fns are frame fns, and a
+  `#[cfg(test)]` stand-in per context (`DecideCtxStandIn`: queued answers
+  per callee, a call log, unused answers fail at drop). The crate root
+  writes `pub mod frame;`.
+- **Holes** are the worker's: `<src>/holes/<fn>.rs`, one `pub fn` per hole
+  (`<fn>`, or `on_<ctor>` per arm), each taking `ctx: &mut dyn <Fn>Ctx`
+  first. `arch gen` writes a `todo!()` starter for a missing file and
+  leaves an existing one alone. Private helpers and types may live in a
+  hole file.
+- **Enforced** by the build and by `dashboard arch check`. The build
+  narrows each hole to `&mut dyn <Fn>Ctx`, so a hole asking for more fails
+  to compile, and a new constructor breaks the generated `match`. The hole
+  lint closes what the compiler leaves open: a hole names its parameters,
+  its `ctx`, the frame's prelude, std minus I/O and ambient state
+  (`fs`, `net`, `io`, `process`, `env`, `thread`, `time`, …) and its own
+  items; no `crate::`/`super::`/`::` path, `static`, `unsafe`,
+  `extern`, `macro_rules!`, `mod x;`, linking or `cfg_attr` attribute,
+  `impl` for a type it does not define, macro outside a small allowed set,
+  or `pub` helper. `#[cfg(test)]` items are its tests.
+- **Tracking.** `dashboard arch calls [<module>]` prints the call graph,
+  each API fn with its callers, and the consumed API fns no frame fn calls;
+  `arch check` reports per frame its fns, holes, API calls, the APIs it
+  provides and the fns those APIs never reach.
+- **Ownership.** The director writes a frame on `main`, or a task agent
+  for one of its task's modules: the Lean file, the regenerated skeleton
+  and the starters of new holes (each exactly as `arch gen` writes it), in
+  one commit; deleting the hole of a dropped fn goes with it. `src` lies
+  inside the module (a load error otherwise). `arch check` reports a file
+  under `<src>/frame/` the frame does not generate and a hole file of no
+  declared fn. The skeleton stays outside the module's budgets.
+- **Names.** The DSL's words are reserved in every Lean file of the
+  package (`frame`, `fixture`, `src`, `bindings`, `calls`, `branch`,
+  `record`, beside `module`, `api`, `check`, …): quote such a name as
+  `«record»`. In Rust, a frame's types stay clear of `Frame`, `Q`, the
+  context traits, the stand-ins and the API traits; a callee named
+  `default`, `drop` or `clone` collides with the stand-in; a parameter
+  named after a Rust keyword gets a `_` suffix (`match_: Match`).
+- **Limits so far.** Two APIs' types sharing a name cannot both enter one
+  frame. The frame governs the holes; the module's other files (the crate
+  root) stay ordinary worker code. A hole's own tests are linted like the
+  hole by the mint lint (a test minting a consumed token is flagged).
+
 ## Changes and testing
 
 ### Intra-module change
@@ -341,7 +408,8 @@ Steps 2 and 3 depend only on the API from step 1, not on each other, so they can
 Budgets exist to force a split, so a raise is the last resort and always an explicit, audited act.
 
 ### Where budgets live
-In the pinned manifest (`architecture/Architecture.lean`, or `architecture.toml`). A worker or task agent that edits it gets a `pins` strike. Only a director commit on `main` changes it; the player's ownership gate allows the architecture's paths, like `docs_paths`.
+In the pinned manifest (`architecture/Architecture.lean`): the module, root,
+API and fixture (`max_bytes`) budgets. A worker or task agent that edits it gets a `pins` strike. Only a director commit on `main` changes it; the player's ownership gate allows the architecture's paths, like `docs_paths`.
 
 ### When work hits a budget
 The suite check fails (a worker finish is rejected with an `arch` budget reason). Neither the worker nor the task agent may touch the budget. In order, the options are:
@@ -398,6 +466,45 @@ check «search-story» where
 - The player runs the whole suite once at start, then run sets only.
 - A worker's working tree holds its task's files only (spec §21);
   `dashboard build` and `dashboard test` assemble the views.
+
+### Fixtures
+
+Setup that modules share is declared beside them in
+`architecture/Architecture.lean` (spec §6.2): `fixture <name> where` with
+`users` (modules and roots), `paths` (under no node) and `max_bytes`. A
+view holds a fixture when one of its nodes is a user, so a fixture shared
+by `core` and `alpha` is absent from `beta`'s checks, and the test that
+reaches for it there fails like any reach outside `covers`. Module-only,
+API-shared and arbitrary groups are one form: `users = [alpha]`,
+`users = [core, alpha]`, `users = [beta, gamma]`. The manifest's blocks
+(`architecture`, `module`, `root`, `api`, `fixture`) come from
+`Architecture.lean` only; a task agent's `Apis/` or `Tests/` file declaring
+one fails the export.
+
+**Generated stand-in.** Every API with `fn`s gets, in its Rust binding, a
+macro `<api>_stand_in!(Name, path::to::binding)` (`-` as `_` in the name):
+a `#[derive(Default)]` struct with one queue of scripted closures per fn
+(`VecDeque<Box<dyn FnMut(args) -> Ret>>`), answering calls in order; an
+empty queue panics naming the fn, and `calls` logs the fn names. A fixture
+with `stand_in = <api>` calls it crate-neutrally, so the generator's and the
+consumer's test crates share one file:
+
+```rust
+// fixtures/core-alpha/mod.rs
+#![allow(unused)]
+super::stand_in!(Stand, super::api);
+
+// alpha/tests/decide.rs (core's tests: `use crate::core_alpha as api;` …)
+use alpha::core_alpha as api;
+use alpha::core_alpha_stand_in as stand_in;
+#[path = "../../fixtures/core-alpha/mod.rs"] mod fixture;
+```
+
+The per-API name keeps two APIs' macros apart (one `stand_in!` name would
+collide), and the path argument keeps the fixture free of either crate's
+name. TypeScript and Kotlin interfaces take an inline object, so they get
+no macro. A fixture compiles whole in each test crate that mounts it:
+`#![allow(unused)]` keeps `-D warnings` builds quiet.
 
 ### Inter-module tests
 

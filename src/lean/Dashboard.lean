@@ -92,6 +92,20 @@ structure Api where
 /-- The name of an API, for an `idl` block to refer to it. -/
 def apiName (a : Api) : String := a.name
 
+/-- A test fixture: setup code (a stand-in, scenario ids, helpers) shared by
+exactly its `users`. Its files lie under no node; a view holds them when one
+of its nodes is a user, and they are pinned against workers. `max_bytes`
+counts every file under `paths` (0 is off). With `stand_in`, the users are that
+API's generator and consumer, and the fixture may call the API's generated
+stand-in. -/
+structure Fixture where
+  name : String
+  users : List Node := []
+  paths : List String := []
+  max_bytes : Nat := 0
+  stand_in : Option Api := none
+  deriving Repr, Inhabited
+
 /-- The manifest's top-level fields. -/
 structure Settings where
   max_modules : Nat := 0
@@ -264,6 +278,45 @@ structure Idl where
   deriving Repr, Inhabited
 
 -- ---------------------------------------------------------------------------
+-- The frame data a `frame` block exports
+-- ---------------------------------------------------------------------------
+
+/-- A function of a module's frame: its signature (type names: a prim word,
+a type of the frame, or a type of an API the module sees, `api.T` when two
+share a name), the callees its body may call (frame fns, or `api.fn` of an
+API the module consumes), and `branch`, an input sum whose every
+constructor gets its own hole. -/
+structure FrameFn where
+  name : String
+  inputs : List String := []
+  returns : String
+  callees : List String := []
+  branchOn : Option String := none
+  deriving Repr, Inhabited
+
+/-- A frame-local product: readable fields, for values the module computes
+inside itself. -/
+structure Record where
+  name : String
+  fields : List String := []
+  deriving Repr, Inhabited
+
+/-- A module's frame (`architecture/Frames/<module>.lean`): the functions
+its code is made of, generated as a pinned skeleton whose bodies are holes
+the worker fills. `src` is the source directory the skeleton goes under
+(`<src>/gen/`, holes in `<src>/holes/`); `bindings` the Rust path the
+module's crate mounts its APIs' bindings under (`crate::apis`: then
+`crate::apis::core_alpha`). -/
+structure Frame where
+  moduleName : String
+  srcDir : String := ""
+  mount : String := "crate"
+  fns : List FrameFn := []
+  records : List Record := []
+  sums : List Sum := []
+  deriving Repr, Inhabited
+
+-- ---------------------------------------------------------------------------
 -- The reference semantics the native declarations are built on
 -- ---------------------------------------------------------------------------
 
@@ -320,6 +373,29 @@ macro_rules
   | `(api $n:ident : $g:ident → $c:ident where $[$k:ident = $v:term]*) => do
     let s := Lean.Syntax.mkStrLit (identText n)
     `(def $n : Dashboard.Api := { name := $s, generator := $g, consumer := $c, $[$k:ident := $v:term],* })
+
+syntax (name := archFixture) "fixture " ident " where" manyIndent(group(ident " = " term)) : command
+
+/-- One field of a `fixture` block: `users = [a, b]` coerces each element
+to a `Node`; `stand_in = x` is `some x`. -/
+def fixtureField (key : Lean.Ident) (val : Lean.TSyntax `term) : Lean.MacroM (Lean.TSyntax `term) := do
+  let field := key.getId.eraseMacroScopes
+  if field == `users then
+    match val with
+    | `([$xs,*]) =>
+      let elems ← xs.getElems.mapM fun x => `(($x : Dashboard.Node))
+      `([$elems,*])
+    | _ => Lean.Macro.throwErrorAt val "users is a list of modules and roots: users = [a, b]"
+  else if field == `stand_in then
+    `(some $val)
+  else
+    pure val
+
+macro_rules
+  | `(fixture $n:ident where $[$k:ident = $v:term]*) => do
+    let s := Lean.Syntax.mkStrLit (identText n)
+    let vs ← (k.zip v).mapM fun (key, val) => fixtureField key val
+    `(def $n : Dashboard.Fixture := { name := $s, $[$k:ident := $vs],* })
 
 syntax (name := archCheck) "check " ident " where" manyIndent(group(ident " = " term)) : command
 syntax (name := archSuite) "suite" " where" manyIndent(group(ident " = " term)) : command
@@ -700,5 +776,93 @@ macro_rules
     cmds := cmds.push spec
     let all := #[← `(namespace $n)] ++ cmds ++ #[← `(end $n)]
     return Lean.mkNullNode (all.map (·.raw))
+
+-- ---------------------------------------------------------------------------
+-- The frame DSL
+-- ---------------------------------------------------------------------------
+
+/-
+A module's frame, in `architecture/Frames/<module>.lean`:
+
+  frame alpha where
+    src "crates/alpha/src"
+    bindings "crate::apis"
+    fn decide : HeroId → Plan → Decision calls score, «core-alpha».load branch Plan
+    fn score : Hero → Score calls «dice-alpha».roll
+    record Tally : i64 → bool
+    sum Outcome | Win : Tally | Lose
+
+`dashboard arch gen` generates the skeleton (pinned) and a starter for each
+missing hole; `dashboard arch check` keeps every hole inside its callees.
+-/
+declare_syntax_cat frameTy
+declare_syntax_cat frameItem
+
+syntax idlPrim : frameTy
+syntax ident : frameTy
+
+syntax "src " str : frameItem
+syntax "bindings " str : frameItem
+syntax "fn " ident " : " sepBy1(frameTy, " → ") (" calls " sepBy1(ident, ", "))? (" branch " ident)? : frameItem
+syntax "record " ident " : " sepBy1(frameTy, " → ") : frameItem
+syntax "sum " ident many("|" ident (" : " sepBy1(frameTy, " → "))?) : frameItem
+
+syntax (name := archFrame) "frame " ident " where" manyIndent(frameItem) : command
+
+/-- A frame type's name: a prim's word (`i64`, `string`), else the identifier. -/
+def frameTyText : Lean.TSyntax `frameTy → Lean.MacroM (Lean.TSyntax `term)
+  | `(frameTy| string $[$_:num]?) => pure (Lean.Syntax.mkStrLit "string")
+  | `(frameTy| bytes $[$_:num]?) => pure (Lean.Syntax.mkStrLit "bytes")
+  | `(frameTy| i64) => pure (Lean.Syntax.mkStrLit "i64")
+  | `(frameTy| f64) => pure (Lean.Syntax.mkStrLit "f64")
+  | `(frameTy| bool) => pure (Lean.Syntax.mkStrLit "bool")
+  | `(frameTy| $n:ident) => pure (strLit n)
+  | _ => Lean.Macro.throwUnsupported
+
+structure FrameAcc where
+  srcDir : Lean.TSyntax `term := Lean.Syntax.mkStrLit ""
+  mount : Lean.TSyntax `term := Lean.Syntax.mkStrLit "crate"
+  fns : Array (Lean.TSyntax `term) := #[]
+  records : Array (Lean.TSyntax `term) := #[]
+  sums : Array (Lean.TSyntax `term) := #[]
+
+def addFrameItem (acc : FrameAcc) : Lean.TSyntax `frameItem → Lean.MacroM FrameAcc
+  | `(frameItem| src $s:str) => pure { acc with srcDir := s }
+  | `(frameItem| bindings $s:str) => pure { acc with mount := s }
+  | `(frameItem| fn $n:ident : $[$ts:frameTy]→* $[calls $[$cs:ident],*]? $[branch $b:ident]?) => do
+    let names ← ts.mapM frameTyText
+    let ret := names.back!
+    let ins := names.pop
+    let cl := (cs.getD #[]).map fun c => strLit c
+    let br ← match b with
+      | some b => `(some $(strLit b))
+      | none => `(none)
+    let decl ← `(Dashboard.FrameFn.mk $(strLit n) $(← listTerm ins) $ret $(← listTerm cl) $br)
+    pure { acc with fns := acc.fns.push decl }
+  | `(frameItem| record $n:ident : $[$ts:frameTy]→*) => do
+    let fields ← ts.mapM frameTyText
+    pure { acc with records := acc.records.push (← `(Dashboard.Record.mk $(strLit n) $(← listTerm fields))) }
+  | `(frameItem| sum $n:ident $[| $cs:ident $[: $[$as:frameTy]→*]?]*) => do
+    let mut ctors := #[]
+    for c in cs, a in as do
+      let args ← (a.getD #[]).mapM frameTyText
+      ctors := ctors.push (← `(Dashboard.Ctor.mk $(strLit c) $(← listTerm args)))
+    pure { acc with sums := acc.sums.push (← `(Dashboard.Sum.mk $(strLit n) $(← listTerm ctors))) }
+  | _ => Lean.Macro.throwUnsupported
+
+/-- `frame m where …` declares `m.frame`; `m` must be a declared module. -/
+macro_rules
+  | `(frame $n:ident where $items:frameItem*) => do
+    let mut acc : FrameAcc := {}
+    for it in items do
+      acc ← addFrameItem acc it
+    let id := Lean.mkIdent (n.getId ++ `frame)
+    `(def $id : Dashboard.Frame := {
+        moduleName := ($n : Dashboard.Module).name,
+        srcDir := $(acc.srcDir),
+        mount := $(acc.mount),
+        fns := $(← listTerm acc.fns),
+        records := $(← listTerm acc.records),
+        sums := $(← listTerm acc.sums) })
 
 end Dashboard

@@ -44,9 +44,9 @@ pub struct Loaded {
     pub api_dirs: BTreeMap<String, PathBuf>,
     /// Problems reading an API's IDL (reported by `bindings`).
     pub errors: Vec<String>,
-    /// The test files: the suite's `test_paths` and the `files` of every
-    /// check the director or a task agent declared (a worker's own checks
-    /// add none). A test stands in for an API's generator, so it may mint
+    /// The test files: the suite's `test_paths`, every fixture's paths and
+    /// the `files` of every check the director or a task agent declared (a
+    /// worker's own checks add none). A test stands in for an API's generator, so it may mint
     /// that API's evidence; production code may reach into none of them.
     pub test_files: Vec<String>,
 }
@@ -55,6 +55,7 @@ impl Loaded {
     /// A Lean export: bindings go under an API's first path (`api_dir`).
     pub fn from_export(root: &Path, e: lean::Exported) -> Loaded {
         let mut test_files = e.suite.test_paths.clone();
+        test_files.extend(e.arch.fixture_paths());
         for c in &e.suite.checks {
             if !c.source.as_deref().is_some_and(|s| s.ends_with(".worker.lean")) {
                 test_files.extend(c.files.iter().cloned());
@@ -532,8 +533,9 @@ pub fn view_apis<'a>(cfg: &'a ArchConfig, idls: &BTreeMap<String, Idl>, module: 
 
 /// The paths a view of `nodes` holds (spec §6.6): each node's paths,
 /// `shared`, and for each module its APIs (`view_apis`) with their paths
-/// and, unless a TS class API, their `impl` files; then `extra`.
-/// Deduplicated, in order. A root contributes its paths only.
+/// and, unless a TS class API, their `impl` files; the paths of every
+/// fixture one of `nodes` uses; then `extra`. Deduplicated, in order. A
+/// root contributes its paths and fixtures only.
 pub fn view_paths(cfg: &ArchConfig, idls: &BTreeMap<String, Idl>, nodes: &[&str], extra: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut add = |p: &String| {
@@ -554,6 +556,9 @@ pub fn view_paths(cfg: &ArchConfig, idls: &BTreeMap<String, Idl>, nodes: &[&str]
                 a.impls.iter().for_each(&mut add);
             }
         }
+    }
+    for f in cfg.fixtures_of(nodes) {
+        f.paths.iter().for_each(&mut add);
     }
     extra.iter().for_each(&mut add);
     out
@@ -625,7 +630,24 @@ pub fn sync_bindings(root: &Path, loaded: &Loaded, write: bool) -> (Vec<String>,
     } else {
         stale.extend(lean::drift(root));
     }
-    for b in bs {
+    // Frames: the skeleton is synced like a binding; a missing hole file
+    // gets its starter (an existing one is the worker's).
+    let frames = crate::frame::render(&loaded.cfg, &loaded.idls);
+    errs.extend(frames.errors.iter().cloned());
+    if write {
+        for h in &frames.holes {
+            let full = root.join(&h.file);
+            if !full.exists() {
+                let done = std::fs::create_dir_all(full.parent().unwrap()).and_then(|_| std::fs::write(&full, &h.starter));
+                match done {
+                    Ok(()) => stale.push(h.file.display().to_string()),
+                    Err(e) => errs.push(format!("{}: {e}", h.file.display())),
+                }
+            }
+        }
+    }
+    let skeleton = ApiBindings { name: String::new(), idl: Idl::default(), files: frames.skeleton };
+    for b in bs.into_iter().chain(std::iter::once(skeleton)) {
         for (path, content) in b.files {
             let full = root.join(&path);
             if std::fs::read_to_string(&full).ok().as_deref() == Some(content.as_str()) {
@@ -679,10 +701,14 @@ pub fn check(root: &Path, loaded: &Loaded, sandbox: &Sandbox, scratch: &Path) ->
             Err(e) => rep.problems.push(format!("{kind} {name}: {e}")),
         }
     }
+    // A frame's skeleton is generated, like an API's bindings: outside the
+    // module's budgets.
+    let skeletons: Vec<String> = cfg.frames.iter().map(|f| f.gen_dir()).collect();
     for m in &cfg.modules {
         let Some(files) = files_of.get(m.name.as_str()) else { continue };
         let who = format!("module {}", m.name);
-        match measure(root, m, files) {
+        let files: Vec<PathBuf> = files.iter().filter(|f| !path_under_test_paths(&f.to_string_lossy(), &skeletons)).cloned().collect();
+        match measure(root, m, &files) {
             Ok((ast, bytes)) => {
                 let a = over("ast", &who, ast, m.max_ast, &mut rep);
                 let b = over("bytes", &who, bytes, m.max_bytes, &mut rep);
@@ -703,16 +729,45 @@ pub fn check(root: &Path, loaded: &Loaded, sandbox: &Sandbox, scratch: &Path) ->
             Err(e) => rep.problems.push(format!("{who}: {e}")),
         }
     }
+    for f in &cfg.fixtures {
+        let who = format!("fixture {}", f.name);
+        let present: Vec<String> = f.paths.iter().filter(|p| root.join(p).exists()).cloned().collect();
+        let files = match expand(root, &present) {
+            Ok(files) => files,
+            Err(e) => {
+                rep.problems.push(format!("{who}: {e}"));
+                continue;
+            }
+        };
+        let langs: Vec<&str> = f.users.iter().filter_map(|u| cfg.node(u).map(|(l, _)| l)).collect();
+        let mut bytes = 0u64;
+        for file in &files {
+            bytes += std::fs::metadata(root.join(file)).map(|m| m.len()).unwrap_or(0);
+            // Source in a known language serves every user's language; data
+            // (JSON, text) serves any.
+            let known = ["rust", "typescript", "kotlin"].iter().any(|l| language(l, file).is_some());
+            if let Some(l) = langs.iter().find(|l| known && language(l, file).is_none()) {
+                rep.problems.push(format!("{}: {who} serves a {l} user, and this file is another language", file.display()));
+            }
+        }
+        if let Some((_, owner)) = files.iter().find_map(|file| owner.get(file).map(|o| (file, o))) {
+            rep.problems.push(format!("{who}: a file belongs to {owner}; a fixture lies under no node"));
+        }
+        let b = over("bytes", &who, bytes, f.max_bytes, &mut rep);
+        let empty = if present.len() < f.paths.len() { ", missing paths count as empty" } else { "" };
+        rep.headroom.push(format!("{who}: users {}, {b}{empty}", f.users.len()));
+    }
     // Ownership completeness: everything under `source_paths` has an owner.
     if !cfg.source_paths.is_empty() {
         let mut owned_paths: Vec<String> = cfg.api_paths();
         owned_paths.extend(cfg.shared.iter().cloned());
+        owned_paths.extend(cfg.fixture_paths());
         match expand(root, &cfg.source_paths) {
             Ok(files) => {
                 for f in files {
                     let s = f.to_string_lossy();
                     if !owner.contains_key(&f) && !path_under_test_paths(&s, &owned_paths) {
-                        rep.problems.push(format!("{s}: owned by nobody (no module, API, root or shared entry)"));
+                        rep.problems.push(format!("{s}: owned by nobody (no module, API, root, fixture or shared entry)"));
                     }
                 }
             }
@@ -724,7 +779,7 @@ pub fn check(root: &Path, loaded: &Loaded, sandbox: &Sandbox, scratch: &Path) ->
         if f.starts_with("architecture/") {
             rep.problems.push(format!("{f}: vendored dashboard library is missing or differs from this dashboard's (run `dashboard arch gen`)"));
         } else {
-            rep.problems.push(format!("{f}: generated binding is missing or differs from its IDL (run `dashboard arch gen`)"));
+            rep.problems.push(format!("{f}: generated binding or frame is missing or differs from its Lean source (run `dashboard arch gen`)"));
         }
     }
     rep.problems.extend(errs);
@@ -758,6 +813,9 @@ pub fn check(root: &Path, loaded: &Loaded, sandbox: &Sandbox, scratch: &Path) ->
         }
         rep.headroom.push(line);
     }
+    let frames = crate::frame::render(cfg, &loaded.idls);
+    rep.headroom.extend(frames.headroom.iter().cloned());
+    rep.problems.extend(crate::frame::check_holes(root, cfg, &frames));
     lint(root, loaded, &files_of, sandbox, &mut rep);
     for name in cfg.topological() {
         let Some(m) = cfg.modules.iter().find(|m| m.name == name) else { continue };
@@ -867,6 +925,29 @@ fn lint(
             }
         }
     }
+    // A fixture is test code for its users: the contract of every API a
+    // user consumes holds in it too (it may mint, like any test).
+    for f in &cfg.fixtures {
+        let present: Vec<String> = f.paths.iter().filter(|p| root.join(p).exists()).cloned().collect();
+        let consumed: Vec<&ApiBindings> = bs
+            .iter()
+            .filter(|b| cfg.apis.iter().any(|a| a.name == b.name && f.users.contains(&a.consumer)))
+            .collect();
+        let langs: Vec<&str> = f.users.iter().filter_map(|u| cfg.node(u).map(|(l, _)| l)).collect();
+        for file in expand(root, &present).unwrap_or_default() {
+            let Ok(src) = std::fs::read(root.join(&file)) else { continue };
+            let mut found = crate::lint::wire_leaks(&String::from_utf8_lossy(&src));
+            if let Some((lang, l)) = langs.iter().find_map(|lang| language(lang, &file).map(|l| (*lang, l))) {
+                found.extend(crate::lint::serialized_boundary(lang, l.clone(), &src));
+                for b in &consumed {
+                    found.extend(crate::lint::wildcard_arms(lang, l.clone(), &src, &b.idl));
+                }
+            }
+            for x in found {
+                rep.problems.push(format!("{}:{}: {}", file.display(), x.line, x.message));
+            }
+        }
+    }
 }
 
 /// Builds `m`'s view (`view_paths` of `[m]`) under `scratch` and runs
@@ -882,8 +963,11 @@ fn run_view(
 ) -> Result<(), String> {
     let view = scratch.join(format!("view-{}-{}", m.name, std::process::id()));
     let paths = view_paths(cfg, idls, &[m.name.as_str()], &[]);
-    // A module's own paths must exist; `build_view` skips missing ones.
-    expand(root, &paths)?;
+    // A module's own paths must exist; `build_view` skips missing ones. A
+    // fixture declared before its first file counts as empty.
+    let fixtures = cfg.fixture_paths();
+    let required: Vec<String> = paths.iter().filter(|p| !fixtures.contains(p)).cloned().collect();
+    expand(root, &required)?;
     build_view(root, cfg, &paths, &view)?;
     let out = sandbox
         .command(cmd, &view)
@@ -1130,5 +1214,73 @@ mod tests {
         let mut dup = manifest();
         dup["api"].as_array_mut().unwrap().push(json!({"name": "x", "generator": "a", "consumer": "b", "paths": ["api"]}));
         assert!(arch_config_from_json(dup).unwrap_err().contains("one API per connected pair"));
+    }
+
+    fn with_fixture(users: Value, paths: Value) -> Value {
+        let mut m = manifest();
+        m["fixture"] = json!([{"name": "heroes", "users": users, "paths": paths, "max_bytes": 10}]);
+        m
+    }
+
+    #[test]
+    fn a_view_holds_the_fixtures_of_its_nodes() {
+        let mut m = with_fixture(json!(["a"]), json!(["fixtures/heroes"]));
+        m["root"] = json!([{"name": "cli", "lang": "rust", "paths": ["bin"]}]);
+        m["fixture"].as_array_mut().unwrap().push(json!({"name": "both", "users": ["b", "cli"], "paths": ["fixtures/both"]}));
+        let l = loaded(&m);
+        assert_eq!(view_paths(&l.cfg, &l.idls, &["a"], &[]), ["a", "shared.txt", "api", "fixtures/heroes"]);
+        assert_eq!(view_paths(&l.cfg, &l.idls, &["b"], &["t".into()]), ["b", "shared.txt", "api", "fixtures/both", "t"]);
+        assert_eq!(view_paths(&l.cfg, &l.idls, &["cli"], &[]), ["bin", "shared.txt", "fixtures/both"]);
+        assert_eq!(l.cfg.fixture_users(["fixtures/both/x.rs", "a/lib.rs"]), ["b", "cli"]);
+    }
+
+    #[test]
+    fn fixtures_are_budgeted_owned_and_may_start_empty() {
+        let d = fixture();
+        let mut m = with_fixture(json!(["a"]), json!(["fixtures/heroes"]));
+        m["module"][0]["test_cmd"] = json!("test ! -e fixtures/heroes");
+        // Declared before its first file: empty, and the module's jail runs.
+        let rep = run(d.path(), &m);
+        assert!(rep.pass(), "{:?}", rep.problems);
+        assert!(rep.headroom.iter().any(|h| h == "fixture heroes: users 1, bytes 0/10, missing paths count as empty"), "{:?}", rep.headroom);
+        write(d.path(), "fixtures/heroes/mod.rs", "pub const HERO: i64 = 1;");
+        m["source_paths"] = json!(["a", "b", "api", "fixtures"]);
+        m["module"][0]["test_cmd"] = json!("test -e fixtures/heroes/mod.rs");
+        m["module"][1]["test_cmd"] = json!("test ! -e fixtures/heroes/mod.rs && test -e api/gen/ab.rs");
+        let all = run(d.path(), &m).problems.join("\n");
+        assert!(all.contains("fixture heroes: bytes 24 exceeds budget 10"), "{all}");
+        assert!(!all.contains("owned by nobody") && !all.contains("jail view"), "{all}");
+        // A TypeScript file serves no Rust user; data serves any.
+        write(d.path(), "fixtures/heroes/x.ts", "export const x = 1;");
+        write(d.path(), "fixtures/heroes/data.json", "{}");
+        let all = run(d.path(), &m).problems.join("\n");
+        assert!(all.contains("fixtures/heroes/x.ts: fixture heroes serves a rust user"), "{all}");
+        assert!(!all.contains("data.json"), "{all}");
+        // The consumer contract holds in a fixture of the consumer.
+        std::fs::remove_file(d.path().join("fixtures/heroes/x.ts")).unwrap();
+        let mut m = with_fixture(json!(["b"]), json!(["fixtures/heroes"]));
+        m["fixture"][0]["max_bytes"] = json!(0);
+        write(d.path(), "fixtures/heroes/mod.rs", "fn g(x: Ab) { match x { Ab::X(_) => 1, _ => 2 }; }");
+        let all = run(d.path(), &m).problems.join("\n");
+        assert!(all.contains("fixtures/heroes/mod.rs:1: wildcard arm in a match over Ab"), "{all}");
+    }
+
+    #[test]
+    fn rejects_bad_fixtures() {
+        let err = |users: Value, paths: Value| arch_config_from_json(with_fixture(users, paths)).unwrap_err();
+        assert!(err(json!([]), json!(["f"])).contains("users is empty"));
+        assert!(err(json!(["zz"]), json!(["f"])).contains("unknown module or root"));
+        assert!(err(json!(["a"]), json!([])).contains("no paths"));
+        for (p, why) in [("a/tests", "module a"), ("api/x", "api ab"), ("shared.txt", "shared"), ("architecture/x", "Lean package"), ("tasks", "tasks/"), ("../x", "relative")] {
+            assert!(err(json!(["a"]), json!([p])).contains(why), "{p}: {}", err(json!(["a"]), json!([p])));
+        }
+        let mut two = with_fixture(json!(["a"]), json!(["fixtures"]));
+        two["fixture"].as_array_mut().unwrap().push(json!({"name": "inner", "users": ["b"], "paths": ["fixtures/inner"]}));
+        assert!(arch_config_from_json(two).unwrap_err().contains("overlaps fixture inner"));
+        let mut s = with_fixture(json!(["a"]), json!(["f"]));
+        s["fixture"][0]["stand_in"] = json!("ab");
+        assert!(arch_config_from_json(s.clone()).unwrap_err().contains("users are exactly a and b"));
+        s["fixture"][0]["users"] = json!(["b", "a"]);
+        assert!(arch_config_from_json(s).is_ok());
     }
 }

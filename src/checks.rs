@@ -1114,6 +1114,8 @@ impl Runner {
     /// `impacted` (noted on the architecture tree), resolved against the
     /// commit's suite. The whole suite when `modules` is empty, or when
     /// `diff_from` is given and the diff from it touches a `shared` path.
+    /// `modules` widen by the users of every fixture the branch changed
+    /// since it left `main` (`records::fixture_widening`).
     pub fn run_set_for(&self, commit: &str, modules: &[String], diff_from: Option<&str>) -> Result<RunSet, String> {
         let e = crate::records::exported_at(&self.hub, commit, Some(&self.exporter))?
             .ok_or_else(|| format!("no {} at {commit}", config::ARCH_LEAN_MANIFEST))?;
@@ -1129,13 +1131,22 @@ impl Runner {
         {
             return Ok(RunSet::whole(e.suite.checks, &format!("{path} is shared: the whole suite")));
         }
-        let names = crate::records::impacted_at(&self.hub, commit, modules, Some(&self.exporter))?;
+        let mut modules = modules.to_vec();
+        let mut why = format!("the run set of {}", modules.join(", "));
+        let widened = crate::records::fixture_widening(&self.hub, &e.arch, commit, &modules, diff_from);
+        if !widened.is_empty() {
+            why.push_str(&format!(" and {} (users of a fixture it changed)", widened.join(", ")));
+            modules.extend(widened);
+        }
+        let names = crate::records::impacted_at(&self.hub, commit, &modules, Some(&self.exporter))?;
         let checks = names
             .iter()
             .map(|n| e.suite.check(n).cloned().ok_or_else(|| format!("run set names check {n:?}, which the suite lacks")))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(RunSet { checks, whole: false, why: format!("the run set of {}", modules.join(", ")) })
+        Ok(RunSet { checks, whole: false, why })
     }
+
+
 
     /// The task check of `slug` at `commit` (spec §6.3), run once: every
     /// check in `architecture/Tests/<slug>.lean`, or a flaky-test-fix's

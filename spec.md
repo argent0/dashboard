@@ -248,8 +248,8 @@ The suite is part of the architecture's Lean package (`architect-v3.md`),
 in three kinds of file:
 
 - `architecture/Tests.lean` (director-owned): the project's checks, plus
-  `test_paths`, the files that could defeat a test without belonging to one
-  (fixtures, `conftest.py`, test config), and `list_cmd` (§15).
+  `test_paths`, the setup every view holds (a root `conftest.py`, test
+  config), and `list_cmd` (§15).
 - `architecture/Tests/<slug>.lean`: the checks a task's post adds (§6.3),
   written by the director or its task agent.
 - `architecture/Tests/<slug>.worker.lean`: the checks the task's worker
@@ -257,6 +257,37 @@ in three kinds of file:
 
 Per-task files keep parallel tasks (§4) apart: each writes its own, and two
 tasks only conflict in the suite when they really change the same check.
+
+**Fixtures.** Setup that some modules share (a stand-in of an API, scenario
+ids, helpers) is a `fixture` block in `architecture/Architecture.lean`,
+beside the modules it serves:
+
+```lean
+fixture heroes where
+  users = [core, alpha, beta]
+  paths = ["fixtures/heroes"]
+  max_bytes = 4000
+  -- stand_in = «core-alpha»   (users = that API's generator and consumer)
+```
+
+- A view holds a fixture when one of its nodes is a user; a module's jail
+  view and `dashboard build` hold it too.
+- Its paths lie under no node and apart from other fixtures, `test_paths`,
+  `shared`, `linked`, API paths, `architecture/`, `tasks/` and every
+  check's `files` (a load error otherwise). So a check's `files` never
+  reach into a fixture, and a check reads one only through its `covers`.
+- `max_bytes` budgets every file under `paths`; a path with no file yet
+  counts as empty, so the director declares a fixture on `main` and a task
+  fills it. Raising it is a budget raise (`architect-v3.md`).
+- Source files in a known language match every user's language; data
+  files (JSON, text) serve any. The consumer contract (§`architect-v3.md`
+  lints) holds in a fixture of a consumer, and production code reaches
+  into none.
+- `stand_in = <api>` marks a fixture calling that API's generated
+  stand-in (`<api>_stand_in!`); its users are exactly the API's generator
+  and consumer.
+- `dashboard arch check` reports each fixture's user count, so the director
+  sees one widening toward a global testkit.
 
 Every check declares:
 
@@ -278,8 +309,9 @@ player keeps it while running only run sets (§6.6).
 
 **Each check proves its `covers`.** A check (other than `covers = all`)
 runs in a view built like a module's (`architect-v3.md`): the covered
-modules' files, their APIs' files and `impl` files, `shared` and
-`test_paths`, minus the `files` of every other check; then its own `files`,
+modules' files, their APIs' files and `impl` files, `shared`, the fixtures
+its covered nodes use and `test_paths`, minus the `files` of every other
+check; then its own `files`,
 every `.gitignore` and the `linked` symlinks, all inside the jail (§20). The
 view holds the files as committed, copied fresh, so each has a new mtime
 and a build cache shared through `linked` rebuilds what changed. A module's
@@ -376,8 +408,16 @@ A task runs only the checks that can see its change.
   `Dashboard.impacted` to the task's `modules`, so an undeclared name is a
   `plan` rejection. The run set is every check whose `covers` meets
   `modules`, plus every `covers = all` check. A commit that touches `shared`
-  runs the whole suite. The result is cached by the architecture tree and
-  the module list.
+  runs the whole suite. A branch that changed a fixture since it left
+  `main` adds the fixture's users to `modules` (the diff from the merge
+  base, so an earlier post or contest reply counts). The result is cached
+  by the architecture tree and the module list.
+- **Fixture edits.** A task agent writes a fixture when one of the task's
+  modules is a user (every fixture, with no modules). A post or a contest
+  reply changing a fixture runs the checks of all its users beyond the
+  task's own, and each must pass or fail on `main` too; otherwise the
+  commit is rejected (`post`, or `review` for a reply). The worker reads a
+  fixture pinned and contests (§18) when one is at fault.
 - **Worker checks.** The worker may add tests wherever the project keeps
   them, declared in `architecture/Tests/<slug>.worker.lean` with `covers`
   within `modules`. Their `files` and that file stay the worker's to edit
@@ -385,7 +425,8 @@ A task runs only the checks that can see its change.
 - **Where run sets apply.** Every task-level judgement uses the task's run
   set: finish, send-back and trim (§9).
   Landing an accept runs `impacted(the task's modules ∪ the modules main
-  changed since the branch last saw it)` on the merge result (§11).
+  changed since the branch last saw it ∪ the users of every fixture either
+  side changed)` on the merge result (§11).
 - **Where the whole suite runs.** At player start, on `main` (the
   `verify_main` run, §20), and on every director commit to `main`. A
   failing `main` holds work like an over-budget one until it is fixed
@@ -464,8 +505,11 @@ file that exists at that moment under:
 
 - `architecture/` (the manifest, the APIs and every suite file), except the
   task's own `Tests/<slug>.worker.lean`,
-- the `files` of every check other than the worker's own, and `test_paths`
-  (the whole test tree),
+- every frame's generated skeleton (`<src>/frame/`, `architect-v3.md`
+  "Frames"): the worker writes the holes beside it,
+- the `files` of every check other than the worker's own, `test_paths` and
+  every fixture (the whole test tree; a test-speedup unpins the last two,
+  and a flaky-test-fix the test files new to its branch),
 - `tasks/<slug>/`.
 
 Every worker commit must leave each pinned file present and byte-identical
@@ -796,7 +840,8 @@ task.
 proves the replacement stable. `architecture/Tests.lean` needs `list_cmd`, printing one
 test per line.
 
-- *Pins*: only `fix_paths` are unpinned; `tasks/<slug>/` stays pinned.
+- *Pins*: only `fix_paths` and the test files new to the branch (absent at
+  its merge base with `main`) are unpinned; `tasks/<slug>/` stays pinned.
 - *Post*: the §6.3 rules, except the `[check]` must not be in the suite (no
   `architecture/Tests/<slug>.lean`; a stress check would slow every later suite). The evidence must reproduce
   the flake, else the post is an `evidence` rejection.
@@ -805,7 +850,8 @@ test per line.
   `refs/retired/<slug>` under a marker commit whose body is `evidence did not
   reproduce (k/N)`. Results are cached by commit, so a retry is a new slug
   with a larger `runs`. The evidence is re-run at launch.
-- *Scope*: a finish may change only `fix_paths` (and add new test files).
+- *Scope*: a finish may change only `fix_paths` and test files new to the
+  branch, so a file added in one round stays the worker's in the next.
   A flake whose cause is in the product code isn't this kind of task: it
   takes the regular path (an ordinary task with a deterministic failing
   test, or a spike first). Touching anything else is a `pins` strike, and
@@ -980,7 +1026,7 @@ fetch is validated, as one cumulative change from the hub tip:
 | `ready` | adds `prompt.md`, the test files, `architecture/Tests/<slug>.lean` (the task check) | the post row of §9 | `post`, `evidence` |
 | `tested` | adds `reviews/r<N>.md` + new/updated tests | the send-back row of §9 | `review` |
 | `contested` | adds `contests/c<N>.md` + optionally fixed tests | the reply row of §18 | `ownership` |
-| any | touches a path outside its scope: `architecture/Tests/<slug>.lean`, the `files` of checks in the task's run set, the APIs whose both ends are in `modules`, the hub's `test_paths`, `[player] lock_files` and `tasks/<slug>/`; changes `task.toml` (the director's plan); any other status | — | `ownership` |
+| any | touches a path outside its scope: `architecture/Tests/<slug>.lean`, the `files` of checks in the task's run set, the APIs whose both ends are in `modules`, the frames of `modules` (Lean file, skeleton and the starters of new holes), the fixtures one of `modules` uses, the hub's `test_paths`, `[player] lock_files` and `tasks/<slug>/`; changes `task.toml` (the director's plan); any other status | — | `ownership` |
 | any | an empty (marker) commit | — | `ownership` |
 | any | merge commit, or rewrites a commit imported from it | — | `history` |
 
@@ -988,7 +1034,8 @@ Scope is read at the hub tip, so a commit can't widen its own, with one
 exception: the commit may add new files under the `files` it declares in
 `architecture/Tests/<slug>.lean`, so a test can live inside a module's paths
 (a Rust crate's `tests/`) and stay in the module's view. Existing files there
-stay the worker's.
+stay the worker's. Those `files` never overlap a fixture (§6.2), so the
+exception never reaches into one.
 Rejections count against the task's strike counters like anyone's (§10) and
 are relayed into the task agent's session with a recovery hint. A hub tip
 that moved under an unimported commit (an unblock merge, a director replan)
@@ -1209,7 +1256,8 @@ is the boundary, and the boundary is what the worker's tools see.
   the same Lean package the player reads; `tasks/<slug>/`; the files of
   the APIs of each of `modules` (generated or consumed, every API they
   ref, with their `impl` files); the `files` of the checks in the task's
-  run set; `test_paths`; every `.gitignore`; the agent config the worker's
+  run set; the fixtures of `modules` and of those checks' covers;
+  `test_paths`; every `.gitignore`; the agent config the worker's
   agent reads, `.claude/` and `CLAUDE.md`.
 - *Absent*: other modules' and roots' sources, and so their inline tests,
   and the `files` of every check outside the run set. An inline test

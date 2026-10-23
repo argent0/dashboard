@@ -98,8 +98,9 @@ pub fn init(
     let scratch = Path::new(&git_dir).join("dashboard-init-arch");
     let exported = lean::Exporter::new(scratch.clone(), sandbox.clone()).export_tree(&director, &tree);
     let _ = std::fs::remove_dir_all(&scratch);
-    let suite = exported.map_err(|e| format!("{}: {e}", config::ARCH_DIR))?.suite;
-    config::check_lock_files(&roadmap.player.lock_files, &suite.test_paths)
+    let exported = exported.map_err(|e| format!("{}: {e}", config::ARCH_DIR))?;
+    let test_side: Vec<String> = exported.suite.test_paths.iter().cloned().chain(exported.arch.fixture_paths()).collect();
+    config::check_lock_files(&roadmap.player.lock_files, &test_side)
         .map_err(|e| format!("roadmap.toml: {e}"))?;
 
     if let Some(text) = director.show_file("refs/heads/main", prompts::FILE) {

@@ -921,7 +921,7 @@ pub(crate) fn path_under_test_paths(path: &str, test_paths: &[String]) -> bool {
     })
 }
 
-/// A `[player] lock_files` entry under `test_paths` would be pinned against
+/// A `[player] lock_files` entry under `test_paths` (or a fixture) would be pinned against
 /// the worker, who then couldn't add the product's own dependencies.
 pub(crate) fn check_lock_files(lock_files: &[String], test_paths: &[String]) -> Result<(), String> {
     match lock_files
@@ -929,7 +929,7 @@ pub(crate) fn check_lock_files(lock_files: &[String], test_paths: &[String]) -> 
         .find(|f| path_under_test_paths(f, test_paths))
     {
         Some(f) => Err(format!(
-            "[player] lock_files: {f:?} is under test_paths, so it is pinned against the worker; a lock file is the task agent's and the worker's both"
+            "[player] lock_files: {f:?} is under test_paths or a fixture, so it is pinned against the worker; a lock file is the task agent's and the worker's both"
         )),
         None => Ok(()),
     }
@@ -969,6 +969,31 @@ pub struct ArchConfig {
     pub roots: Vec<RootConfig>,
     #[serde(rename = "api")]
     pub apis: Vec<ApiConfig>,
+    /// Test setup shared by exactly its users (`fixture` blocks).
+    #[serde(rename = "fixture")]
+    pub fixtures: Vec<FixtureConfig>,
+    /// The modules' frames (`architecture/Frames/<module>.lean`), from the
+    /// export's top level; checked against the APIs by `frame::render`.
+    #[serde(skip)]
+    pub frames: Vec<crate::frame::Frame>,
+}
+
+/// A `fixture` block: test setup (a stand-in, scenario ids, helpers) under
+/// `paths`, which lie under no node. A view holds it when one of the view's
+/// nodes is among `users`; a task agent writes it when one of the task's
+/// modules is; workers read it, pinned.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FixtureConfig {
+    pub name: String,
+    /// Modules and roots.
+    pub users: Vec<String>,
+    pub paths: Vec<String>,
+    /// Bytes across every file under `paths`; 0 is off.
+    pub max_bytes: u64,
+    /// The API whose generated stand-in the fixture calls: the users are
+    /// exactly its generator and consumer.
+    pub stand_in: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1061,6 +1086,37 @@ pub fn is_arch_api_file(path: &str) -> bool {
 }
 
 impl ArchConfig {
+    /// Every fixture path, as written in the manifest.
+    pub fn fixture_paths(&self) -> Vec<String> {
+        self.fixtures.iter().flat_map(|f| f.paths.iter().cloned()).collect()
+    }
+
+    /// The fixtures one of `nodes` uses, in manifest order.
+    pub fn fixtures_of<'a>(&'a self, nodes: &[&str]) -> Vec<&'a FixtureConfig> {
+        self.fixtures.iter().filter(|f| f.users.iter().any(|u| nodes.contains(&u.as_str()))).collect()
+    }
+
+    /// The fixture `path` lies under, if any.
+    pub fn fixture_at(&self, path: &str) -> Option<&FixtureConfig> {
+        self.fixtures.iter().find(|f| path_under_test_paths(path, &f.paths))
+    }
+
+    /// The users of every fixture one of `paths` lies under, deduplicated
+    /// in manifest order.
+    pub fn fixture_users<'a>(&'a self, paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for p in paths {
+            for f in self.fixtures.iter().filter(|f| path_under_test_paths(p, &f.paths)) {
+                for u in &f.users {
+                    if !out.contains(u) {
+                        out.push(u.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Every path an API is made of, as written in the manifest.
     pub fn api_paths(&self) -> Vec<String> {
         self.apis.iter().flat_map(|a| a.paths.iter().cloned()).collect()
@@ -1252,6 +1308,7 @@ impl ArchConfig {
                 return Err(format!("linked {l:?}: overlaps module or API path {p:?}"));
             }
         }
+        self.validate_fixtures(&names, &root_names)?;
         for r in &self.view_rewritable {
             let r = r.trim_end_matches('/');
             if r.is_empty() || r.starts_with('/') || r.split('/').any(|c| c == ".." || c == ".") {
@@ -1259,6 +1316,78 @@ impl ArchConfig {
             }
             if !path_under_test_paths(r, &self.shared) {
                 return Err(format!("view_rewritable {r:?}: must lie under a shared path"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ArchConfig {
+    /// A fixture's users are known nodes; its paths are relative, lie under
+    /// no node, and stay apart from other fixtures, APIs, `shared`,
+    /// `linked`, the Lean package and `tasks/`. With `stand_in`, the users
+    /// are that API's generator and consumer.
+    fn validate_fixtures(
+        &self,
+        modules: &std::collections::BTreeSet<&str>,
+        roots: &std::collections::BTreeSet<&str>,
+    ) -> Result<(), String> {
+        let overlap = |a: &str, b: &str| {
+            let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
+            path_under_test_paths(a, &[b.to_string()]) || path_under_test_paths(b, &[a.to_string()])
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for f in &self.fixtures {
+            let who = format!("fixture {}", f.name);
+            if f.name.is_empty() || !seen.insert(f.name.as_str()) {
+                return Err(format!("fixture name {:?}: empty or duplicate", f.name));
+            }
+            if f.users.is_empty() {
+                return Err(format!("{who}: users is empty: name the modules and roots it serves"));
+            }
+            if let Some(u) = f.users.iter().find(|u| !modules.contains(u.as_str()) && !roots.contains(u.as_str())) {
+                return Err(format!("{who}: unknown module or root {u:?}"));
+            }
+            if f.paths.is_empty() {
+                return Err(format!("{who}: no paths"));
+            }
+            for p in &f.paths {
+                let t = p.trim_end_matches('/');
+                if t.is_empty() || t.starts_with('/') || t.split('/').any(|c| c == ".." || c == ".") {
+                    return Err(format!("{who}: path {p:?} must be a relative path without . or .."));
+                }
+                let owners = self
+                    .modules
+                    .iter()
+                    .map(|m| (format!("module {}", m.name), &m.paths))
+                    .chain(self.roots.iter().map(|r| (format!("root {}", r.name), &r.paths)))
+                    .chain(self.apis.iter().map(|a| (format!("api {}", a.name), &a.paths)))
+                    .chain(self.fixtures.iter().filter(|o| o.name != f.name).map(|o| (format!("fixture {}", o.name), &o.paths)))
+                    .chain([("shared".to_string(), &self.shared), ("linked".to_string(), &self.linked)]);
+                for (owner, paths) in owners {
+                    if let Some(q) = paths.iter().find(|q| overlap(p, q)) {
+                        return Err(format!("{who}: path {p:?} overlaps {owner}'s {q:?}: a fixture lies under no node and apart from the rest"));
+                    }
+                }
+                if overlap(p, ARCH_DIR) || overlap(p, "tasks") {
+                    return Err(format!("{who}: path {p:?} overlaps the Lean package or tasks/"));
+                }
+            }
+            if let Some(api) = &f.stand_in {
+                let Some(a) = self.apis.iter().find(|a| a.name == *api) else {
+                    return Err(format!("{who}: stand_in names unknown api {api:?}"));
+                };
+                let mut want = vec![a.generator.as_str(), a.consumer.as_str()];
+                let mut have: Vec<&str> = f.users.iter().map(|u| u.as_str()).collect();
+                want.sort();
+                have.sort();
+                have.dedup();
+                if want != have {
+                    return Err(format!(
+                        "{who}: stand_in = {api}, so users are exactly {} and {} (the stand-in compiles only in their views)",
+                        a.generator, a.consumer
+                    ));
+                }
             }
         }
         Ok(())

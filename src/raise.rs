@@ -16,7 +16,8 @@ use std::collections::BTreeMap;
 /// One raised budget.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Raise {
-    /// `max_modules`, `module <name> max_ast`, `api <name> max_types`, ...
+    /// `max_modules`, `module <name> max_ast`, `api <name> max_types`,
+    /// `fixture <name> max_bytes`, ...
     pub budget: String,
     pub old: u64,
     pub new: u64,
@@ -86,6 +87,9 @@ pub fn budgets(cfg: &ArchConfig) -> BTreeMap<String, u64> {
             out.insert(format!("api {} {k}", a.name), v);
         }
     }
+    for f in &cfg.fixtures {
+        out.insert(format!("fixture {} max_bytes", f.name), f.max_bytes);
+    }
     out
 }
 
@@ -116,7 +120,9 @@ fn without_budgets(doc: &Value) -> Value {
     if let Some(obj) = v.get_mut("arch").and_then(Value::as_object_mut) {
         obj.remove("max_modules");
         obj.remove("max_roots");
-        for (key, fields) in [("module", &MODULE_BUDGETS[..]), ("root", &MODULE_BUDGETS[..]), ("api", &API_BUDGETS[..])] {
+        for (key, fields) in
+            [("module", &MODULE_BUDGETS[..]), ("root", &MODULE_BUDGETS[..]), ("api", &API_BUDGETS[..]), ("fixture", &["max_bytes"][..])]
+        {
             if let Some(Value::Array(items)) = obj.get_mut(key) {
                 for item in items {
                     if let Some(tab) = item.as_object_mut() {
@@ -287,6 +293,23 @@ mod tests {
         assert!(e.contains("only budget fields in architecture/"), "{e}");
         // A comment-only edit beside the raise is fine: the export is unchanged.
         assert!(judge(Some(&old), &doc(120, ""), "raise: grew", "", &arch(&["architecture/Apis/ab.lean", "architecture/Architecture.lean"]), 1).is_ok());
+    }
+
+    #[test]
+    fn a_fixture_budget_raises_like_a_module_budget() {
+        let base = with(|v| v["fixture"] = json!([{"name": "heroes", "users": ["a"], "paths": ["fixtures/heroes"], "max_bytes": 4000}]));
+        let up = {
+            let mut v = base.clone();
+            v["fixture"][0]["max_bytes"] = json!(5000);
+            v
+        };
+        let judged = |new: &Value, subject: &str| judge(Some(&source(&base)), &source(new), subject, "", &files(ARCH), 3);
+        assert!(judged(&up, "bump").unwrap_err().contains("raise: <reason>"));
+        let r = judged(&up, "raise: shared heroes grew").unwrap();
+        assert_eq!((r[0].budget.as_str(), r[0].old, r[0].new), ("fixture heroes max_bytes", 4000, 5000));
+        let mut wide = up.clone();
+        wide["fixture"][0]["users"] = json!(["a", "b"]);
+        assert!(judged(&wide, "raise: x").unwrap_err().contains("only budget fields"));
     }
 
     #[test]

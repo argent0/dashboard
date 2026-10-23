@@ -462,12 +462,16 @@ pub fn on_main_at_hub(hub: &Git, director: &Git) -> Result<(), String> {
 /// architecture and `docs_paths`. It admits files under any API's `gen/`
 /// (`arch check` pins them to the IDL) and, when the commit adds a module
 /// (in `new`, absent from `old`), that module's paths and `shared` files,
-/// as long as each new module's files are exactly its scaffold.
+/// as long as each new module's files are exactly its scaffold. It admits a
+/// frame's skeleton, the starter of a hole new to the commit, and
+/// deleting the files of a fixture the commit drops (under an old
+/// fixture's paths, under no new one's).
 pub fn admit(git: &Git, old: Option<&ArchConfig>, new: Option<&ArchConfig>, candidate: &str, paths: &[String]) -> Result<(), String> {
     let refuse = |path: &str, why: &str| {
         Err(format!(
             "ownership: main commit touches {path:?}; a main commit changes only roadmap.toml, prompts.kdl, the architecture \
-             (architecture/), docs_paths entries, APIs' gen/ bindings, and a new module's scaffold with shared files{why}"
+             (architecture/), docs_paths entries, APIs' gen/ bindings, a new module's scaffold with shared files, and deletes \
+             the files of a fixture it drops{why}"
         ))
     };
     let mut gen_dirs = Vec::new();
@@ -487,9 +491,34 @@ pub fn admit(git: &Git, old: Option<&ArchConfig>, new: Option<&ArchConfig>, cand
         None => Vec::new(),
     };
     let shared = new.map(|n| n.shared.clone()).unwrap_or_default();
+    // A frame's skeleton follows its Lean file, and a new hole gets its
+    // starter (an existing hole stays the worker's).
+    for cfg in old.into_iter().chain(new) {
+        gen_dirs.extend(cfg.frames.iter().map(|f| f.gen_dir()));
+    }
+    let new_holes: Vec<String> =
+        new.map(|n| n.frames.iter().flat_map(|fr| fr.fns.iter().map(|f| fr.hole_file(&f.name))).collect()).unwrap_or_default();
+    let old_fixtures = old.map(|o| o.fixture_paths()).unwrap_or_default();
+    let new_fixtures = new.map(|n| n.fixture_paths()).unwrap_or_default();
     let mut touched: BTreeMap<&str, &config::ModuleConfig> = BTreeMap::new();
     for path in paths {
         if path_under_test_paths(path, &gen_dirs) {
+            continue;
+        }
+        if new_holes.contains(path) && git.blob_hash(&format!("{candidate}~1"), path).is_none() {
+            continue;
+        }
+        // A hole of a fn its frame dropped goes with it.
+        if new.is_some_and(|n| n.frames.iter().any(|fr| path_under_test_paths(path, &[format!("{}/holes", fr.src.trim_end_matches('/'))])))
+            && !new_holes.contains(path)
+            && git.blob_hash(candidate, path).is_none()
+        {
+            continue;
+        }
+        if path_under_test_paths(path, &old_fixtures)
+            && !path_under_test_paths(path, &new_fixtures)
+            && git.blob_hash(candidate, path).is_none()
+        {
             continue;
         }
         if let Some(m) = new_modules.iter().find(|m| path_under_test_paths(path, &m.paths)) {

@@ -52,7 +52,8 @@ worker max-bytes=512 {
     // {slug}; appended to `launch` for an ordinary task, whose tree is sparse
     workspace max-bytes=1024 #"""
         Your working tree holds only this task's files: your modules, `shared`, architecture/,
-        tasks/{slug}/, the APIs of your modules and the files of the checks that judge you
+        tasks/{slug}/, the APIs of your modules, their fixtures (shared test setup, pinned: reuse
+        it, and contest when it is at fault) and the files of the checks that judge you
         (`dashboard scope` lists them). Other modules are absent on purpose; read one with
         `git show origin/task/{slug}:<path>` when you must.
 
@@ -60,7 +61,8 @@ worker max-bytes=512 {
         with each one's `build_cmd`; `dashboard test [check…]` runs the run set, or the named checks
         of it. Declare a new test in architecture/Tests/{slug}.worker.lean first, then write its
         files: `dashboard build` or `dashboard test` opens them in your tree so `git add -A` picks
-        them up.
+        them up. A module with a frame (architecture/Frames/<module>.lean) has a pinned skeleton
+        under its frame/ directory: write only the bodies in holes/, each reaching only its `ctx`.
         """#
 
     // {slug} {fix_paths} {replacements}; appended to `launch` for a flaky-test-fix
@@ -276,6 +278,10 @@ task-agent max-bytes=512 {
           files under tasks/{slug}/, never code. Each check in Tests/{slug}.lean names `covers`
           inside the task's modules and its test files in `files`. task.toml is the director's
           plan; leave it as it is.
+        - Test setup shared across test files (a stand-in, scenario ids, helpers) lives in a
+          fixture of the task's modules (`fixture` blocks in architecture/Architecture.lean,
+          within `max_bytes`): import it, extend it there, and keep each test file to tests.
+          A fixture serves all its users: their checks must keep passing.
         - Never commit accept:, retire: or any other marker: you recommend, the director decides.
 
         The task, as the director planned it (phase {phase}):
@@ -338,7 +344,9 @@ task-agent max-bytes=512 {
           every test it adds must be pure;
         - the task's test files, named in the `files` of its checks (or under test_paths); a
           new file there may sit inside a module's paths, e.g. a Rust crate's tests/, so it
-          builds in the module's view;
+          builds in the module's view; shared setup goes in a fixture of the task's modules;
+        - when the task changes a module's structure, its frame (architecture/Frames/<module>.lean:
+          fns, callees, branches), regenerated with `dashboard arch gen` (skeleton, new holes);
         {check}
         - updates to any existing test this task makes stale.
         Before committing, run the task's check and confirm it fails, for the reason the task exists:
@@ -368,7 +376,8 @@ task-agent max-bytes=512 {
         {tip}; the player ran it, so don't re-run it. {sync} Read what the worker changed this
         round: git diff {base} {tip}. Check that it does what the task asked, stays in scope, doesn't game its own
         test (special-cased inputs, monkeypatching, a helper that neuters other tests), adds no impure
-        test, and won't break the tasks after it. Then either:
+        test, adds no second stand-in or copied helper beside a fixture, and won't break the
+        tasks after it. Then either:
         - recommend accept: commit nothing, run dashboard report accept --why "…" --suite "…". In
           --suite, mark each check this task added, by its name in architecture/Tests/{slug}.lean
           or {slug}.worker.lean, keep (it guards behaviour the application depends on) or drop

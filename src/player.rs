@@ -1865,6 +1865,15 @@ impl<S: Sessions> Player<S> {
         self.suite_at(commit).map(|s| s.test_paths).unwrap_or_default()
     }
 
+    /// The pinned test side at `commit`: `test_paths` and every fixture's
+    /// paths; none when it doesn't load.
+    fn test_side_at(&self, commit: &str) -> Vec<String> {
+        match records::exported_at(&self.hub, commit, Some(self.runner.exporter())) {
+            Ok(Some(e)) => e.suite.test_paths.iter().cloned().chain(e.arch.fixture_paths()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// `base` is "the current hub main" at this point in the cumulative walk
     /// (it advances with every successfully-imported commit): docs_paths is
     /// read from it, per spec.
@@ -1891,7 +1900,7 @@ impl<S: Sessions> Player<S> {
             Some(text) => {
                 let new = config::roadmap_config_from_str(&text)
                     .map_err(|e| (Reason::Ownership, format!("ownership: roadmap.toml: {e}")))?;
-                let test_paths = self.test_paths_at(candidate);
+                let test_paths = self.test_side_at(candidate);
                 config::check_lock_files(&new.player.lock_files, &test_paths)
                     .map_err(|e| (Reason::Ownership, format!("ownership: roadmap.toml: {e}")))?;
             }
@@ -2573,6 +2582,7 @@ impl<S: Sessions> Player<S> {
             self.validate_spike_post(slug, tip, candidate, status, actor, hub_state)
         } else {
             self.validate_post(slug, candidate, status, actor, hub_state)
+                .and_then(|()| self.fixture_guard(slug, tip, candidate).map_err(|e| format!("post: {e}")))
                 .and_then(|()| {
                     self.evidence_miss(slug, candidate).map_or(Ok(()), |miss| {
                         reason = Reason::Evidence;
@@ -2927,6 +2937,9 @@ impl<S: Sessions> Player<S> {
             );
             return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
+        if let Err(e) = self.fixture_guard(slug, tip, candidate) {
+            return self.reject_by(actor, slug, candidate, Reason::Review, format!("send-back: {e}"), report);
+        }
 
         let round = n + 1;
         if round > hub_state.roadmap.limits.max_review_rounds {
@@ -3189,6 +3202,9 @@ impl<S: Sessions> Player<S> {
             );
             return self.reject_by(actor, slug, candidate, Reason::Ownership, msg, report);
         }
+        if let Err(e) = self.fixture_guard(slug, tip, candidate) {
+            return self.reject_by(actor, slug, candidate, Reason::Review, format!("contest: {e}"), report);
+        }
 
         let hub_ref = format!("refs/heads/task/{slug}");
         self.hub
@@ -3238,6 +3254,86 @@ impl<S: Sessions> Player<S> {
         self.land(slug, tip, candidate, Transition::Accept, report)
     }
 
+    /// A post, send-back or contest reply that changes a fixture keeps its
+    /// users' checks passing. The fixture change is judged alone: on a
+    /// commit holding `tip` with only the fixture paths taken from
+    /// `candidate`, every check of the fixture's users that passes at `tip`
+    /// must still pass. So a new failing test beside a new scenario, or a
+    /// worker's half-done code, never counts against it. The worker reads a
+    /// fixture pinned, so a fixture the task agent breaks would cost the
+    /// worker `suite` strikes.
+    fn fixture_guard(&self, slug: &str, tip: &str, candidate: &str) -> Result<(), String> {
+        let Some(e) = records::exported_at(&self.hub, candidate, Some(self.runner.exporter()))? else { return Ok(()) };
+        let touched: Vec<String> = self
+            .hub
+            .diff_names(tip, candidate)
+            .into_iter()
+            .map(|(_, p)| p)
+            .filter(|p| e.arch.fixture_at(p).is_some())
+            .collect();
+        let users = e.arch.fixture_users(touched.iter().map(|p| p.as_str()));
+        if users.is_empty() {
+            return Ok(());
+        }
+        let only = self.fixture_only_commit(tip, candidate, &touched)?;
+        let set = self.runner.run_set_for(tip, &users, None)?;
+        let before = self.runner.run_set(tip, &set);
+        let after = self.runner.run_set(&only, &set);
+        if let Some(err) = &after.error {
+            return Err(format!("task/{slug}: the checks of the fixture's users ({}) did not run: {err}", users.join(", ")));
+        }
+        let passed: Vec<&str> = before.checks.iter().filter(|c| c.pass).map(|c| c.name.as_str()).collect();
+        let broken: Vec<String> =
+            after.checks.iter().filter(|c| !c.pass && passed.contains(&c.name.as_str())).map(|c| c.name.clone()).collect();
+        if broken.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "task/{slug}: the fixture change breaks {} (checks of its users {}); a fixture serves every user, so keep their checks passing",
+            broken.join(", "),
+            users.join(", ")
+        ))
+    }
+
+    /// A commit on `tip` whose tree is `tip`'s with `paths` as `candidate`
+    /// has them (deleted where it has none): the fixture change alone.
+    fn fixture_only_commit(&self, tip: &str, candidate: &str, paths: &[String]) -> Result<String, String> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let index = self.hub.dir.join(format!("dashboard-fixture-index-{}-{seq}", std::process::id()));
+        let index_str = index.display().to_string();
+        let env = [("GIT_INDEX_FILE", index_str.as_str())];
+        let mut info = String::new();
+        for p in paths {
+            match self.hub.run(&["ls-tree", candidate, "--", p]).ok().filter(|l| !l.trim().is_empty()) {
+                Some(line) => {
+                    let (meta, _) = line.trim_end().split_once('\t').ok_or_else(|| format!("ls-tree {p}: {line}"))?;
+                    let mut parts = meta.split(' ');
+                    let (mode, _, sha) = (parts.next().unwrap_or("100644"), parts.next(), parts.next().unwrap_or_default());
+                    info.push_str(&format!("{mode} {sha}\t{p}\0"));
+                }
+                None => info.push_str(&format!("0 {}\t{p}\0", "0".repeat(40))),
+            }
+        }
+        let ident = [
+            ("GIT_INDEX_FILE", index_str.as_str()),
+            ("GIT_AUTHOR_NAME", "player"),
+            ("GIT_AUTHOR_EMAIL", "player@dashboard"),
+            ("GIT_COMMITTER_NAME", "player"),
+            ("GIT_COMMITTER_EMAIL", "player@dashboard"),
+        ];
+        let out = self
+            .hub
+            .run_with_env(&["read-tree", tip], &env)
+            .and_then(|_| self.hub.run_with_env_stdin(&["update-index", "-z", "--index-info"], &env, &info))
+            .and_then(|_| self.hub.run_with_env(&["write-tree"], &env))
+            .and_then(|tree| self.hub.run_with_env(&["commit-tree", tree.trim(), "-p", tip, "-m", "the fixture change alone"], &ident))
+            .map(|c| c.trim().to_string())
+            .map_err(|e| format!("building the fixture change alone: {e}"));
+        let _ = std::fs::remove_file(&index);
+        out
+    }
+
     /// Lands `candidate` (an `accept:` marker, or a director's resolution of
     /// a conflict) on top of the hub tip `tip` (spec §11). When `main` has
     /// moved since the branch last saw it, the player merges `main` into the
@@ -3249,7 +3345,8 @@ impl<S: Sessions> Player<S> {
     /// task back to the worker (`sync_revision`, no review round spent).
     /// What landing `slug` runs on `merge_sha` (spec §11): the run set of
     /// the task's modules plus every module whose paths `main` changed since
-    /// the merge base; the whole suite when either side touched `shared`.
+    /// the merge base, and the users of every fixture either side changed;
+    /// the whole suite when either side touched `shared`.
     fn landing_set(&self, slug: &str, candidate: &str, main_tip: &str, merge_sha: &str) -> Result<checks::RunSet, String> {
         let tip = self.hub.rev_parse(&format!("refs/heads/task/{slug}")).unwrap_or_else(|| candidate.to_string());
         let mut modules = records::task_config_at(&self.hub, &tip, slug).map(|c| c.modules).unwrap_or_default();
@@ -3265,6 +3362,11 @@ impl<S: Sessions> Player<S> {
                 modules.push(m.name.clone());
             }
         }
+        for u in e.arch.fixture_users(main_diff.iter().map(|p| p.as_str())) {
+            if !modules.contains(&u) {
+                modules.push(u);
+            }
+        }
         let task_diff = self.hub.diff_names(&base, candidate);
         if let Some(p) = main_diff
             .iter()
@@ -3273,9 +3375,7 @@ impl<S: Sessions> Player<S> {
         {
             return Ok(checks::RunSet::whole(e.suite.checks, &format!("the whole suite ({p} is shared)")));
         }
-        let mut set = self.runner.run_set_for(merge_sha, &modules, None)?;
-        set.why = format!("the run set of {}", modules.join(", "));
-        Ok(set)
+        self.runner.run_set_for(merge_sha, &modules, None)
     }
 
     fn land(
@@ -4990,7 +5090,9 @@ impl<S: Sessions> Player<S> {
     }
 
     /// For a flaky-test-fix: the paths `candidate` changes outside the task's
-    /// `fix_paths`, other than brand-new files under `test_paths`. A flake
+    /// `fix_paths`, other than files under `test_paths` that are new to the
+    /// branch (absent at its merge base with `main`, so a file added in one
+    /// round stays the worker's in the next). A flake
     /// whose cause is in the product code isn't this kind of task (it takes
     /// the regular path), so touching anything else is refused. `None` for
     /// any other task, or when nothing strays.
@@ -5003,13 +5105,15 @@ impl<S: Sessions> Player<S> {
         let cfg = records::task_config_at(&self.hub, hub_tip, slug)
             .filter(|c| c.kind == TaskKind::FlakyTestFix)?;
         let test_paths = self.test_paths_at(hub_tip);
+        let base = self.hub.run(&["merge-base", "refs/heads/main", candidate]).ok();
+        let new_to_branch = |path: &str| base.as_deref().is_some_and(|b| self.hub.blob_hash(b.trim(), path).is_none());
         let stray: Vec<String> = self
             .hub
             .diff_names(hub_tip, candidate)
             .into_iter()
-            .filter(|(status, path)| {
+            .filter(|(_, path)| {
                 !cfg.fix_paths.contains(path)
-                    && !(*status == 'A' && path_under_test_paths(path, &test_paths))
+                    && !(path_under_test_paths(path, &test_paths) && new_to_branch(path))
             })
             .map(|(_, path)| path)
             .collect();
@@ -5044,8 +5148,8 @@ impl<S: Sessions> Player<S> {
     }
 
     /// For a test-speedup: what `candidate` changes beyond its scope. The
-    /// paths must be the test tree, the suite files (`Tests.lean`, `Tests/`)
-    /// or the named checks' `files`; the suite definition may change only
+    /// paths must be the test tree (`test_paths` and fixtures), the suite
+    /// files (`Tests.lean`, `Tests/`) or the named checks' `files`; the suite definition may change only
     /// in its checks' `cmd` / `retry_*` (`speedup::scope_problems`). Never
     /// `roadmap.toml`, so never `[budget]`.
     fn test_speedup_scope(&self, hub_tip: &str, candidate: &str, cfg: &TaskConfig) -> Vec<String> {
@@ -5055,6 +5159,7 @@ impl<S: Sessions> Player<S> {
         };
         let named: Vec<&str> = cfg.slow.iter().map(|s| s.check.as_str()).collect();
         let files = base.files_of(&named);
+        let test_side = self.test_side_at(hub_tip);
         let mut problems: Vec<String> = self
             .hub
             .diff_names(hub_tip, candidate)
@@ -5062,7 +5167,7 @@ impl<S: Sessions> Player<S> {
             .map(|(_, path)| path)
             .filter(|path| {
                 !(config::is_tests_path(path)
-                    || path_under_test_paths(path, &base.test_paths)
+                    || path_under_test_paths(path, &test_side)
                     || path_under_test_paths(path, &files))
             })
             .collect();
@@ -5492,8 +5597,40 @@ impl<S: Sessions> Player<S> {
         let declared: Vec<String> = records::suite_at(&self.hub, candidate, Some(self.runner.exporter()))
             .map(|s| s.from_file(&config::tests_file(slug)).iter().flat_map(|c| c.files.iter().cloned()).collect())
             .unwrap_or_default();
+        // A post declaring a frame for one of its modules writes the
+        // skeleton and a starter for each new hole: the worker fills them.
+        let modules = records::task_config_at(&self.hub, tip, slug).map(|c| c.modules).unwrap_or_default();
+        let mut skeleton: Vec<String> = Vec::new();
+        let mut starters: BTreeMap<String, String> = BTreeMap::new();
+        let mut hole_dirs: Vec<String> = Vec::new();
+        if let Ok(Some(e)) = records::exported_at(&self.hub, candidate, Some(self.runner.exporter())) {
+            let rendered = crate::frame::render(&e.arch, &e.idls);
+            for fr in e.arch.frames.iter().filter(|f| modules.contains(&f.module)) {
+                skeleton.push(fr.gen_dir());
+                hole_dirs.push(format!("{}/holes", fr.src.trim_end_matches('/')));
+                for f in &fr.fns {
+                    let file = fr.hole_file(&f.name);
+                    if let Some(h) = rendered.holes.iter().find(|h| h.file.to_string_lossy() == file) {
+                        starters.insert(file, h.starter.clone());
+                    }
+                }
+            }
+        }
         for (status, path) in diffs {
-            let added = *status == 'A' && path_under_test_paths(path, &declared);
+            // A new hole lands as its starter: its body is the worker's.
+            if *status == 'A' && let Some(want) = starters.get(path) {
+                if self.hub.show_bytes(candidate, path).as_deref() != Some(want.as_bytes()) {
+                    return Err(format!(
+                        "ownership: task/{slug}: {path} is a new hole: commit it as `dashboard arch gen` writes it; its body is the worker's"
+                    ));
+                }
+                continue;
+            }
+            // A hole of a fn the frame dropped goes with it.
+            if *status == 'D' && path_under_test_paths(path, &hole_dirs) {
+                continue;
+            }
+            let added = (*status == 'A' && path_under_test_paths(path, &declared)) || path_under_test_paths(path, &skeleton);
             if !added && !path_under_test_paths(path, &scope) {
                 return Err(format!(
                     "ownership: task/{slug}: a task agent writes its task's tests, the prompt, reviews and the APIs inside its modules, never {path:?}: the code is the worker's"

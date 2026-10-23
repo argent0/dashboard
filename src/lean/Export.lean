@@ -1,6 +1,6 @@
 /-
 The exporter: walks the environment for every `Dashboard.Settings`,
-`Module`, `Root`, `Api` and `Idl` declaration and writes one JSON document in
+`Module`, `Root`, `Api`, `Fixture`, `Check`, `Suite` and `Idl` declaration and writes one JSON document in
 the shape `dashboard` reads (`config::ArchConfig` plus every `idl::Idl`).
 Only the generated runner imports this (it imports `Lean`); API files don't.
 -/
@@ -112,13 +112,27 @@ def Api.toJson (a : Api) : Json :=
     ("max_string_len", a.max_string_len), ("max_bytes_len", a.max_bytes_len),
     ("max_rules", a.max_rules), ("max_tokens", a.max_tokens)]
 
+def FrameFn.toJson (f : FrameFn) : Json :=
+  Json.mkObj [("name", f.name), ("inputs", strs f.inputs), ("returns", f.returns), ("calls", strs f.callees),
+    ("branch", opt f.branchOn)]
+
+def Frame.toJson (f : Frame) (file : String) : Json :=
+  Json.mkObj [("module", f.moduleName), ("src", f.srcDir), ("bindings", f.mount),
+    ("fns", Json.arr (f.fns.toArray.map FrameFn.toJson)),
+    ("records", Json.arr (f.records.toArray.map fun r => Json.mkObj [("name", r.name), ("fields", strs r.fields)])),
+    ("sums", Json.arr (f.sums.toArray.map Sum.toJson)), ("file", file)]
+
+def Fixture.toJson (f : Fixture) : Json :=
+  Json.mkObj [("name", f.name), ("users", strs (f.users.map Node.name)), ("paths", strs f.paths),
+    ("max_bytes", f.max_bytes), ("stand_in", opt (f.stand_in.map (·.name)))]
+
 /-- `module` is the Lean module that declared the check as a path
 (`Tests`, `Tests/x.worker`): `dashboard` maps it back to the file. -/
-def Check.toJson (c : Check) (src : String) : Json :=
+def Check.toJson (c : Check) (file : String) : Json :=
   Json.mkObj [("name", c.name), ("cmd", c.cmd), ("runs", c.runs), ("min_pass", c.min_pass),
     ("retry_failed", c.retry_failed), ("retry_on", strs c.retry_on),
     ("covers", strs (c.covers.map Node.name)), ("all", c.all), ("files", strs c.files),
-    ("module", src)]
+    ("module", file)]
 
 def Suite.toJson (s : Suite) : Json :=
   Json.mkObj [("test_paths", strs s.test_paths), ("list_cmd", opt s.list_cmd)]
@@ -156,11 +170,29 @@ unsafe def evalDecl (α : Type) [Inhabited α] (n : Name) : CoreM α := do
 @[implemented_by evalDecl]
 opaque evalDeclSafe (α : Type) [Inhabited α] (n : Name) : CoreM α
 
-/-- Every declaration, as the JSON `dashboard` loads. -/
+/-- The Lean module that declared `n`, as a path (`Tests/x.worker`). -/
+def srcOf (env : Environment) (n : Name) : String :=
+  match env.getModuleIdxFor? n with
+  | some i => (env.header.moduleNames[i.toNat]?.map fun m =>
+      "/".intercalate (m.components.map (·.toString (escape := false)))).getD ""
+  | none => ""
+
+/-- Every declaration, as the JSON `dashboard` loads. The manifest's blocks
+(`architecture`, `module`, `root`, `api`, `fixture`) come from
+`Architecture.lean`, the director's file, and the `suite where` block from
+`Tests.lean`: a task agent's `Apis/` or `Tests/` file declaring one is an
+error, so a post can never widen its own scope through the manifest. -/
 def exportAll : CoreM Json := do
   let env ← getEnv
-  let settings ← declsOf ``Settings
   let mut errors : Array String := #[]
+  for (ty, what, home) in [(``Settings, "an `architecture where` block", "Architecture"), (``Module, "a module", "Architecture"),
+      (``Root, "a root", "Architecture"), (``Api, "an api", "Architecture"), (``Fixture, "a fixture", "Architecture"),
+      (``Suite, "the `suite where` block", "Tests"), (``Check, "a check", "Tests")] do
+    for n in ← declsOf ty do
+      let file := srcOf env n
+      if file != home && !(ty == ``Check && file.startsWith "Tests/") then
+        errors := errors.push s!"architecture/{file}.lean: declares {what} ({n}); it belongs in architecture/{home}.lean"
+  let settings ← declsOf ``Settings
   let base ← match settings with
     | #[n] => evalDeclSafe Settings n
     | #[] => pure {}
@@ -176,6 +208,16 @@ def exportAll : CoreM Json := do
   let mut apis := #[]
   for n in ← declsOf ``Api do
     apis := apis.push (Api.toJson (← evalDeclSafe Api n))
+  let mut fixtures := #[]
+  for n in ← declsOf ``Fixture do
+    fixtures := fixtures.push (Fixture.toJson (← evalDeclSafe Fixture n))
+  let mut frames := #[]
+  for n in ← declsOf ``Frame do
+    let file := srcOf env n
+    let f ← evalDeclSafe Frame n
+    if file != s!"Frames/{f.moduleName}" then
+      errors := errors.push s!"architecture/{file}.lean: declares the frame of {f.moduleName}; it belongs in architecture/Frames/{f.moduleName}.lean"
+    frames := frames.push (Frame.toJson f file)
   let mut idls : Array (String × Json) := #[]
   for n in ← declsOf ``Idl do
     let i ← evalDeclSafe Idl n
@@ -184,11 +226,7 @@ def exportAll : CoreM Json := do
     idls := idls.push (i.apiName, i.toJson)
   let mut checks := #[]
   for n in ← declsOf ``Check do
-    let src := match env.getModuleIdxFor? n with
-      | some i => (env.header.moduleNames[i.toNat]?.map fun m =>
-          "/".intercalate (m.components.map (·.toString (escape := false)))).getD ""
-      | none => ""
-    checks := checks.push (Check.toJson (← evalDeclSafe Check n) src)
+    checks := checks.push (Check.toJson (← evalDeclSafe Check n) (srcOf env n))
   let suiteV ← match ← declsOf ``Suite with
     | #[n] => evalDeclSafe Suite n
     | #[] => pure {}
@@ -198,9 +236,10 @@ def exportAll : CoreM Json := do
   let arch := Json.mkObj [("max_modules", base.max_modules), ("max_roots", base.max_roots),
     ("shared", strs base.shared), ("linked", strs base.linked),
     ("view_rewritable", strs base.view_rewritable), ("source_paths", strs base.source_paths),
-    ("module", Json.arr modules), ("root", Json.arr roots), ("api", Json.arr apis)]
+    ("module", Json.arr modules), ("root", Json.arr roots), ("api", Json.arr apis),
+    ("fixture", Json.arr fixtures)]
   return Json.mkObj [("arch", arch), ("idls", Json.mkObj idls.toList),
-    ("suite", suiteV.toJson), ("checks", Json.arr checks),
+    ("suite", suiteV.toJson), ("checks", Json.arr checks), ("frames", Json.arr frames),
     ("errors", Json.arr (errors.map Json.str))]
 
 /-- Writes the export to `path`: what the generated runner calls. -/
