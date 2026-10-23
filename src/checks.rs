@@ -2,7 +2,8 @@
 // scratch worktree of the hub, runs each check's `cmd` the configured
 // number of times, and caches the verdict as a git note on the checked
 // commit so rendering and repeated finish-claims never re-run tests for a
-// commit already seen.
+// commit already seen. A view check's verdict is also noted on its view's
+// tree, so a later commit whose view is the same reuses it.
 
 use crate::config::{self, BudgetConfig, Check, Claim, Evidence};
 use crate::git::Git;
@@ -19,6 +20,8 @@ use std::time::{Duration, Instant};
 
 /// Notes ref holding the check-result cache (spec §9, plan's "Check cache").
 const NOTES_REF: &str = "refs/notes/dashboard";
+/// Notes ref keyed by a view check's view tree (`Runner::view_tree`).
+const VIEW_NOTES_REF: &str = "refs/notes/dashboard-views";
 /// `output_tail` is capped at roughly this many bytes of combined output.
 const OUTPUT_TAIL_MAX: usize = 4000;
 
@@ -105,7 +108,26 @@ fn in_view(check: &Check) -> bool {
 
 /// The fingerprint of where `check` runs, versioned like the sandbox's.
 fn view_kind(check: &Check) -> &'static str {
-    if in_view(check) { "v1 view" } else { "v1 worktree" }
+    if in_view(check) { "v2 view" } else { "v1 worktree" }
+}
+
+/// What a view check sees at a commit (spec §6.6): the hub's blobs there,
+/// as `git ls-tree -r` records, and the architecture that chose them.
+struct ViewInputs {
+    arch: config::ArchConfig,
+    entries: Vec<String>,
+}
+
+impl ViewInputs {
+    fn paths(&self) -> Vec<PathBuf> {
+        self.entries.iter().filter_map(|e| e.split_once('\t')).map(|(_, p)| PathBuf::from(p)).collect()
+    }
+}
+
+/// `path` is `prefix` or lies under it.
+fn under(path: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    prefix.is_empty() || prefix == "." || path == prefix || path.strip_prefix(prefix).is_some_and(|r| r.starts_with('/'))
 }
 
 fn is_zero_u64(n: &u64) -> bool {
@@ -544,18 +566,27 @@ impl Runner {
     // ---- notes cache ----
 
     fn read_note(&self, commit: &str) -> Note {
-        match self.hub.notes_show(NOTES_REF, commit) {
+        self.read_note_at(NOTES_REF, commit)
+    }
+
+    fn read_note_at(&self, notes_ref: &str, sha: &str) -> Note {
+        match self.hub.notes_show(notes_ref, sha) {
             Some(text) => serde_json::from_str(&text).unwrap_or_default(),
             None => Note::default(),
         }
     }
 
     fn write_result(&self, commit: &str, result: &CheckResult) -> Result<(), String> {
-        let mut note = self.read_note(commit);
-        note.checks.insert(result.name.clone(), result.clone());
-        let json = serde_json::to_string(&note).map_err(|e| e.to_string())?;
+        self.write_result_at(NOTES_REF, commit, result)
+    }
+
+    fn write_result_at(&self, notes_ref: &str, sha: &str, result: &CheckResult) -> Result<(), String> {
         self.hub
-            .notes_add(NOTES_REF, commit, &json)
+            .notes_modify(notes_ref, sha, |text| {
+                let mut note: Note = text.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+                note.checks.insert(result.name.clone(), result.clone());
+                serde_json::to_string(&note).unwrap_or_default()
+            })
             .map_err(|e| e.to_string())
     }
 
@@ -661,12 +692,32 @@ impl Runner {
             return cached;
         }
 
-        let result = self.execute(commit, check, timeout, max_pass);
+        // A view check's verdict depends on its view alone: a pass noted on
+        // the same view tree, from any commit, is copied onto this one. A
+        // failure reruns on each new commit, so one flake stays local to it.
+        let inputs = in_view(check).then(|| self.view_inputs(commit, check));
+        let tree = inputs.as_ref().and_then(|i| i.as_ref().ok()).and_then(|i| self.view_tree(i).ok());
+        if let Some(tree) = &tree
+            && let Some(cached) = self
+                .read_note_at(VIEW_NOTES_REF, tree)
+                .checks
+                .get(&check.name)
+                .filter(|r| r.pass && r.reusable_for(check, max_pass, &self.sandbox.fingerprint(), timeout))
+                .cloned()
+        {
+            let _ = self.write_result(commit, &cached);
+            return cached;
+        }
+
+        let result = self.execute(commit, check, timeout, max_pass, inputs);
         // Only cache a result backed by at least one real run — a worktree
         // that couldn't even be prepared is an infra problem, not evidence,
         // and shouldn't be remembered as a verdict on `commit`.
         if !result.exits.is_empty() {
             let _ = self.write_result(commit, &result);
+            if let Some(tree) = &tree {
+                let _ = self.write_result_at(VIEW_NOTES_REF, tree, &result);
+            }
         }
         result
     }
@@ -681,6 +732,7 @@ impl Runner {
         check: &Check,
         timeout: Option<Duration>,
         max_pass: Option<u32>,
+        inputs: Option<Result<ViewInputs, String>>,
     ) -> CheckResult {
         let base = CheckResult {
             name: check.name.clone(),
@@ -714,18 +766,15 @@ impl Runner {
             };
         }
         // Every run and retry of the check shares one view.
-        let view = if in_view(check) {
-            match self.build_view(commit, check) {
-                Ok(dir) => Some(dir),
-                Err(e) => {
-                    return CheckResult {
-                        output_tail: Some(format!("view of {}: {e}", check.covers.join(", "))),
-                        ..base
-                    };
-                }
+        let view = match inputs.map(|i| i.and_then(|i| self.build_view(check, &i))) {
+            Some(Ok(dir)) => Some(dir),
+            Some(Err(e)) => {
+                return CheckResult {
+                    output_tail: Some(format!("view of {}: {e}", check.covers.join(", "))),
+                    ..base
+                };
             }
-        } else {
-            None
+            None => None,
         };
         let dir = view.clone().unwrap_or_else(|| self.work.clone());
         let result = self.attempts(check, timeout, max_pass, base, &dir, view.is_some());
@@ -735,22 +784,73 @@ impl Runner {
         result
     }
 
-    /// The view of `check`'s `covers` at `commit` (worktree prepared): the
-    /// nodes' files with their APIs, `shared`, `test_paths` and the check's
-    /// `files`, as a throwaway git repo so `leaks` works there unchanged.
-    fn build_view(&self, commit: &str, check: &Check) -> Result<PathBuf, String> {
+    /// What `check` sees at `commit` (spec §6.6), read from the hub: the
+    /// covered nodes' files with their APIs, `shared` and `test_paths`,
+    /// minus the `files` of every other check in the suite; then its own
+    /// `files` and every `.gitignore`. A module's implicit check runs all of
+    /// its module's tests, so it keeps the other checks' files.
+    fn view_inputs(&self, commit: &str, check: &Check) -> Result<ViewInputs, String> {
         let e = crate::records::exported_at(&self.hub, commit, Some(&self.exporter))?
             .ok_or("no architecture/Architecture.lean")?;
         if let Some(n) = check.covers.iter().find(|n| e.arch.node(n).is_none()) {
             return Err(format!("covers names {n:?}, which the architecture lacks"));
         }
-        let mut extra = e.suite.test_paths.clone();
-        extra.extend(check.files.iter().cloned());
         let nodes: Vec<&str> = check.covers.iter().map(|s| s.as_str()).collect();
-        let paths = crate::arch::view_paths(&e.arch, &e.idls, &nodes, &extra);
+        let paths = crate::arch::view_paths(&e.arch, &e.idls, &nodes, &e.suite.test_paths);
+        let module_check = check.source.as_deref() == Some(config::ARCH_LEAN_MANIFEST);
+        let others: Vec<&String> = e
+            .suite
+            .checks
+            .iter()
+            .filter(|c| !module_check && c.name != check.name)
+            .flat_map(|c| &c.files)
+            .collect();
+        let listing = self
+            .hub
+            .run(&["ls-tree", "-r", "-z", "--full-tree", commit])
+            .map_err(|e| format!("ls-tree {commit}: {e}"))?;
+        let entries = listing
+            .split('\0')
+            .filter(|rec| {
+                let Some((meta, path)) = rec.split_once('\t') else { return false };
+                meta.split(' ').nth(1) == Some("blob")
+                    && (check.files.iter().any(|f| under(path, f))
+                        || path.rsplit('/').next() == Some(".gitignore")
+                        || (paths.iter().any(|p| under(path, p)) && !others.iter().any(|f| under(path, f))))
+            })
+            .map(str::to_string)
+            .collect();
+        Ok(ViewInputs { arch: e.arch, entries })
+    }
+
+    /// The tree of exactly `inputs` in the hub (spec §9): the same view
+    /// content gives the same sha, on any commit. Written through a
+    /// throwaway index, without a checkout.
+    fn view_tree(&self, inputs: &ViewInputs) -> Result<String, String> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::fs::create_dir_all(&self.views).map_err(|e| format!("{}: {e}", self.views.display()))?;
+        let index = self.views.join(format!(".index-{}-{seq}", std::process::id()));
+        let _ = std::fs::remove_file(&index);
+        let index_str = index.display().to_string();
+        let env = [("GIT_INDEX_FILE", index_str.as_str())];
+        let mut input = inputs.entries.join("\0");
+        input.push('\0');
+        let tree = self
+            .hub
+            .run_with_env_stdin(&["update-index", "-z", "--index-info"], &env, &input)
+            .and_then(|_| self.hub.run_with_env(&["write-tree"], &env))
+            .map_err(|e| e.to_string());
+        let _ = std::fs::remove_file(&index);
+        tree
+    }
+
+    /// The view of `check` holding exactly `inputs` (worktree prepared),
+    /// as a throwaway git repo so `leaks` works there unchanged.
+    fn build_view(&self, check: &Check, inputs: &ViewInputs) -> Result<PathBuf, String> {
         let name: String = check.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
         let dir = self.views.join(name);
-        crate::arch::build_view(&self.work, &e.arch, &paths, &dir)?;
+        crate::arch::build_view_of(&self.work, &inputs.arch, &inputs.paths(), &dir)?;
         let git = Git::new(&dir);
         for args in [
             &["init", "-q"][..],
@@ -760,9 +860,9 @@ impl Runner {
             git.run(args).map_err(|e| e.to_string())?;
         }
         // A tool may rewrite these in a view; `leaks` skips them there.
-        if !e.arch.view_rewritable.is_empty() {
+        if !inputs.arch.view_rewritable.is_empty() {
             let mut ls = vec!["ls-files", "-z", "--"];
-            ls.extend(e.arch.view_rewritable.iter().map(|s| s.as_str()));
+            ls.extend(inputs.arch.view_rewritable.iter().map(|s| s.as_str()));
             let files = git.run(&ls).map_err(|e| e.to_string())?;
             let mut skip = vec!["update-index", "--skip-worktree", "--"];
             skip.extend(files.split('\0').filter(|f| !f.is_empty()));

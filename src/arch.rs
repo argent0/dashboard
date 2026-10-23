@@ -564,15 +564,23 @@ pub fn view_paths(cfg: &ArchConfig, idls: &BTreeMap<String, Idl>, nodes: &[&str]
 /// build output stays ignored there, and a symlink to each existing
 /// `linked` cache in `root`.
 pub fn build_view(root: &Path, cfg: &ArchConfig, paths: &[String], dir: &Path) -> Result<(), String> {
-    let _ = std::fs::remove_dir_all(dir);
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let present: Vec<String> = paths.iter().filter(|p| root.join(p).exists()).cloned().collect();
     let mut files = expand(root, &present)?;
     files.extend(gitignores(root, root)?);
+    build_view_of(root, cfg, &files, dir)
+}
+
+/// Builds a view at `dir` (created fresh) holding copies of exactly
+/// `files` (root-relative) and a symlink to each existing `linked` cache in
+/// `root`. Copies get the current mtime, so a build cache shared through
+/// `linked` always sees a view's files as new.
+pub fn build_view_of(root: &Path, cfg: &ArchConfig, files: &[PathBuf], dir: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for f in files {
         let to = dir.join(&f);
         std::fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
-        std::fs::copy(root.join(&f), &to).map_err(|e| format!("{}: {e}", f.display()))?;
+        std::fs::copy(root.join(f), &to).map_err(|e| format!("{}: {e}", f.display()))?;
     }
     // A missing cache is skipped: the suite check's own `cmd` builds it first.
     for l in &cfg.linked {

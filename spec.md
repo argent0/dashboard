@@ -278,11 +278,22 @@ player keeps it while running only run sets (§6.6).
 
 **Each check proves its `covers`.** A check (other than `covers = all`)
 runs in a view built like a module's (`architect-v3.md`): the covered
-modules' files, their APIs' files and `impl` files, `shared`, `test_paths`
-and the check's own `files`, plus the `linked` symlinks, all inside the jail
-(§20). A test that reaches into a module outside its `covers` finds nothing
-there and fails like any failing check. For a worker's own check that is a
-`suite` strike; for a pinned check the worker contests it (§18).
+modules' files, their APIs' files and `impl` files, `shared` and
+`test_paths`, minus the `files` of every other check; then its own `files`,
+every `.gitignore` and the `linked` symlinks, all inside the jail (§20). The
+view holds the files as committed, copied fresh, so each has a new mtime
+and a build cache shared through `linked` rebuilds what changed. A module's
+implicit check runs every test of its module, so its view keeps the other
+checks' files. A test that reaches into a module outside its `covers` finds
+nothing there and fails like any failing check. For a worker's own check
+that is a `suite` strike; for a pinned check the worker contests it (§18).
+
+A check tests what it declares: its verdict covers its `covers` and its own
+`files`, and a `cmd` reaching for more finds less in its view. The module
+check covers every test file of its module, so a broken test file fails
+some check of the run set. A view holding part of a workspace has to
+build: a Cargo workspace lists its members with a glob
+(`members = ["crates/*"]`), so a view with one crate loads.
 
 ### 6.3 The task check
 
@@ -384,6 +395,9 @@ A task runs only the checks that can see its change.
   `covers`, so a check outside the run set sees the same files before and
   after the task. What a view leaves out (toolchain, `linked` caches, the
   host) is what the start run catches.
+- **Inside the run set.** The same argument works per check: a check whose
+  view tree matches an earlier result reuses it (§9), so a commit editing
+  one check's test file runs that check and its module check.
 - **Tools.** In any clone, `dashboard scope` prints the task's modules,
   the paths its author may write (§8.3), and its run set; `dashboard test`
   runs that run set the way the player does (views, jail, the hub's check
@@ -505,7 +519,18 @@ or retired.
 
 Check results (check, commit, per-run exit codes) are cached as git notes
 on `refs/notes/dashboard` in the hub, so rendering never re-runs tests and
-the cache can be wiped and recomputed.
+the cache can be wiped and recomputed. A view check's result is also noted
+on its view tree, on `refs/notes/dashboard-views`: the tree of exactly the
+files of its view (§6.2), written in the hub from the commit's index
+entries, the same sha for the same content on any commit. A check runs
+only when neither the commit nor its view tree holds a result for the
+same check (name, `cmd`, thresholds, retry policy, scope, jail, timeout);
+a pass found on the view tree is copied onto the commit's note, and a
+failure reruns on each new commit, so a flake stays with the commit it hit. A check
+sees only its view, so the same view gives the same verdict; what lies
+outside views (toolchain, `linked` caches, `DASHBOARD_ROOT`) is what the
+start run and `verify_main` catch. A `covers = all` check runs in the whole
+worktree and is cached by the commit alone.
 
 ## 10. Strikes and escalation
 

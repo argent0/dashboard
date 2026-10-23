@@ -1458,7 +1458,9 @@ fn a_finish_runs_its_run_set_unless_it_touches_shared() {
 #[test]
 fn landing_adds_the_modules_main_changed() {
     // `bt` (on b) lands b/moved.txt first; `at` (on a) then lands on a main
-    // that moved in b, so its landing runs b_only, which fails on the merge.
+    // that moved in b, so its landing runs b_only, which stays out of
+    // `at`'s own run set. b's view at the merge equals bt's tip, so b_only's
+    // pass there is reused and noted on the merge (spec §9).
     let (repo, _home_dir, home, mut player) = scoped_with("at", &ab_shared(), RUN_SET_SUITE);
     let hub = Git::new(home.hub());
     plan_and_post_on(&repo, &mut player, "bt", "b");
@@ -1466,16 +1468,19 @@ fn landing_adds_the_modules_main_changed() {
     commit_multi_in_clone(&repo, "at", &[("a/feature.txt", "x\n")], "finish a");
     let report = player.tick().expect("tick");
     assert!(report.rejected.is_empty(), "{report}");
+    let at_tip = hub.rev_parse("refs/heads/task/at").unwrap();
+    let noted = |sha: &str| dashboard::checks::cached(&hub, sha).into_iter().map(|r| r.name).collect::<Vec<_>>();
+    assert!(!noted(&at_tip).contains(&"b_only".to_string()), "{:?}", noted(&at_tip));
     for slug in ["bt", "at"] {
         assert_eq!(task_status(&hub, slug), Status::Tested, "{slug}");
         director_pull_task_branch(repo.path(), slug);
         commit_empty(repo.path(), &format!("accept: {slug}"));
         player.tick().expect("accept tick");
     }
-    assert_eq!(task_status(&hub, "bt"), Status::Accepted);
-    assert_eq!(task_status(&hub, "at"), Status::InRevision);
-    let relayed = player.sessions().sent.iter().filter(|(k, _)| k == "at").map(|(_, m)| m.clone()).collect::<Vec<_>>().join("\n");
-    assert!(relayed.contains("b_only"), "{relayed}");
+    assert_eq!(task_status(&hub, "at"), Status::Accepted);
+    let main = hub.rev_parse("refs/heads/main").unwrap();
+    let merge = hub.rev_list(&["--merges", "-1", &main]).pop().expect("at's merge");
+    assert!(noted(&merge).contains(&"b_only".to_string()), "{:?}", noted(&merge));
 }
 
 #[test]

@@ -491,7 +491,7 @@ fn a_run_set_runs_each_check_in_a_view_of_what_it_covers() {
     let first = runner.run_set(&commit, &set);
     assert!(first.pass, "{}", first.summary());
     let only_a = first.checks.iter().find(|c| c.name == "only_a").unwrap();
-    assert_eq!((only_a.view.as_str(), only_a.covers.clone()), ("v1 view", vec!["a".to_string()]));
+    assert_eq!((only_a.view.as_str(), only_a.covers.clone()), ("v2 view", vec!["a".to_string()]));
     // The second run is all cache hits.
     let second = runner.run_set(&commit, &set);
     assert_eq!(first.checks, second.checks);
@@ -553,4 +553,107 @@ fn a_diff_touching_shared_runs_the_whole_suite() {
     assert!(!runner.run_set_for(&in_a, &["a".into()], Some(&base)).unwrap().whole);
     let set = runner.run_set_for(&shared, &["a".into()], Some(&base)).unwrap();
     assert!(set.whole && set.why.contains("shared.txt"), "{}", set.why);
+}
+
+// --------------------------------------------------------------------------
+// The view-tree cache (spec §9)
+// --------------------------------------------------------------------------
+
+/// Modules `a` and `b`, each with an implicit module check, and the checks
+/// `a1`, `a2` (covering `a`) and `b1` (covering `b`), each owning one test
+/// file. Every check appends a line to `<log>/<name>` when it runs.
+fn view_cache_hub(log: &std::path::Path) -> (DirectorRepo, TempDir, Home, String) {
+    let l = log.display();
+    let arch = format!(
+        "import Dashboard\nopen Dashboard\n\narchitecture where\n  max_modules = 2\n  shared = [\"shared.txt\"]\n\n\
+module a where\n  lang = rust\n  paths = [\"a\"]\n  test_cmd = \"echo >> {l}/a && grep -q ok a/src.rs && grep -q ok a/tests/a1.rs && grep -q ok a/tests/a2.rs\"\n\n\
+module b where\n  lang = rust\n  paths = [\"b\"]\n  test_cmd = \"echo >> {l}/b && grep -q ok b/src.rs\"\n\n\
+api ab : a → b where\n  paths = [\"api\"]\n"
+    );
+    let suite = format!(
+        "import Architecture\nopen Dashboard\n\n\
+check a1 where\n  cmd = \"echo >> {l}/a1 && grep -q ok a/src.rs && grep -q ok a/tests/a1.rs && test ! -e a/tests/a2.rs\"\n  covers = [a]\n  files = [\"a/tests/a1.rs\"]\n\n\
+check a2 where\n  cmd = \"echo >> {l}/a2 && grep -q ok a/src.rs && grep -q ok a/tests/a2.rs\"\n  covers = [a]\n  files = [\"a/tests/a2.rs\"]\n\n\
+check b1 where\n  cmd = \"echo >> {l}/b1 && grep -q ok b/src.rs && grep -q ok b/tests/b1.rs\"\n  covers = [b]\n  files = [\"b/tests/b1.rs\"]\n"
+    );
+    let repo = director_repo();
+    write_lean_arch(repo.path(), &arch, &[("ab", LEAN_AB_IDL)], &[("Tests", &suite)]);
+    for f in ["a/src.rs", "a/tests/a1.rs", "a/tests/a2.rs", "b/src.rs", "b/tests/b1.rs"] {
+        write_file(repo.path(), f, "ok\n");
+    }
+    write_file(repo.path(), "api/gen.rs", "\n");
+    write_file(repo.path(), "shared.txt", "1\n");
+    commit(repo.path(), "modules a and b");
+    let (home_dir, home) = init_hub(&repo);
+    // `init` commits its `.gitignore`: the baseline is main after it.
+    let c1 = Git::new(repo.path()).rev_parse("HEAD").unwrap();
+    (repo, home_dir, home, c1)
+}
+
+/// Edits `files` (path, content), commits, pushes, and returns the commit.
+fn edit(repo: &DirectorRepo, files: &[(&str, &str)], msg: &str) -> String {
+    for (f, text) in files {
+        write_file(repo.path(), f, text);
+    }
+    let c = commit(repo.path(), msg);
+    push_main_to_hub(repo.path());
+    c
+}
+
+/// Runs the whole suite at `commit` and returns the checks that ran (their
+/// log grew), sorted, and the result.
+fn ran(runner: &Runner, log: &std::path::Path, commit: &str) -> (Vec<&'static str>, checks::SuiteResult) {
+    let count = |n: &str| std::fs::read_to_string(log.join(n)).map_or(0, |s| s.lines().count());
+    let names = ["a", "a1", "a2", "b", "b1"];
+    let before: Vec<usize> = names.iter().map(|n| count(n)).collect();
+    let result = runner.run_suite(commit);
+    let ran = names.iter().zip(before).filter(|(n, b)| count(n) > *b).map(|(n, _)| *n).collect();
+    (ran, result)
+}
+
+#[test]
+fn a_check_reruns_only_when_its_view_changes() {
+    let log = TempDir::new().unwrap();
+    let (repo, _home_dir, home, c1) = view_cache_hub(log.path());
+    let runner = Runner::new(&home);
+    let hub = Git::new(home.hub());
+
+    let (r, s) = ran(&runner, log.path(), &c1);
+    assert_eq!(r, ["a", "a1", "a2", "b", "b1"]);
+    assert!(s.pass, "{}", s.summary());
+
+    // a1's own file: a1 and the module check that runs every test of `a`.
+    let c2 = edit(&repo, &[("a/tests/a1.rs", "ok 2\n")], "a1's test");
+    let (r, s) = ran(&runner, log.path(), &c2);
+    assert_eq!(r, ["a", "a1"]);
+    assert!(s.pass, "{}", s.summary());
+    let noted: Vec<String> = checks::cached(&hub, &c2).into_iter().map(|c| c.name).collect();
+    assert!(noted.contains(&"a2".to_string()) && noted.contains(&"b1".to_string()), "{noted:?}");
+
+    // a's code: every check covering `a`.
+    let c3 = edit(&repo, &[("a/src.rs", "ok 3\n")], "a's code");
+    assert_eq!(ran(&runner, log.path(), &c3).0, ["a", "a1", "a2"]);
+
+    // `shared`: everything.
+    let c4 = edit(&repo, &[("shared.txt", "2\n")], "shared");
+    assert_eq!(ran(&runner, log.path(), &c4).0, ["a", "a1", "a2", "b", "b1"]);
+
+    // A broken a2 fails a2 and the module check; a1's view holds no a2.rs.
+    let c5 = edit(&repo, &[("a/tests/a2.rs", "fail\n")], "break a2");
+    let (r, s) = ran(&runner, log.path(), &c5);
+    assert_eq!(r, ["a", "a2"]);
+    let failed: Vec<&str> = s.checks.iter().filter(|c| !c.pass).map(|c| c.name.as_str()).collect();
+    assert_eq!(failed, ["a2", "a"], "{}", s.summary());
+    // A failure reruns at the next commit with the same view.
+    let c5b = edit(&repo, &[("b/src.rs", "ok 5\n")], "b's code");
+    let (r, _) = ran(&runner, log.path(), &c5b);
+    assert_eq!(r, ["a", "a2", "b", "b1"]);
+
+    // Two commits in the same second: a1 sees the second one's code.
+    let c6 = edit(&repo, &[("a/src.rs", "ok 6\n")], "a's code again");
+    let c7 = edit(&repo, &[("a/src.rs", "gone\n")], "a's code broken");
+    assert!(ran(&runner, log.path(), &c6).0.contains(&"a1"));
+    let (r, s) = ran(&runner, log.path(), &c7);
+    assert!(r.contains(&"a1"), "{r:?}");
+    assert!(!s.checks.iter().find(|c| c.name == "a1").unwrap().pass, "{}", s.summary());
 }

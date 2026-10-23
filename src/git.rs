@@ -80,9 +80,16 @@ impl Git {
 
     /// Runs `git <args>` feeding `input` on stdin.
     pub fn run_with_stdin(&self, args: &[&str], input: &str) -> Result<String, GitError> {
+        self.run_with_env_stdin(args, &[], input)
+    }
+
+    /// Runs `git <args>` with extra environment variables, feeding `input`
+    /// on stdin.
+    pub fn run_with_env_stdin(&self, args: &[&str], envs: &[(&str, &str)], input: &str) -> Result<String, GitError> {
         let mut child = Command::new("git")
             .args(args)
             .current_dir(&self.dir)
+            .envs(envs.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
