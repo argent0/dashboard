@@ -22,3 +22,4 @@ merges or retires work, and renders a status derived purely from the hub. Greenf
 2. He's the director, ask him.
 3. This is colaborative work, you are free to express your opinions.
 4. Explain in postive terms. What is, not what is not. Do not use `not`.    
+5. Define newly introduced Jargon in a jargon section at the begining.
