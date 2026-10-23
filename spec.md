@@ -124,7 +124,33 @@ Enforced by the player on import; a violating commit is never imported.
 - **`main` is player-only**, except for director commits touching only
   `roadmap.toml`, `prompts.kdl` (§19), the Lean package `architecture/`
   or the doc paths declared in `roadmap.toml` (`docs_paths`). The player runs the whole suite on these
-  like any other `main` commit.
+  like any other `main` commit. Two more kinds of path ride along, so the
+  architecture can change without leaving `main` red:
+  - files under any API's `gen/` directory (`arch check` pins their
+    content to the IDL), so an IDL edit lands with its bindings;
+  - in a commit that adds a module (in the manifest at the commit, absent
+    at its parent), that module's paths and the `shared` files, provided
+    the module's files are exactly what the project's scaffold
+    (`architecture/scaffold/`) renders for it: the same file set, byte for
+    byte. Its code comes from a task.
+
+  `dashboard arch add-module <name> [--api [<api>=]<generator>:<consumer>]…`,
+  run in the director clone on `main` at the hub's tip, writes such a
+  commit's content into the working tree and leaves it uncommitted:
+  the module's entry (from `architecture/scaffold/module.lean`) and each
+  API's (from `api.lean`, default `paths = ["apis/<api>"]`) in
+  `Architecture.lean`, a stub IDL per API (one `Placeholder` constructor),
+  the module's files (from `architecture/scaffold/files/`, mirrored from
+  the project root; `{name}` and `{crate}`, the name with `_` for `-`, are
+  substituted in paths and contents), the bindings (`arch gen`), and a run
+  of the module's `build_cmd` in the root so lockfiles follow. The
+  director fills the IDLs, reruns `dashboard arch gen` and commits it all
+  as one `main` commit. It refuses a module past `max_modules`: the `+1`
+  lands first as its own `dashboard raise`. `dashboard arch add-api
+  <api>…` adds APIs between existing modules and roots the same way. A
+  project without `architecture/scaffold/module.lean` is told how to add
+  one; `dashboard arch gen` writes a starter (a Rust crate under
+  `crates/<name>`) beside a new package.
 
 **Marker commits.** A few transitions are events with no content: *block*,
 *accept*, *retire*. They are empty commits (`--allow-empty`) whose subject

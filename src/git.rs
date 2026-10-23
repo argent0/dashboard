@@ -188,6 +188,23 @@ impl Git {
             .filter(|s| !s.is_empty())
     }
 
+    /// A file's exact bytes at `rev` (`show_file` trims the last newline).
+    pub fn show_bytes(&self, rev: &str, path: &str) -> Option<Vec<u8>> {
+        let out = Command::new("git")
+            .args(["cat-file", "blob", &format!("{rev}:{path}")])
+            .current_dir(&self.dir)
+            .output()
+            .ok()?;
+        out.status.success().then_some(out.stdout)
+    }
+
+    /// What `path` is at `rev`: `Some(true)` a tree, `Some(false)` a file,
+    /// `None` absent.
+    pub fn path_kind(&self, rev: &str, path: &str) -> Option<bool> {
+        let kind = self.run(&["cat-file", "-t", &format!("{rev}:{path}")]).ok()?;
+        Some(kind == "tree")
+    }
+
     /// Recursive, name-only listing of files under `path_prefix` at `rev`.
     pub fn ls_tree_files(&self, rev: &str, path_prefix: &str) -> Vec<String> {
         match self.run(&["ls-tree", "-r", "--name-only", rev, "--", path_prefix]) {

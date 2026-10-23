@@ -67,6 +67,29 @@ enum ArchAction {
         #[arg(long)]
         check: bool,
     },
+    /// In the director clone, on main at the hub's tip: add module <name>
+    /// to architecture/Architecture.lean from the project's scaffold
+    /// (architecture/scaffold/: module.lean, optional api.lean, files/ with
+    /// {name} and {crate} substituted), each --api with a stub IDL in
+    /// architecture/Apis/, write the module's files and the bindings, and
+    /// run the module's build_cmd so lockfiles follow. Leaves it all
+    /// uncommitted: fill the IDLs, `dashboard arch gen`, then commit it as
+    /// one main commit (the player admits a new module's scaffold, its
+    /// shared files and gen/ bindings there).
+    AddModule {
+        name: String,
+        /// `[<name>=]<generator>:<consumer>`, named `<generator>-<consumer>`
+        /// by default; repeat for each API. The new module may be either end.
+        #[arg(long = "api")]
+        apis: Vec<dashboard::scaffold::ApiSpec>,
+    },
+    /// Like add-module, for APIs between modules and roots already in the
+    /// manifest: entries, stub IDLs and bindings, uncommitted.
+    AddApi {
+        /// `[<name>=]<generator>:<consumer>`, one or more.
+        #[arg(required = true)]
+        apis: Vec<dashboard::scaffold::ApiSpec>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -344,6 +367,12 @@ fn main() {
         Some(Command::Build { nodes }) => run_build(args.home, &nodes),
         Some(Command::Arch { action: ArchAction::Check { root } }) => run_arch_check(&root),
         Some(Command::Arch { action: ArchAction::Gen { root, check } }) => run_arch_gen(&root, check),
+        Some(Command::Arch { action: ArchAction::AddModule { name, apis } }) => {
+            run_arch_add(args.home, dashboard::scaffold::Request { module: Some(name), apis })
+        }
+        Some(Command::Arch { action: ArchAction::AddApi { apis } }) => {
+            run_arch_add(args.home, dashboard::scaffold::Request { module: None, apis })
+        }
         Some(Command::Wait { timeout, all }) => run_wait(args.home, timeout, all),
     }
 }
@@ -1221,6 +1250,46 @@ fn load_arch(root: &std::path::Path) -> dashboard::arch::Loaded {
             }
             std::process::exit(1);
         }
+    }
+}
+
+fn run_arch_add(home: Option<PathBuf>, req: dashboard::scaffold::Request) {
+    use dashboard::scaffold::Build;
+    let cmd = if req.module.is_some() { "arch add-module" } else { "arch add-api" };
+    let (_, hub, director) = director_clone(home, cmd);
+    dashboard::scaffold::on_main_at_hub(&hub, &director).unwrap_or_else(|e| fail(e));
+    let root = std::path::PathBuf::from(director.run(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|e| fail(e.to_string())));
+    let out = dashboard::scaffold::add(&root, &req).unwrap_or_else(|e| fail(e));
+    println!("added to {}: {}", dashboard::config::ARCH_LEAN_MANIFEST, out.entries.join(", "));
+    for f in &out.wrote {
+        println!("  wrote     {f}");
+    }
+    for f in &out.generated {
+        println!("  generated {f}");
+    }
+    let mut failed = false;
+    match &out.build {
+        Build::NoModule => {}
+        Build::NoCmd => println!("  build: the module has no build_cmd; run the project's build yourself so lockfiles follow"),
+        Build::Ran { cmd, ok: true, .. } => println!("  built     {cmd}"),
+        Build::Ran { cmd, ok: false, tail } => {
+            failed = true;
+            println!("  build FAILED: {cmd}\n{tail}");
+        }
+    }
+    for n in &out.notes {
+        println!("  note: {n}");
+    }
+    let idls: Vec<String> = req.apis.iter().map(|a| dashboard::lean::api_file(&a.name)).collect();
+    println!("next, all uncommitted on main:");
+    if !idls.is_empty() {
+        println!("  1. fill the IDLs ({}), then `dashboard arch gen`", idls.join(", "));
+    }
+    println!("  2. `dashboard arch check` passes");
+    println!("  3. commit everything (`git add -A && git commit`) as one main commit; the player imports it");
+    println!("  4. plan the tasks that write the code; their `modules` may now name it");
+    if failed {
+        std::process::exit(1);
     }
 }
 

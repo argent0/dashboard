@@ -24,6 +24,7 @@ pub mod records;
 pub mod render;
 pub mod report;
 pub mod sandbox;
+pub mod scaffold;
 pub mod speedup;
 pub mod spike;
 pub mod trim;

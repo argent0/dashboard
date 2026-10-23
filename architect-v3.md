@@ -347,9 +347,14 @@ In the pinned manifest (`architecture/Architecture.lean`, or `architecture.toml`
 The suite check fails (a worker finish is rejected with an `arch` budget reason). Neither the worker nor the task agent may touch the budget. In order, the options are:
 
 1. Refactor within the module.
-2. Split the module (the director adds a module to the manifest). This consumes the total modules budget.
+2. Split the module (the director adds a module to the manifest: "Adding a module" below). This consumes the total modules budget.
 3. Insert an intermediary module, if the pressure is on an API. An API is fixed per (generator, consumer) pair, so it cannot be sharded; reduce it by changing the topology.
 4. Ask for a raise: a `block:` that escalates, with the measured overage in the reason.
+
+### Adding a module
+A task's `modules` must already be in the manifest, so a module enters before any task names it, as one director `main` commit holding its skeleton: the `module` and `api` entries in `Architecture.lean`, an IDL per API, the APIs' generated bindings (under each API's `gen/`), the module's empty files rendered from the project's template, and the `shared` files its build touches (a lockfile). The player admits exactly that on `main` (spec §5): bindings under any `gen/`, and a new module's paths and `shared` files only while the module's files equal the scaffold's rendering. `dashboard arch add-module <name> --api <generator>:<consumer>…` writes it into the director clone's working tree (main at the hub's tip) and runs the module's `build_cmd` so lockfiles follow; the director fills the stub IDLs, reruns `dashboard arch gen`, checks with `dashboard arch check`, and commits. At the `max_modules` cap the `+1` lands first as its own raise. `dashboard arch add-api` adds APIs between existing nodes the same way.
+
+The template is the project's: `architecture/scaffold/module.lean` (the manifest entry), optional `api.lean` (an API's entry; `{api}`, `{generator}`, `{consumer}`) and `files/` (the module's files, mirrored from the project root). `{name}` and `{crate}` (`-` as `_`) are substituted in `module.lean`, in `files/` paths and in their contents. An API's first path without an extension names its directory, so `arch gen` writes the binding to `<path>/gen/` even before that directory exists.
 
 ### The raise
 - **Every budget raise is discussed with the operator** before the director commits it. This covers module AST and byte budgets, API constructor and `T` budgets, and the total modules budget. The player does not check this (best effort): it is a rule of the director playbook, and the audit note below makes violations visible.

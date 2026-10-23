@@ -113,12 +113,13 @@ pub fn starter() -> Vec<(String, String)> {
     ]
 }
 
-/// Writes the vendored files and the starter package under `root`; returns
-/// what it wrote.
+/// Writes the vendored files, the starter package and the starter
+/// scaffold (`scaffold::starter`) under `root`; returns what it wrote.
 pub fn write_starter(root: &Path) -> Result<Vec<String>, String> {
     let mut wrote = write_vendored(root)?;
-    for (rel, text) in starter() {
+    for (rel, text) in starter().into_iter().chain(crate::scaffold::starter()) {
         let path = root.join(&rel);
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("{rel}: {e}"))?;
         std::fs::write(&path, text).map_err(|e| format!("{rel}: {e}"))?;
         wrote.push(rel);
     }

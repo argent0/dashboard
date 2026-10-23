@@ -20,6 +20,7 @@ use crate::checks;
 use crate::config::{self, Reason, RoadmapConfig, TaskConfig, TaskKind, path_under_test_paths};
 use crate::events::{self, EventKind};
 use crate::flaky;
+use crate::scaffold;
 use crate::speedup;
 use crate::fsm::{self, Move, Verdict};
 use crate::git::Git;
@@ -1871,15 +1872,20 @@ impl<S: Sessions> Player<S> {
         let roadmap = self
             .roadmap_at(base)
             .map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
-        for (_, path) in self.hub.diff_names(base, candidate) {
-            if !path_allowed(&path, &roadmap.docs_paths) {
-                return Err((
-                    Reason::Ownership,
-                    format!(
-                        "ownership: main commit touches {path:?}; a main commit changes only roadmap.toml, prompts.kdl, the architecture (architecture/) and docs_paths entries"
-                    ),
-                ));
-            }
+        // Beyond the project's own files: APIs' bindings and a new
+        // module's skeleton (`scaffold::admit`).
+        let outside: Vec<String> = self
+            .hub
+            .diff_names(base, candidate)
+            .into_iter()
+            .map(|(_, p)| p)
+            .filter(|p| !path_allowed(p, &roadmap.docs_paths))
+            .collect();
+        if !outside.is_empty() {
+            let new = self.arch_source(candidate).map_err(|e| (Reason::Ownership, format!("ownership: {e}")))?;
+            let old = self.arch_source(base).ok().flatten();
+            scaffold::admit(&self.hub, old.as_ref().map(|s| &s.cfg), new.as_ref().map(|s| &s.cfg), candidate, &outside)
+                .map_err(|e| (Reason::Ownership, e))?;
         }
         match self.hub.show_file(candidate, "roadmap.toml") {
             Some(text) => {

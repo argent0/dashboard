@@ -52,8 +52,7 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    /// A Lean export: bindings go under an API's first path (a directory,
-    /// or its parent).
+    /// A Lean export: bindings go under an API's first path (`api_dir`).
     pub fn from_export(root: &Path, e: lean::Exported) -> Loaded {
         let mut test_files = e.suite.test_paths.clone();
         for c in &e.suite.checks {
@@ -66,12 +65,28 @@ impl Loaded {
         let mut out = Loaded { cfg: e.arch, idls: e.idls, test_files, ..Default::default() };
         for a in &out.cfg.apis {
             let Some(first) = a.paths.first() else { continue };
-            let p = PathBuf::from(first.trim_end_matches('/'));
-            let dir = if root.join(&p).is_dir() { p } else { p.parent().unwrap_or(Path::new("")).to_path_buf() };
+            let dir = api_dir(first, |p| {
+                let full = root.join(p);
+                full.exists().then(|| full.is_dir())
+            });
             out.api_dirs.insert(a.name.clone(), dir);
         }
         out
     }
+}
+
+/// The directory an API's `gen/` lives under, from its first path: the
+/// path itself when it is a directory, or when it is missing and has no
+/// extension (`arch gen` creates it); otherwise its parent. `kind` says
+/// what a root-relative path is: `Some(true)` a directory, `Some(false)` a
+/// file, `None` missing.
+pub fn api_dir(first: &str, kind: impl Fn(&Path) -> Option<bool>) -> PathBuf {
+    let p = PathBuf::from(first.trim_end_matches('/'));
+    let dir = match kind(&p) {
+        Some(is_dir) => is_dir,
+        None => p.extension().is_none(),
+    };
+    if dir { p } else { p.parent().unwrap_or(Path::new("")).to_path_buf() }
 }
 
 /// Loads the architecture of the checkout at `root`: the export of its Lean
@@ -892,6 +907,16 @@ mod tests {
         assert_eq!(relative(gen_dir, Path::new("apis/test-approval/gen/test_approval")), "../../test-approval/gen/test_approval");
         assert_eq!(relative(gen_dir, Path::new("apis/store-approval/gen/x")), "./x");
         assert_eq!(relative(Path::new("a/gen"), Path::new("b/c/gen/d")), "../../b/c/gen/d");
+    }
+
+    #[test]
+    fn an_api_dir_is_its_first_path_when_that_names_a_directory() {
+        let missing = |_: &Path| None;
+        assert_eq!(api_dir("apis/combat-tick", missing), Path::new("apis/combat-tick"));
+        assert_eq!(api_dir("apis/combat-tick/", missing), Path::new("apis/combat-tick"));
+        assert_eq!(api_dir("apis/ab.rs", missing), Path::new("apis"));
+        assert_eq!(api_dir("api", |_| Some(true)), Path::new("api"));
+        assert_eq!(api_dir("api/x", |_| Some(false)), Path::new("api"));
     }
 
     fn write(root: &Path, rel: &str, body: &str) {
