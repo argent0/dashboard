@@ -106,7 +106,7 @@ structure Roadmap where
   budget : Budget := {}
   deriving Repr, DecidableEq, Inhabited
 
-/-- What every task declares, whatever its kind. `modules` names the modules
+/-- What every task declares, whatever its kind. `components` names the modules
 and roots the task changes: its worker's scope and its run set (spec §6.6).
 `dependsOn` names slugs: a dependency's declaration lives on its own branch
 until it is accepted. `brief` is pasted into the task agent's prompt (§17). -/
@@ -116,7 +116,7 @@ structure Header where
   phase : String
   milestone : Bool := false
   dependsOn : List Slug := []
-  modules : List Node := []
+  components : List Component := []
   brief : String := ""
   deriving Repr, DecidableEq, Inhabited
 

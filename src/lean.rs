@@ -419,7 +419,7 @@ pub fn export(pkg: &Path, sandbox: &Sandbox) -> Result<Exported, String> {
 /// Lean's `Dashboard.impacted` over the package at `pkg`. An unknown name
 /// is a Lean error, returned as the output's tail.
 pub fn impacted(pkg: &Path, sandbox: &Sandbox, modules: &[String]) -> Result<Vec<String>, String> {
-    let nodes: Vec<String> = modules.iter().map(|m| format!("({} : Dashboard.Node)", ident(m))).collect();
+    let nodes: Vec<String> = modules.iter().map(|m| format!("({} : Dashboard.Component)", ident(m))).collect();
     let eval = format!("#eval Dashboard.impactedTo \".lake/dashboard/impacted.json\" [{}]", nodes.join(", "));
     let text = run_lean(pkg, sandbox, "Impacted", &eval, "impacted.json")?;
     serde_json::from_str(&text).map_err(|e| format!("impacted: {e}"))

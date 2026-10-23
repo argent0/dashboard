@@ -48,13 +48,13 @@ macro_rules
 syntax (name := archFixture) "fixture " ident " where" manyIndent(group(ident " = " term)) : command
 
 /-- One field of a `fixture` block: `users = [a, b]` coerces each element
-to a `Node`; `stand_in = x` is `some x`. -/
+to a `Component`; `stand_in = x` is `some x`. -/
 def fixtureField (key : Lean.Ident) (val : Lean.TSyntax `term) : Lean.MacroM (Lean.TSyntax `term) := do
   let field := key.getId.eraseMacroScopes
   if field == `users then
     match val with
     | `([$xs,*]) =>
-      let elems ← xs.getElems.mapM fun x => `(($x : Dashboard.Node))
+      let elems ← xs.getElems.mapM fun x => `(($x : Dashboard.Component))
       `([$elems,*])
     | _ => Lean.Macro.throwErrorAt val "users is a list of modules and roots: users = [a, b]"
   else if field == `stand_in then
@@ -72,7 +72,7 @@ syntax (name := archCheck) "check " ident " where" manyIndent(group(ident " = " 
 syntax (name := archSuite) "suite" " where" manyIndent(group(ident " = " term)) : command
 
 /-- `covers = all` sets `all`; `covers = [a, b]` coerces each element to a
-`Node`, so modules and roots mix. A check named like a module is a
+`Component`, so modules and roots mix. A check named like a module is a
 redeclaration. -/
 macro_rules
   | `(check $n:ident where $[$k:ident = $v:term]*) => do
@@ -89,7 +89,7 @@ macro_rules
       else
         match val with
         | `([$xs,*]) =>
-          let elems ← xs.getElems.mapM fun x => `(($x : Dashboard.Node))
+          let elems ← xs.getElems.mapM fun x => `(($x : Dashboard.Component))
           ks := ks.push key
           vs := vs.push (← `([$elems,*]))
         | _ => Lean.Macro.throwErrorAt val "covers is `all` or a list of modules and roots: covers = [a, b]"

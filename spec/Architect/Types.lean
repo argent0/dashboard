@@ -57,16 +57,17 @@ structure Root where
   build_cmd : Option String := none
   deriving Repr, DecidableEq, Inhabited
 
-/-- What may consume an API: a module or a root. -/
-inductive Node
+/-- A component: a module or a root. It may consume an API, use a fixture,
+be covered by a check and be changed by a task. -/
+inductive Component
   | ofModule (m : Module)
   | ofRoot (r : Root)
   deriving Repr, DecidableEq, Inhabited
 
-instance : Coe Module Node := ⟨.ofModule⟩
-instance : Coe Root Node := ⟨.ofRoot⟩
+instance : Coe Module Component := ⟨.ofModule⟩
+instance : Coe Root Component := ⟨.ofRoot⟩
 
-def Node.name : Node → String
+def Component.name : Component → String
   | .ofModule m => m.name
   | .ofRoot r => r.name
 
@@ -76,7 +77,7 @@ instances, under the generator's paths. -/
 structure Api where
   name : String
   generator : Module
-  consumer : Node
+  consumer : Component
   paths : List String := []
   «impl» : List String := []
   max_constructors : Nat := 0
@@ -102,7 +103,7 @@ API's generator and consumer, and the fixture may call the API's generated
 stand-in. -/
 structure Fixture where
   name : String
-  users : List Node := []
+  users : List Component := []
   paths : List String := []
   max_bytes : Nat := 0
   stand_in : Option Api := none
@@ -133,7 +134,7 @@ structure Check where
   min_pass : Nat := 1
   retry_failed : Nat := 0
   retry_on : List String := []
-  covers : List Node := []
+  covers : List Component := []
   all : Bool := false
   files : List String := []
   deriving Repr, DecidableEq, Inhabited
@@ -144,10 +145,10 @@ structure Suite where
   list_cmd : Option String := none
   deriving Repr, DecidableEq, Inhabited
 
-/-- The run set of a task on `nodes` (spec §6.6): every check covering one
+/-- The run set of a task on `components` (spec §6.6): every check covering one
 of them, plus every `covers = all` check. The reference definition. -/
-def impacted (checks : List Check) (nodes : List Node) : List Check :=
-  checks.filter fun c => c.all || c.covers.any fun n => nodes.any (·.name == n.name)
+def impacted (checks : List Check) (components : List Component) : List Check :=
+  checks.filter fun c => c.all || c.covers.any fun n => components.any (·.name == n.name)
 
 -- ---------------------------------------------------------------------------
 -- The IDL data an `idl` block exports

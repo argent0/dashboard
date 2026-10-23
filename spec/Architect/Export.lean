@@ -123,7 +123,7 @@ def Frame.toJson (f : Frame) (file : String) : Json :=
     ("sums", Json.arr (f.sums.toArray.map Sum.toJson)), ("file", file)]
 
 def Fixture.toJson (f : Fixture) : Json :=
-  Json.mkObj [("name", f.name), ("users", strs (f.users.map Node.name)), ("paths", strs f.paths),
+  Json.mkObj [("name", f.name), ("users", strs (f.users.map Component.name)), ("paths", strs f.paths),
     ("max_bytes", f.max_bytes), ("stand_in", opt (f.stand_in.map (·.name)))]
 
 /-- `module` is the Lean module that declared the check as a path
@@ -131,7 +131,7 @@ def Fixture.toJson (f : Fixture) : Json :=
 def Check.toJson (c : Check) (file : String) : Json :=
   Json.mkObj [("name", c.name), ("cmd", c.cmd), ("runs", c.runs), ("min_pass", c.min_pass),
     ("retry_failed", c.retry_failed), ("retry_on", strs c.retry_on),
-    ("covers", strs (c.covers.map Node.name)), ("all", c.all), ("files", strs c.files),
+    ("covers", strs (c.covers.map Component.name)), ("all", c.all), ("files", strs c.files),
     ("module", file)]
 
 def Suite.toJson (s : Suite) : Json :=
@@ -247,10 +247,10 @@ def exportTo (path : String) : CoreM Unit := do
   let j ← exportAll
   IO.FS.writeFile path (j.compress ++ "\n")
 
-/-- Writes the run set of `nodes` as a JSON array of check names: every
+/-- Writes the run set of `components` as a JSON array of check names: every
 declared check plus each module's implicit `test_cmd` check, through
 `impacted`. -/
-def impactedTo (path : String) (nodes : List Node) : CoreM Unit := do
+def impactedTo (path : String) (components : List Component) : CoreM Unit := do
   let mut checks : Array Check := #[]
   for n in ← declsOf ``Module do
     let m ← evalDeclSafe Module n
@@ -258,7 +258,7 @@ def impactedTo (path : String) (nodes : List Node) : CoreM Unit := do
       checks := checks.push { name := m.name, cmd, covers := [m] }
   for n in ← declsOf ``Check do
     checks := checks.push (← evalDeclSafe Check n)
-  let names := (impacted checks.toList nodes).map (·.name)
+  let names := (impacted checks.toList components).map (·.name)
   IO.FS.writeFile path ((strs names).compress ++ "\n")
 
 end Dashboard

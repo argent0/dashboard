@@ -461,7 +461,7 @@ check «search-story» where
 - A check runs in the view of its `covers` (the module view, widened to
   every covered module, plus `test_paths` and its `files`), so its
   `covers` is proven on every run: a test reaching outside it fails.
-- `Dashboard.impacted : List Node → List Check` gives a task's run set from
+- `Dashboard.impacted : List Component → List Check` gives a task's run set from
   its `modules` (spec §6.6); `covers = all` checks are always in it.
 - The player runs the whole suite once at start, then run sets only.
 - A worker's working tree holds its task's files only (spec §21);

@@ -51,7 +51,7 @@ check stable where
 
 def header (s : Slug) : Header :=
   { slug := s, title := "Title", phase := "p1", milestone := false, dependsOn := ["alpha"],
-    modules := [core], brief := "Context for the task agent." }
+    components := [core], brief := "Context for the task agent." }
 
 def task : Task := .task (header "beta")
 def spike : Task := .spike { header "probe" with dependsOn := [] }
