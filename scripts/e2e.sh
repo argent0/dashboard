@@ -890,14 +890,16 @@ fi
 
 # --------------------------------------------------------------------------
 # 7g. Scoped runs (spec §6.6, §8.3): modules `a` and `b`; `b_only` covers
-#     `b` and fails once a/a.txt exists, so it is out of reach of task `a`
-#     (on modules ["a"]), whose finish imports. Its worker sees a sparse
+#     `b` and fails once conf/a.flag exists (under `test_paths`, so in every
+#     view), which task `a`'s post adds; it is out of reach of task `a` (on
+#     modules ["a"]), whose finish imports. Its worker sees a sparse
 #     tree without b/ (spec §21), builds `a` in its view with `dashboard
 #     build`, and declares its own check in Tests/a.worker.lean on
 #     stories/a_own.sh, a path `dashboard test` opens in its tree;
 #     `dashboard scope` from its clone shows the scope and the working tree.
 #     Then a docs change under b/ on main puts b in the landing run set:
-#     b_only fails on the merge and `a` goes back to its worker.
+#     b_only's view on the merge holds the flag, so it runs again (no pass
+#     of that view to reuse), fails, and `a` goes back to its worker.
 # --------------------------------------------------------------------------
 
 log "step 7g: scoped runs (task a on module a)"
@@ -922,8 +924,11 @@ module b where
 EOF
 cat >>"$DIR_REPO/architecture/Tests.lean" <<'EOF'
 
+suite where
+  test_paths = ["conf"]
+
 check b_only where
-  cmd = "test ! -e \"$DASHBOARD_ROOT/a/a.txt\""
+  cmd = "test ! -e conf/a.flag"
   covers = [b]
 EOF
 # zeta's arch check now needs the whole tree: the director widens it.
@@ -938,6 +943,8 @@ wait_until "modules a and b on main" hub_has_ab
 
 mkdir -p "$TA_TEMPLATES/a/tasks/a"
 echo "Create a/a.txt. Tests you add must be pure." >"$TA_TEMPLATES/a/tasks/a/prompt.md"
+mkdir -p "$TA_TEMPLATES/a/conf"
+echo on >"$TA_TEMPLATES/a/conf/a.flag"
 # Runs once: records what the tree holds, builds `a`, then declares a_own
 # before `dashboard test` opens its file; the fake worker's `git add -A`
 # commits all three.
