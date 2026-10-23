@@ -3,13 +3,16 @@ open Lake DSL
 
 /-
 The spec package: the single source of truth for the loop and the
-architecture (handover.md). `Spec` holds the model; `Dashboard` re-exports
-the DSL core under the name projects import, so `Spec/Arch/Export.lean`
-keeps the bytes `dashboard arch gen` vendors.
+architecture (handover.md). `Dashboard` holds the files `dashboard arch gen`
+vendors into a project, under the module names the project sees; `Spec`
+holds the model, which imports their data alone (`Dashboard.ArchTypes`,
+`Dashboard.PlanTypes`).
 -/
 package spec
 
-lean_lib Dashboard
+@[default_target]
+lean_lib Dashboard where
+  globs := #[.andSubmodules `Dashboard]
 
 @[default_target]
 lean_lib Spec

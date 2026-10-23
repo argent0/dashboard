@@ -1,5 +1,7 @@
 /-
-The DSL core under the module name a project's `architecture/` uses, so
-`Spec/Arch/Export.lean` reads `import Dashboard` here and in a project alike.
+The architecture language a project's `architecture/` files import: its
+data and its syntax. Vendored as `architecture/Dashboard.lean`; the plan's
+data is `Dashboard.PlanTypes`, the exporter `Dashboard.Export`.
 -/
-import Spec.Arch.Dsl
+import Dashboard.ArchTypes
+import Dashboard.ArchSyntax

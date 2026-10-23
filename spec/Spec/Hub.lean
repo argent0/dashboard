@@ -6,8 +6,11 @@ and paths; their git spelling lives in the decoders at the end.
 
 The architecture and the plan at a commit come from two oracles applied to
 its tree (`Oracles`): the model reads a manifest or a plan only through them.
+It imports the data of both languages and none of their syntax, so their
+keywords stay free as names here.
 -/
-import Spec.Arch.Dsl
+import Dashboard.ArchTypes
+import Dashboard.PlanTypes
 
 namespace Spec
 open Dashboard
@@ -316,8 +319,7 @@ structure Manifest where
   apis : List Api := []
   fixtures : List Fixture := []
   checks : List Check := []
-  /-- `suite` is a DSL keyword. -/
-  testSuite : Suite := {}
+  suite : Suite := {}
   idls : List Idl := []
   frames : List Frame := []
   deriving Repr, DecidableEq, Inhabited
