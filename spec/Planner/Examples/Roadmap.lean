@@ -9,7 +9,7 @@ open Dashboard
 
 def roadmap : Roadmap :=
   { title := some "demo",
-    phases := [{ id := "p1", title := some "First", goal := some "Ship", hidden := false }],
+    phases := [{ id := "p1", title := some "First", goal := some "Ship" }],
     docs_paths := ["docs/adr"],
     limits :=
       { max_review_rounds := 2, max_contest_rounds := 2, max_relaunches := 2,

@@ -27,13 +27,11 @@ structure Slug where
 
 instance : Coe String Slug := ⟨Slug.mk⟩
 
-/-- A phase of the roadmap. `hidden` leaves it out of `status`'s phase list
-and milestones; its tasks still count toward overall progress. -/
+/-- A phase of the roadmap. -/
 structure Phase where
   id : String
   title : Option String := none
   goal : Option String := none
-  hidden : Bool := false
   deriving Repr, DecidableEq, Inhabited
 
 /-- `[limits.strikes]` (spec §10): one counter per rejection reason. -/
