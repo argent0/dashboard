@@ -213,6 +213,39 @@ def crowded : Manifest :=
 -- A stand-in's users in either order.
 #guard ({ name := "dice", users := [beta, alpha], paths := ["fx/dice"], stand_in := some «alpha-beta» } : Fixture).problems == []
 
+-- Refs between APIs, as data: `alpha-beta` declares `Id` (plain) and a
+-- versioned token; `beta-cli` refs them.
+
+def owner : Idl :=
+  { apiName := "alpha-beta", types := [{ name := "Id", kind := .prim .int64 }],
+    tokens := [{ name := "Ref", prim := .int64, kind := .versioned "Retired" }],
+    sums := [{ name := "Got", ctors := [{ name := "Got", args := ["Id"] }, { name := "Retired" }] }],
+    fns := [{ name := "get", inputs := ["Ref"], returns := "Got" }] }
+
+def user : Idl :=
+  { apiName := "beta-cli",
+    types := [{ name := "Id", kind := .refTo "alpha-beta" "Id" [.display] },
+              { name := "Ref", kind := .refTo "alpha-beta" "Ref" },
+              { name := "Gone", kind := .refTo "nowhere" "X" }],
+    sums := [{ name := "Shown", ctors := [{ name := "Shown", args := ["Id", "Gone"] }] }],
+    fns := [{ name := "show", inputs := ["Ref"], returns := "Shown" }] }
+
+def refsOf : Manifest :=
+  { modules := [alpha, beta], roots := [cli], apis := [«alpha-beta», «beta-cli»], idls := [owner, user] }
+
+#guard refsOf.problems ==
+  ["api beta-cli: type Id: display forwards alpha-beta.Id's, which declares no display",
+   "api beta-cli: fn show: takes Ref (alpha-beta.Ref, versioned), so Shown must have a `Retired` constructor",
+   "api beta-cli: ref to unknown api \"nowhere\""]
+
+-- A ref back to an API that refs it: a cycle, and a shared module each way.
+def back : Idl := { owner with types := owner.types ++ [{ name := "Up", kind := .refTo "beta-cli" "Shown" }] }
+
+#guard ({ refsOf with idls := [back, { user with types := user.types.take 2 }] }).problems.filter (·.startsWith "api alpha-beta") ==
+  ["api alpha-beta: type Up: declared but never used",
+   "api alpha-beta: ref beta-cli.Shown: beta-cli declares no such type",
+   "api alpha-beta: ref cycle back to itself"]
+
 #guard cycle ["a", "b", "c"] [("a", "b"), ("b", "c"), ("c", "b")] == some ["b", "c", "b"]
 #guard cycle ["a", "b"] [("a", "b")] == none
 

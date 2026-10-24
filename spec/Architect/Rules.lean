@@ -370,6 +370,114 @@ def problems (i : Idl) (a : Api) : List String :=
 end Idl
 
 -- ---------------------------------------------------------------------------
+-- APIs that ref each other (architect-v3 § Containers, § Refs)
+-- ---------------------------------------------------------------------------
+
+def Component.lang : Component → Lang
+  | .ofModule m => m.lang
+  | .ofRoot r => r.lang
+
+/-- The API's two ends speak different languages, so it carries wire code. -/
+def Api.wire (a : Api) : Bool := a.generator.lang != a.consumer.lang
+
+/-- The API shares a component with `t`. -/
+def Api.linked (a t : Api) : Bool :=
+  [a.generator.name, a.consumer.name].any fun n => n == t.generator.name || n == t.consumer.name
+
+def TypeKind.adapters : TypeKind → List Adapter
+  | .prim _ as | .refTo _ _ as => as
+  | .tuple _ => []
+
+namespace Idl
+
+/-- `(api, type)` of every `ref`, with the local type's declaration. -/
+def refs (i : Idl) : List (String × String × TypeDecl) :=
+  i.types.filterMap fun t => match t.kind with
+    | .refTo a ty _ => some (a, ty, t)
+    | _ => none
+
+/-- `(api, container)` of every container `ref` and instance `for`. -/
+def containerRefs (i : Idl) : List (String × String) :=
+  i.containers.filterMap (fun c => match c.kind with
+    | .ofElement _ a k => some (a, k)
+    | .generic _ => none) ++
+  i.instances.map fun x => (x.owner, x.seq)
+
+def declares (i : Idl) (n : String) : Bool :=
+  i.types.any (·.name == n) || i.tokens.any (·.name == n)
+
+end Idl
+
+/-- The rules between an API and the APIs it refs: each target shares a
+component with it and declares what it names; a ref forwards adapters the
+target declares and keeps a token's kind; a container a fn takes is folded
+by the generator, which consumes its class API. -/
+def Manifest.refProblems (m : Manifest) (a : Api) (i : Idl) : List String :=
+  let who := s!"api {a.name}"
+  let api? (n : String) := m.apis.find? (·.name == n)
+  let idl? (n : String) := m.idls.find? (·.apiName == n)
+  let inputs := i.fns.flatMap fun f => f.inputs.flatMap fun x =>
+    x :: (i.sums.filter (·.name == x)).flatMap fun s => s.ctors.flatMap (·.args)
+  let consume := i.containers.flatMap fun c => match c.kind with
+    | .ofElement _ target seq => match api? target with
+      | some t =>
+        rule (!inputs.contains c.name || t.consumer.name == a.generator.name)
+          s!"{who}: a fn takes a container of {target}.{seq}, so generator {a.generator.name} must consume {target} (it is for {t.consumer.name})"
+      | none => []
+    | .generic _ => []
+  let containers := i.containerRefs.flatMap fun (target, c) => match api? target with
+    | none => [s!"{who}: ref to unknown api {repr target}"]
+    | some t =>
+      rule (a.linked t) s!"{who}: ref {target}.{c}: {target} shares no module with {a.name}" ++
+      rule (target != a.name) s!"{who}: refs its own container {c}" ++
+      match idl? target with
+      | some ti => rule (ti.isGeneric c) s!"{who}: ref {target}.{c}: {target} owns no such generic container"
+      | none => []
+  let refs := i.refs.flatMap fun (target, ty, decl) => match api? target with
+    | none => [s!"{who}: ref to unknown api {repr target}"]
+    | some t =>
+      rule (a.linked t) s!"{who}: ref {target}.{ty}: {target} shares no module with {a.name}" ++
+      rule (target != a.name) s!"{who}: refs its own type {ty}" ++
+      rule (!a.wire || t.wire) s!"{who}: crosses languages but refs {target}.{ty}, whose api does not" ++
+      match idl? target with
+      | none => []
+      | some ti =>
+        if !ti.declares ty then [s!"{who}: ref {target}.{ty}: {target} declares no such type"] else
+        let has : List Adapter := match ti.types.find? (·.name == ty), ti.tokens.find? (·.name == ty) with
+          | some d, _ => d.kind.adapters
+          | none, some k => if k.store then [.store] else []
+          | none, none => []
+        let forwards := [(Adapter.display, "display"), (Adapter.store, "store")].flatMap fun (ad, flag) =>
+          rule (!decl.kind.adapters.contains ad || has.contains ad)
+            s!"{who}: type {decl.name}: {flag} forwards {target}.{ty}'s, which declares no {flag}"
+        let kept := match ti.tokens.find? (·.name == ty) with
+          | some k => match k.kind.failure? with
+            | some c => (i.fnsMissing decl.name c).map fun f =>
+              s!"{who}: fn {f.name}: takes {decl.name} ({target}.{ty}, {k.kind.word}), so {f.returns} must have a `{c}` constructor"
+            | none => []
+          | none => []
+        forwards ++ kept
+  consume ++ containers ++ refs
+
+/-- APIs whose refs lead back to themselves: their generated modules would
+be recursive. -/
+def Manifest.refCycles (m : Manifest) : List String :=
+  let targets (n : String) : List String :=
+    match m.idls.find? (·.apiName == n) with
+    | some i => i.refs.map (·.1) ++ i.containerRefs.map (·.1)
+    | none => []
+  let rec reach (fuel : Nat) (seen frontier : List String) : List String :=
+    match fuel, frontier with
+    | 0, _ | _, [] => seen
+    | fuel + 1, n :: rest =>
+      let new := (targets n).filter (!seen.contains ·)
+      reach fuel (seen ++ new) (rest ++ new)
+  m.apis.filterMap fun a =>
+    let first := targets a.name
+    if (reach (m.apis.length * m.apis.length + 1) first first).contains a.name
+    then some s!"api {a.name}: ref cycle back to itself" else none
+
+-- ---------------------------------------------------------------------------
 -- The manifest whole: the rules that read several declarations
 -- ---------------------------------------------------------------------------
 
@@ -469,13 +577,13 @@ def Manifest.problems (m : Manifest) : List String :=
       (s!"Apis/{·.apiName}.lean: an idl names an api the manifest declares")
   let apiIdls :=
     m.idls.flatMap fun i => match m.apis.find? (·.name == i.apiName) with
-      | some a => i.problems a
+      | some a => i.problems a ++ m.refProblems a i
       | none => []
   let frames :=
     m.frames.flatMap fun f => match m.modules.find? (·.name == f.moduleName) with
       | some x => f.placement x
       | none => [s!"frame {f.moduleName}: a frame belongs to a declared module"]
-  own ++ names ++ refs ++ graph ++ paths ++ totals ++ idls ++ apiIdls ++ frames
+  own ++ names ++ refs ++ graph ++ paths ++ totals ++ idls ++ apiIdls ++ m.refCycles ++ frames
 
 /-- The manifest holds every structural rule. -/
 def Manifest.wellformed (m : Manifest) : Bool := m.problems.isEmpty

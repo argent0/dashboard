@@ -198,8 +198,8 @@ pub struct ApiBindings {
     pub files: Vec<(PathBuf, String)>,
 }
 
-/// Cross-checks every API's IDL against the others and renders the bindings
-/// each should have. Errors are one line each.
+/// Renders the bindings each API should have; Lean's rules already held
+/// the IDLs and their refs. Errors are one line each.
 pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>) {
     let cfg = &loaded.cfg;
     let mut errs = loaded.errors.clone();
@@ -210,49 +210,6 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
     for a in &cfg.apis {
         let Some(idl) = idls.get(a.name.as_str()) else { continue };
         let who = format!("api {}", a.name);
-        // The callee folds an input container, so the generator must consume
-        // the class API for its Seq (architect-v3.md, §1). A container only
-        // returned is folded by the consumer, which refs it already. A named
-        // sum taken as input carries its constructors' containers in.
-        let inputs: Vec<&String> = idl
-            .fns
-            .iter()
-            .flat_map(|f| &f.inputs)
-            .flat_map(|i| {
-                let carried = idl.sums.iter().filter(|s| s.name == *i).flat_map(|s| s.ctors.iter().flat_map(|c| &c.args));
-                std::iter::once(i).chain(carried)
-            })
-            .collect();
-        for c in &idl.containers {
-            let crate::idl::ContainerKind::Of(_, target, seq) = &c.kind else { continue };
-            if inputs.contains(&&c.name)
-                && let Some(ta) = cfg.apis.iter().find(|x| x.name == *target)
-                && ta.consumer != a.generator
-            {
-                errs.push(format!(
-                    "{who}: a fn takes a container of {target}.{seq}, so generator {} must consume {target} (it is for {})",
-                    a.generator, ta.consumer
-                ));
-            }
-        }
-        for (target, c) in idl.container_refs() {
-            let Some(ta) = cfg.apis.iter().find(|x| x.name == target) else {
-                errs.push(format!("{who}: ref to unknown api {target:?}"));
-                continue;
-            };
-            if ![&a.generator, &a.consumer].iter().any(|m| **m == ta.generator || **m == ta.consumer) {
-                errs.push(format!("{who}: ref {target}.{c}: {target} shares no module with {}", a.name));
-            }
-            if target == a.name {
-                errs.push(format!("{who}: refs its own container {c}"));
-            }
-            match idls.get(target) {
-                Some(t) if !t.owns_generic(c) => {
-                    errs.push(format!("{who}: ref {target}.{c}: {target} owns no such generic container"))
-                }
-                _ => {}
-            }
-        }
         // A class API for a TypeScript consumer: the TypeScript binding is
         // the instance (with its laws), and the consumer never calls Rust,
         // so the Rust side and its `impl` check are skipped. The same impl
@@ -262,61 +219,6 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
             && let Err(e) = instances_present(root, a, idl)
         {
             errs.push(format!("{who}: {e}"));
-        }
-        for (target, ty) in idl.refs() {
-            let Some(ta) = cfg.apis.iter().find(|x| x.name == target) else {
-                errs.push(format!("{who}: ref to unknown api {target:?}"));
-                continue;
-            };
-            let linked = [&a.generator, &a.consumer]
-                .iter()
-                .any(|m| **m == ta.generator || **m == ta.consumer);
-            if !linked {
-                errs.push(format!("{who}: ref {target}.{ty}: {target} shares no module with {}", a.name));
-            }
-            if target == a.name {
-                errs.push(format!("{who}: refs its own type {ty}"));
-            }
-            match idls.get(target) {
-                Some(t) if !t.declares(ty) => {
-                    errs.push(format!("{who}: ref {target}.{ty}: {target} declares no such type"))
-                }
-                Some(t) => {
-                    // `display` and `store` on a ref forward the wrapped
-                    // type's, so the wrapped type declares them too.
-                    let (shows, stores) = match (t.type_decl(ty), t.token(ty)) {
-                        (Some(d), _) => (d.shows(), d.stores()),
-                        (None, Some(k)) => (false, k.store),
-                        _ => (false, false),
-                    };
-                    for x in idl.types.iter().filter(|x| matches!(&x.kind, crate::idl::Kind::Ref(a, y, _) if a == target && y == ty)) {
-                        for (flag, set, has) in [("display", x.shows(), shows), ("store", x.stores(), stores)] {
-                            if set && !has {
-                                errs.push(format!("{who}: type {}: {flag} forwards {target}.{ty}'s, which declares no {flag}", x.name));
-                            }
-                        }
-                    }
-                    // A re-exported token keeps its kind: a fn taking it
-                    // still admits the stale/spent case.
-                    if let Some(k) = t.token(ty)
-                        && let Some(c) = k.kind.failure()
-                    {
-                        let local = idl.types.iter().find(|x| matches!(&x.kind, crate::idl::Kind::Ref(a, y, _) if a == target && y == ty)).map(|x| x.name.as_str()).unwrap_or(ty);
-                        for f in idl.fns_missing(local, c) {
-                            errs.push(format!(
-                                "{who}: fn {}: takes {local} ({target}.{ty}, {}), so {} must have a `{c}` constructor",
-                                f.name,
-                                k.kind.word(),
-                                f.returns
-                            ));
-                        }
-                    }
-                }
-                None => {}
-            }
-            if is_wire(a) && !is_wire(ta) {
-                errs.push(format!("{who}: crosses languages but refs {target}.{ty}, whose api does not"));
-            }
         }
         let mut langs = vec![lang_of(&a.generator).unwrap_or(""), lang_of(&a.consumer).unwrap_or("")];
         if ts_class_api {
@@ -396,22 +298,6 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
             files.push((file, text));
         }
         out.push(ApiBindings { name: a.name.clone(), idl: idl.clone(), files });
-    }
-    // A ref cycle between APIs would make the generated modules recursive.
-    for a in &cfg.apis {
-        let mut seen = vec![a.name.as_str()];
-        let mut stack = vec![a.name.as_str()];
-        while let Some(cur) = stack.pop() {
-            let Some(idl) = idls.get(cur) else { continue };
-            for (t, _) in idl.refs().into_iter().chain(idl.container_refs()) {
-                if t == a.name {
-                    errs.push(format!("api {}: ref cycle through {cur}", a.name));
-                } else if !seen.contains(&t) {
-                    seen.push(t);
-                    stack.push(t);
-                }
-            }
-        }
     }
     errs.sort();
     errs.dedup();

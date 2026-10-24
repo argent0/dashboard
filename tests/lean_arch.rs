@@ -128,8 +128,8 @@ fn fns_sums_elements_and_containers_export_with_their_measures() {
     // here `db` does. Point the class API at `nutrition` instead and it doesn't.
     let m = MANIFEST3.replace("api «foldable-db» : foldable → db", "api «foldable-db» : foldable → nutrition");
     write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", NUTRITION_DB)], &[]);
-    let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
-    assert!(problems.iter().any(|p| p.contains("generator db must consume foldable-db")), "{problems:?}");
+    let e = arch::load(d.path()).unwrap_err();
+    assert!(e.contains("generator db must consume foldable-db"), "{e}");
     // A container only returned is the consumer's to fold: no demand on db.
     let returned = NUTRITION_DB.replace("fn log : Consumptions → Written", "fn log : Name → Written");
     write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", &returned)], &[]);
@@ -138,8 +138,8 @@ fn fns_sums_elements_and_containers_export_with_their_measures() {
     // Taken inside a sum, it is still an input.
     let in_sum = NUTRITION_DB.replace("fn log : Consumptions → Written", "fn log : Rows → Written");
     write_lean_arch(d.path(), &m, &[("foldable-db", FOLDABLE_DB), ("nutrition-db", &in_sum)], &[]);
-    let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
-    assert!(problems.iter().any(|p| p.contains("generator db must consume foldable-db")), "{problems:?}");
+    let e = arch::load(d.path()).unwrap_err();
+    assert!(e.contains("generator db must consume foldable-db"), "{e}");
 }
 
 const PROOFS_MANIFEST: &str = "import Architect\nopen Dashboard\n\narchitecture where\n  max_modules = 3\n\n\
@@ -220,8 +220,8 @@ fn refinements_and_tokens_are_elaborated_exported_budgeted_and_linted() {
     let e = arch::load(r).unwrap_err();
     assert!(e.contains("fn tick: takes EventTypeRef (versioned), so Written must have a `Retired` constructor"), "{e}");
     write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", PROOFS_IDL), ("nutrition-web", &PROOFS_WEB.replace("| Shown | Retired", "| Shown"))], &[]);
-    let (problems, _) = report(r, &arch::load(r).unwrap());
-    assert!(problems.iter().any(|p| p.contains("api nutrition-web: fn render: takes EventTypeRef (nutrition-db.EventTypeRef, versioned), so Shown must have a `Retired` constructor")), "{problems:?}");
+    let e = arch::load(r).unwrap_err();
+    assert!(e.contains("api nutrition-web: fn render: takes EventTypeRef (nutrition-db.EventTypeRef, versioned), so Shown must have a `Retired` constructor"), "{e}");
     // Budgets, and the mint lint: a consumer minting evidence is caught, the
     // generator is not.
     write_lean_arch(r, &PROOFS_MANIFEST.replace("max_rules = 9", "max_rules = 8").replace("max_tokens = 3", "max_tokens = 2"), &[("nutrition-db", PROOFS_IDL), ("nutrition-web", PROOFS_WEB)], &[]);
@@ -265,10 +265,10 @@ fn refinements_and_tokens_are_elaborated_exported_budgeted_and_linted() {
     let (problems, _) = report(r, &loaded);
     assert!(!problems.iter().any(|p| p.contains("forwards")), "{problems:?}");
     write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", PROOFS_IDL), ("nutrition-web", &web.replace("ref «nutrition-db».Id", "ref «nutrition-db».Grams"))], &[]);
-    let (problems, _) = report(r, &arch::load(r).unwrap());
+    let e = arch::load(r).unwrap_err();
     for flag in ["display", "store"] {
         let want = format!("api nutrition-web: type Label: {flag} forwards nutrition-db.Grams's, which declares no {flag}");
-        assert!(problems.contains(&want), "{problems:?}");
+        assert!(e.contains(&want), "{e}");
     }
 }
 
