@@ -478,6 +478,139 @@ def Manifest.refCycles (m : Manifest) : List String :=
     then some s!"api {a.name}: ref cycle back to itself" else none
 
 -- ---------------------------------------------------------------------------
+-- Frames against the APIs their module sees (architect-v3 § Frames)
+-- ---------------------------------------------------------------------------
+
+/-- A resolved type of a frame signature. -/
+inductive FrameTy
+  | prim (word : String)
+  | loc (name : String)
+  | api (owner name : String)
+  deriving Repr, DecidableEq, Inhabited
+
+/-- `nutrition-db` as the Rust type `NutritionDb`: the default sum's name. -/
+def pascal (s : String) : String :=
+  String.join ((s.splitOn "-").flatMap (·.splitOn "_") |>.filter (!·.isEmpty) |>.map String.capitalize)
+
+/-- `insertProduct` as the Rust fn `insert_product`: a frame fn provides an
+API fn of this name. -/
+def snake (s : String) : String :=
+  String.ofList (s.toList.flatMap fun c => if c.isUpper then ['_', c.toLower] else [c])
+
+namespace Idl
+
+/-- Every sum a binding declares, with its constructors: the named ones,
+then the default sum (`pascal api`). -/
+def sumList (i : Idl) : List (String × List Ctor) :=
+  i.sums.map (fun s => (s.name, s.ctors)) ++ (if i.ctors.isEmpty then [] else [(pascal i.apiName, i.ctors)])
+
+/-- Every type name the binding declares; a generic container takes a type
+argument, so only an instantiated one names a type. -/
+def typeNames (i : Idl) : List String :=
+  i.types.map (·.name) ++ i.tokens.map (·.name) ++ i.sumList.map (·.1) ++ i.elements.map (·.name) ++
+  i.containers.filterMap fun c => match c.kind with | .ofElement .. => some c.name | _ => none
+
+end Idl
+
+/-- The APIs `module` sees: those it generates or consumes, and every API
+their refs reach. -/
+def Manifest.visibleApis (m : Manifest) (module : String) : List Api :=
+  let direct := (m.apis.filter fun a => a.generator.name == module || a.consumer.name == module).map (·.name)
+  let targets (n : String) : List String := match m.idls.find? (·.apiName == n) with
+    | some i => i.refs.map (·.1) ++ i.containerRefs.map (·.1)
+    | none => []
+  let rec grow (fuel : Nat) (seen frontier : List String) : List String :=
+    match fuel, frontier with
+    | 0, _ | _, [] => seen
+    | fuel + 1, n :: rest =>
+      let new := (targets n).filter fun t => m.apis.any (·.name == t) && !seen.contains t
+      grow fuel (seen ++ new) (rest ++ new)
+  let names := grow (m.apis.length * m.apis.length + 1) direct direct
+  m.apis.filter (names.contains ·.name)
+
+/-- The rules of a frame that its module's APIs decide: every type name
+resolves, local types are declared once and never contain themselves, each
+call is a frame fn or a fn of an API the module consumes, `branch` names one
+sum input, and a frame fn standing for an API fn has its signature. Rust's
+naming (snake_case, names the skeleton takes) is the generator's to check. -/
+def Manifest.frameProblems (m : Manifest) (f : Frame) : List String :=
+  let mod := f.moduleName
+  let who := s!"frame {mod}"
+  let idl? (n : String) := m.idls.find? (·.apiName == n)
+  let visible := (m.visibleApis mod).map (·.name)
+  let locals := f.records.map (·.name) ++ f.sums.map (·.name)
+  let prims := ["i64", "f64", "bool", "string", "bytes"]
+  let declaredBy (n : String) : List String :=
+    visible.filter fun a => (idl? a).any (·.typeNames.contains n)
+  let resolve (n : String) : Except String FrameTy :=
+    if prims.contains n then .ok (.prim n)
+    else if locals.contains n then .ok (.loc n)
+    else match n.splitOn "." with
+      | [a, ty] =>
+        if !visible.contains a then .error s!"{n}: module {mod} sees no api {a}"
+        else if (idl? a).any (·.typeNames.contains ty) then .ok (.api a ty)
+        else .error s!"{n}: {a} declares no type {ty}"
+      | _ => match declaredBy n with
+        | [a] => .ok (.api a n)
+        | [] => .error s!"unknown type {n}: a prim (i64, f64, bool, string, bytes), a type of the frame, or of an api {mod} sees"
+        | as => .error s!"{n} is declared by {" and ".intercalate as}: write api.{n}"
+  let unresolved (n : String) : List String :=
+    match resolve n with | .error e => [s!"{who}: {e}"] | .ok _ => []
+  let isSum : FrameTy → Bool
+    | .loc n => f.sums.any (·.name == n)
+    | .api a n => (idl? a).any fun i => i.sumList.any (·.1 == n)
+    | .prim _ => false
+  let dup (xs : List String) (k : Nat) : Bool := (xs.take k).contains xs[k]!
+  let declared :=
+    ((List.range locals.length).filter (dup locals ·)).map (fun k => s!"{who}: type {locals[k]!} is declared twice") ++
+    (let fs := f.fns.map (·.name)
+     ((List.range fs.length).filter (dup fs ·)).map fun k => s!"{who}: fn {fs[k]!} is declared twice")
+  let names :=
+    f.records.flatMap (·.fields.flatMap unresolved) ++
+    f.sums.flatMap (·.ctors.flatMap (·.args.flatMap unresolved)) ++
+    f.fns.flatMap fun g => (g.inputs ++ [g.returns]).flatMap unresolved
+  let calls := f.fns.flatMap fun g => g.callees.flatMap fun c =>
+    if f.fns.any (·.name == c) then [] else
+    match c.splitOn "." with
+    | [a, fn] =>
+      if !m.apis.any (fun x => x.name == a && x.consumer.name == mod) then [s!"{who}: fn {g.name} calls {c}: {mod} consumes no api {a}"]
+      else rule ((idl? a).any (·.fns.any (·.name == fn))) s!"{who}: fn {g.name} calls {c}: {a} has no fn {fn}"
+    | _ => [s!"{who}: fn {g.name} calls {c}: no frame fn {c} (an api fn is written api.fn)"]
+  let branches := f.fns.flatMap fun g => match g.branchOn with
+    | none => []
+    | some b =>
+      let r := resolve b
+      let same := g.inputs.filter fun x => match resolve x, r with | .ok p, .ok q => p == q | _, _ => false
+      if same.isEmpty then [s!"{who}: fn {g.name} branches on {b}, which is none of its inputs"]
+      else if !(match r with | .ok t => isSum t | .error _ => false) then [s!"{who}: fn {g.name} branches on {b}, which is no sum"]
+      else rule (same.length == 1) s!"{who}: fn {g.name} takes two {b}s: branch on one sum input"
+  let parts (n : String) : List String :=
+    ((f.records.find? (·.name == n)).map (·.fields) |>.getD []) ++
+    ((f.sums.find? (·.name == n)).map (·.ctors.flatMap (·.args)) |>.getD []) |>.filter locals.contains
+  let rec reaches (fuel : Nat) (seen frontier : List String) : List String :=
+    match fuel, frontier with
+    | 0, _ | _, [] => seen
+    | fuel + 1, n :: rest =>
+      let new := (parts n).filter (!seen.contains ·)
+      reaches fuel (seen ++ new) (rest ++ new)
+  let cycles := locals.filterMap fun l =>
+    if (reaches (locals.length + 1) (parts l) (parts l)).contains l then some s!"{who}: type {l} contains itself" else none
+  let provided := (m.apis.filter (·.generator.name == mod)).flatMap fun a => match idl? a.name with
+    | none => []
+    | some i =>
+      let mine := i.fns.filterMap fun x => (f.fns.find? (·.name == snake x.name)).map (x, ·)
+      if i.fns.isEmpty || mine.length < i.fns.length then [] else
+      mine.filterMap fun (x, g) =>
+        let want := (x.inputs ++ [x.returns]).map fun t => resolve s!"{a.name}.{t}"
+        let got := (g.inputs ++ [g.returns]).map resolve
+        let same := want.length == got.length && (want.zip got).all fun
+          | (.ok p, .ok q) => p == q
+          | _ => false
+        if same then none
+        else some s!"{who}: fn {g.name} differs from {a.name}'s {x.name}: {" → ".intercalate x.inputs} -> {x.returns}"
+  declared ++ names ++ calls ++ branches ++ cycles ++ provided
+
+-- ---------------------------------------------------------------------------
 -- The manifest whole: the rules that read several declarations
 -- ---------------------------------------------------------------------------
 
@@ -581,7 +714,7 @@ def Manifest.problems (m : Manifest) : List String :=
       | none => []
   let frames :=
     m.frames.flatMap fun f => match m.modules.find? (·.name == f.moduleName) with
-      | some x => f.placement x
+      | some x => f.placement x ++ m.frameProblems f
       | none => [s!"frame {f.moduleName}: a frame belongs to a declared module"]
   own ++ names ++ refs ++ graph ++ paths ++ totals ++ idls ++ apiIdls ++ m.refCycles ++ frames
 

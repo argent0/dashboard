@@ -150,18 +150,13 @@ impl<'a> Plan<'a> {
         let Some(m) = cfg.modules.iter().find(|m| m.name == frame.module) else {
             return Err(vec![format!("{who}: {} is no module", frame.module)]);
         };
-        // Lean's rules (`Frame.placement`) held the module's language, `src`
-        // and `bindings`.
+        // Lean's rules (`Frame.placement`, `Manifest.frameProblems`) held the
+        // module's language, `src`, `bindings`, every name, call and branch;
+        // what stays here is Rust's naming. Resolution errors below are guards.
         // Types: frame-local first, then every API the module sees.
         let mut types: BTreeMap<String, Ty> = BTreeMap::new();
         let mut local: Vec<&str> = frame.records.iter().map(|r| r.name.as_str()).collect();
         local.extend(frame.sums.iter().map(|s| s.name.as_str()));
-        let mut seen = BTreeSet::new();
-        for l in &local {
-            if !seen.insert(*l) {
-                errs.push(format!("{who}: type {l} is declared twice"));
-            }
-        }
         let visible: Vec<&crate::config::ApiConfig> = crate::arch::view_apis(cfg, idls, &m.name);
         let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for a in &visible {
@@ -211,13 +206,9 @@ impl<'a> Plan<'a> {
         for s in &frame.sums {
             s.ctors.iter().flat_map(|c| &c.args).for_each(|a| note(a, &mut types, &mut errs));
         }
-        let mut fn_names = BTreeSet::new();
         for f in &frame.fns {
             if !rust_ident_ok(&f.name) {
                 errs.push(format!("{who}: fn {:?} must be a snake_case Rust name", f.name));
-            }
-            if !fn_names.insert(f.name.as_str()) {
-                errs.push(format!("{who}: fn {} is declared twice", f.name));
             }
             f.inputs.iter().chain(std::iter::once(&f.returns)).for_each(|t| note(t, &mut types, &mut errs));
         }
@@ -257,17 +248,6 @@ impl<'a> Plan<'a> {
                 list.push((method, callee));
             }
             callees.insert(f.name.clone(), list);
-            if let Some(b) = &f.branch {
-                let resolved = resolve(b);
-                let is_input = f.inputs.iter().any(|i| resolve(i).ok() == resolved.clone().ok());
-                if !is_input {
-                    errs.push(format!("{who}: fn {} branches on {b}, which is none of its inputs", f.name));
-                } else if !resolved.as_ref().is_ok_and(|t| plan_sum(frame, idls, t).is_some()) {
-                    errs.push(format!("{who}: fn {} branches on {b}, which is no sum", f.name));
-                } else if f.inputs.iter().filter(|i| resolve(i).ok() == resolved.clone().ok()).count() > 1 {
-                    errs.push(format!("{who}: fn {} takes two {b}s: branch on one sum input", f.name));
-                }
-            }
         }
         // Each ctor arg of a branched sum is a hole parameter: name its type.
         for f in &frame.fns {
@@ -332,23 +312,6 @@ impl<'a> Plan<'a> {
                 }
             }
         }
-        // Local types hold no cycle (a recursive value needs a box).
-        for l in &local {
-            let mut stack = vec![l.to_string()];
-            let mut seen = BTreeSet::new();
-            while let Some(cur) = stack.pop() {
-                for c in local_parts(frame, &cur) {
-                    if c == *l {
-                        errs.push(format!("{who}: type {l} contains itself"));
-                        stack.clear();
-                        break;
-                    }
-                    if seen.insert(c.clone()) {
-                        stack.push(c);
-                    }
-                }
-            }
-        }
         // A generated API is provided by the frame when its fns are frame fns.
         let mut provided = Vec::new();
         for a in cfg.apis.iter().filter(|a| a.generator == m.name) {
@@ -372,8 +335,8 @@ impl<'a> Plan<'a> {
                         let want: Vec<Result<Ty, String>> =
                             x.inputs.iter().chain(std::iter::once(&x.returns)).map(|t| resolve(&format!("{}.{t}", a.name))).collect();
                         let have: Vec<Result<Ty, String>> = f.inputs.iter().chain(std::iter::once(&f.returns)).map(|t| resolve(t)).collect();
+                        // Lean's rules hold the signature; a mismatch provides nothing.
                         if want != have {
-                            errs.push(format!("{who}: fn {} differs from {}'s {}: {} -> {}", f.name, a.name, x.name, x.inputs.join(" → "), x.returns));
                             ok = false;
                         }
                     }
@@ -694,12 +657,7 @@ fn pascal_ctx(f: &str) -> String {
     format!("{}Ctx", idl::pascal(f))
 }
 
-/// The frame-local types `name` holds directly (records' fields, sums' args).
-fn local_parts(frame: &Frame, name: &str) -> Vec<String> {
-    let locals: Vec<&str> = frame.records.iter().map(|r| r.name.as_str()).chain(frame.sums.iter().map(|s| s.name.as_str())).collect();
-    local_parts_all(frame, name).into_iter().filter(|p| locals.contains(&p.as_str())).collect()
-}
-
+/// The type names a frame-local type holds directly (records' fields, sums' args).
 fn local_parts_all(frame: &Frame, name: &str) -> Vec<String> {
     if let Some(r) = frame.records.iter().find(|r| r.name == name) {
         return r.fields.clone();

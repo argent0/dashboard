@@ -167,11 +167,9 @@ fn a_frame_names_what_its_module_sees_and_lives_in_its_own_file() {
     write_lean_arch(root, MANIFEST, &[("core-alpha", CORE_ALPHA), ("alpha-ui", ALPHA_UI)], &[("Frames/alpha", &bad)]);
     write_file(root, "core/lib.rs", "");
     write_file(root, "app/main.rs", "");
-    let loaded = arch::load(root).expect("load");
-    let (_, errs) = arch::sync_bindings(root, &loaded, false);
-    let all = errs.join("\n");
-    assert!(all.contains("fn decide calls core-alpha.store: core-alpha has no fn store"), "{all}");
-    assert!(all.contains("fn decide calls gone: no frame fn gone"), "{all}");
+    let e = arch::load(root).unwrap_err();
+    assert!(e.contains("frame alpha: fn decide calls core-alpha.store: core-alpha has no fn store"), "{e}");
+    assert!(e.contains("frame alpha: fn decide calls gone: no frame fn gone"), "{e}");
     // A frame declared outside Frames/<module>.lean is refused at export.
     write_file(root, "architecture/Frames/alpha.lean", "import Architecture\nopen Dashboard\n");
     write_file(root, "architecture/Tests/x.lean", FRAME);

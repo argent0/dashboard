@@ -246,6 +246,30 @@ def back : Idl := { owner with types := owner.types ++ [{ name := "Up", kind := 
    "api alpha-beta: ref beta-cli.Shown: beta-cli declares no such type",
    "api alpha-beta: ref cycle back to itself"]
 
+-- A frame of `alpha`, which generates `alpha-beta` (`owner`): `get` stands
+-- for the API's fn; the rest breaks one rule each.
+def framed : Frame :=
+  { moduleName := "alpha", srcDir := "alpha/src",
+    fns := [{ name := "get", inputs := ["Ref"], returns := "Got" },
+            { name := "plan", inputs := ["Nope", "Id"], returns := "Got", callees := ["helper", "alpha-beta.get"], branchOn := some "Id" },
+            { name := "get", inputs := ["i64"], returns := "Got" }],
+    records := [{ name := "Loop", fields := ["Loop"] }] }
+
+def withFrame (f : Frame) : Manifest :=
+  { refsOf with idls := [owner, { user with types := user.types.take 2 }], frames := [f] }
+
+#guard (withFrame framed).problems.filter (·.startsWith "frame") ==
+  ["frame alpha: fn get is declared twice",
+   "frame alpha: unknown type Nope: a prim (i64, f64, bool, string, bytes), a type of the frame, or of an api alpha sees",
+   "frame alpha: fn plan calls helper: no frame fn helper (an api fn is written api.fn)",
+   "frame alpha: fn plan calls alpha-beta.get: alpha consumes no api alpha-beta",
+   "frame alpha: fn plan branches on Id, which is no sum",
+   "frame alpha: type Loop contains itself"]
+
+-- A frame fn named for the API's fn takes its signature.
+#guard (withFrame { moduleName := "alpha", srcDir := "alpha/src", fns := [{ name := "get", inputs := ["Id"], returns := "Got" }] }).problems.filter (·.startsWith "frame") ==
+  ["frame alpha: fn get differs from alpha-beta's get: Ref -> Got"]
+
 #guard cycle ["a", "b", "c"] [("a", "b"), ("b", "c"), ("c", "b")] == some ["b", "c", "b"]
 #guard cycle ["a", "b"] [("a", "b")] == none
 
