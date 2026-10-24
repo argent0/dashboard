@@ -519,9 +519,9 @@ mod tests {
 
     #[test]
     fn max_bytes_is_required_and_enforced() {
-        let err = Prompts::parse(&replace("max-bytes 6144\n", "")).unwrap_err();
+        let err = Prompts::parse(&replace("max-bytes 6208\n", "")).unwrap_err();
         assert!(err.contains("max-bytes is required"), "{err}");
-        let err = Prompts::parse(&replace("max-bytes 6144", "max-bytes 500")).unwrap_err();
+        let err = Prompts::parse(&replace("max-bytes 6208", "max-bytes 500")).unwrap_err();
         assert!(
             err.contains("over max-bytes 500") && err.contains("task agent prompt"),
             "{err}"
@@ -540,7 +540,7 @@ mod tests {
             err.contains("worker.finish-accepted is 80 bytes, over its max-bytes 10"),
             "{err}"
         );
-        // The section's applies to the rest: launch keeps its own 1536.
+        // The section's applies to the rest: launch keeps its own 1600.
         let err = Prompts::parse(&replace(
             "\nworker max-bytes=512 {",
             "\nworker max-bytes=100 {",
@@ -551,12 +551,12 @@ mod tests {
             "{err}"
         );
         let err = Prompts::parse(&replace(
-            "    launch max-bytes=1536 #\"\"\"\n        You are the worker for task",
+            "    launch max-bytes=1600 #\"\"\"\n        You are the worker for task",
             "    launch max-bytes=1000 #\"\"\"\n        You are the worker for task",
         ))
         .unwrap_err();
         assert!(
-            err.contains("worker.launch is 1531 bytes, over its max-bytes 1000"),
+            err.contains("worker.launch is 1577 bytes, over its max-bytes 1000"),
             "{err}"
         );
         let err = Prompts::parse(&replace(

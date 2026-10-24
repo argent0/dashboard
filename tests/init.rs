@@ -103,7 +103,7 @@ fn commits_the_starter_prompts_and_keeps_an_existing_one() {
     );
 
     let repo = director_repo();
-    let custom = prompts::STARTER.replace("max-bytes 6144", "max-bytes 7000");
+    let custom = prompts::STARTER.replace("max-bytes 6208", "max-bytes 7000");
     write_file(repo.path(), "prompts.kdl", &custom);
     commit(repo.path(), "own prompts");
     let home_dir = temp_home();

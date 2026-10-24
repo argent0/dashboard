@@ -16,11 +16,11 @@
 //   section max-bytes=N {…}  each template in that section
 //   name max-bytes=N "…"     that template, instead of its section's limit
 
-max-bytes 6144
+max-bytes 6208
 
 worker max-bytes=512 {
     // {slug} {project}
-    launch max-bytes=1536 #"""
+    launch max-bytes=1600 #"""
         You are the worker for task `{slug}` in project `{project}`. Your clone's `origin` remote
         is the hub: fetch from it, and never push anywhere else.
 
@@ -30,8 +30,8 @@ worker max-bytes=512 {
 
         Write only inside your scope. A pinned file changed (the director's and task agent's tests,
         tasks/{slug}/) is a `pins` strike; any other path outside your scope is a `scope` strike.
-        Your own tests go in architecture/Tests/{slug}.worker.lean, as `check` blocks with `covers`
-        inside your modules and their test files in `files`; they join the run set. If a pinned
+        Your own tests go in architecture/Tests/{slug}.worker.lean (it imports Architecture and
+        Architect.Tests), as `check` blocks with `covers` inside your modules and their test files in `files`; they join the run set. If a pinned
         test is stale, don't edit it: make a `block:` commit saying which.
 
         If the task can't be done as specified, make an empty commit explaining why instead of
@@ -275,7 +275,8 @@ task-agent max-bytes=512 {
           shared state, no network, real clock or unseeded randomness, no dependence on test order.
           The prompt.md you write passes this rule on to the worker in one line.
         - Write only tests, architecture/Tests/{slug}.lean, the APIs between the task's modules and
-          files under tasks/{slug}/, never code. Each check in Tests/{slug}.lean names `covers`
+          files under tasks/{slug}/, never code. Tests/{slug}.lean imports Architecture and
+          Architect.Tests; each check in it names `covers`
           inside the task's modules and its test files in `files`. task.toml is the director's
           plan; leave it as it is.
         - Test setup shared across test files (a stand-in, scenario ids, helpers) lives in a
