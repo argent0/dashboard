@@ -41,7 +41,7 @@ inductive Advice
 /-- The cause a drop on this advice records: a stop keeps its own. -/
 def Advice.cause : Advice → Cause
   | .stopped c => c
-  | _ => .retired
+  | .recommend _ | .doubt _ | .conflict _ => .retired
 
 /-- The planner's possible decisions on each advice. -/
 inductive Decision : Advice → Type
@@ -58,7 +58,7 @@ inductive Decision : Advice → Type
 /-- Advice the hub reports from the work; a conflict comes from landing. -/
 def Advice.isReport : Advice → Bool
   | .conflict _ => false
-  | _ => true
+  | .recommend _ | .doubt _ | .stopped _ => true
 
 inductive State
   /-- Something to plan, with the architect's answers so far. The start is
@@ -106,12 +106,14 @@ inductive Step : State → State → Type
 
 def State.isStart : State → Bool
   | .toPlan _ [] => true
-  | _ => false
+  | .toPlan _ (_ :: _) | .designing .. | .running .. | .advised .. | .landing .. | .landed _
+  | .dropped .. | .abandoned .. => false
 
 /-- What a dropped end hands a new planner machine to start from. -/
 def State.replan : State → Option Goal
   | .dropped _ p c _ => some (.replan p.slug c)
-  | _ => none
+  | .toPlan .. | .designing .. | .running .. | .advised .. | .landing .. | .landed _
+  | .abandoned .. => none
 
 /-- A decision always moves on: no advice is decided twice. -/
 theorem decision_moves_on (g : Goal) (p : Plan) (a : Advice) (d : Decision a) :

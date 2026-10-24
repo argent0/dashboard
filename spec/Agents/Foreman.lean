@@ -52,12 +52,12 @@ inductive State
 /-- Where response `r` to ask `k` leaves the foreman. -/
 def after (a : Assignment) (prompt : Revision) : (k : Ask) → Response k → State
   | _, .unsure why => .unsure a why
-  | _, _ => .posted a prompt
+  | _, .sentBack _ | _, .recommend _ | _, .replied _ => .posted a prompt
 
 /-- The states that wait on the hub alone. -/
 def State.waits : State → Bool
   | .posted .. | .unsure .. => true
-  | _ => false
+  | .toPost _ | .owing .. | .accepted | .dropped _ => false
 
 /-- The foreman's legal transitions. -/
 inductive Step : State → State → Type
@@ -73,7 +73,7 @@ inductive Step : State → State → Type
 
 def State.isStart : State → Bool
   | .toPost _ => true
-  | _ => false
+  | .posted .. | .unsure .. | .owing .. | .accepted | .dropped _ => false
 
 /-- While it owes an answer, the foreman's only step is to give it. -/
 theorem owing_steps (st : Step (.owing a p k) t) : ∃ r : Response k, t = after a p k r := by

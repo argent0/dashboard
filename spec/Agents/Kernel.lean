@@ -35,6 +35,10 @@ structure Plan where
 inductive Reason
   /-- It writes outside its author's paths, or breaks the architecture. -/
   | ownership
+  /-- A worker commit that changes a pinned file (spec §8.3). -/
+  | pins
+  /-- A worker commit outside the task's scope (spec §8.3). -/
+  | scope
   /-- A post whose task check already passes. -/
   | post
   /-- A send-back whose new test already passes on the worker's code. -/

@@ -46,7 +46,7 @@ inductive Step : State → State → Type
 
 def State.isStart : State → Bool
   | .asked _ 0 => true
-  | _ => false
+  | .asked _ (_ + 1) | .proposing .. | .designed .. | .declined .. | .refused .. => false
 
 def State.question : State → Question
   | .asked q _ | .proposing q .. | .designed q _ | .declined q _ | .refused q _ => q
@@ -64,7 +64,7 @@ left, and one to end. -/
 def State.fuel : State → Nat
   | .asked _ n => 2 * (maxProposals - n) + 2
   | .proposing _ n _ => 2 * (maxProposals - n) + 1
-  | _ => 0
+  | .designed .. | .declined .. | .refused .. => 0
 
 /-- Every question ends within `2 * maxProposals + 2` steps. -/
 theorem run_bounded (r : Run (Step maxProposals) s t) : r.length ≤ s.fuel maxProposals :=

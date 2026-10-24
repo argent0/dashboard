@@ -62,7 +62,7 @@ inductive Step : State → State → Type
 
 def State.isStart : State → Bool
   | .building _ 0 => true
-  | _ => false
+  | .building _ (_ + 1) | .waiting .. | .accepted | .dropped _ => false
 
 /-- While it waits, the worker's only step is the reply to its move. -/
 theorem waiting_steps (st : Step (.waiting j n m) t) : ∃ r : Reply m, t = after j n m r := by
@@ -76,15 +76,15 @@ theorem sentBack_kept (j : Job) (n : Nat) (rev note : Revision) (fl : List Strin
 
 def State.round : State → Nat
   | .building _ n | .waiting _ n _ => n
-  | _ => 0
+  | .accepted | .dropped _ => 0
 
 def State.job? : State → Option Job
   | .building j _ | .waiting j _ _ => some j
-  | _ => none
+  | .accepted | .dropped _ => none
 
 def State.live : State → Prop
   | .building .. | .waiting .. => True
-  | _ => False
+  | .accepted | .dropped _ => False
 
 /-- The round never goes back while the worker is live. -/
 theorem step_round (st : Step s t) (ht : t.live) : s.round ≤ t.round := by
