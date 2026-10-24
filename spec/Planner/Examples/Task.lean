@@ -49,7 +49,7 @@ def stable : Check :=
   { name := "stable", cmd := "cargo test x", covers := .only [core], runs := 20, min_pass := 20 }
 
 def header (s : Slug) : Header :=
-  { slug := s, title := "Title", phase := "p1", milestone := false, dependsOn := ["alpha"],
+  { slug := s, title := "Title", phase := "p1", dependsOn := ["alpha"],
     components := [core], brief := "Context for the task agent." }
 
 def task : Task := .task (header "beta")

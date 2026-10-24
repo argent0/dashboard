@@ -14,6 +14,7 @@ use std::str::FromStr;
 pub struct RoadmapConfig {
     pub title: Option<String>,
     pub phases: Vec<Phase>,
+    pub milestones: Vec<Milestone>,
     pub docs_paths: Vec<String>,
     pub limits: Limits,
     pub player: PlayerConfig,
@@ -93,6 +94,36 @@ pub struct Phase {
     pub title: Option<String>,
     #[serde(default)]
     pub goal: Option<String>,
+}
+
+/// `[[milestones]]`: a point the roadmap reaches once every task in `after`
+/// is accepted (a spike: explored). It names tasks and holds no work.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Milestone {
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub after: Vec<String>,
+}
+
+fn validate_milestones(ms: &[Milestone]) -> Result<(), String> {
+    for (i, m) in ms.iter().enumerate() {
+        if m.id.trim().is_empty() {
+            return Err("[[milestones]] id must be non-empty".to_string());
+        }
+        if ms[..i].iter().any(|o| o.id == m.id) {
+            return Err(format!("[[milestones]] id {:?} is named twice", m.id));
+        }
+        if m.after.is_empty() {
+            return Err(format!("milestone {:?}: after names at least one task", m.id));
+        }
+        for (j, a) in m.after.iter().enumerate() {
+            if m.after[..j].contains(a) {
+                return Err(format!("milestone {:?}: after names {a:?} twice", m.id));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -643,7 +674,6 @@ pub struct TaskConfig {
     pub title: String,
     pub kind: TaskKind,
     pub phase: String,
-    pub milestone: bool,
     pub depends_on: Vec<String>,
     /// The modules and roots the task changes (spec §8.2): its worker's
     /// scope and its run set. Required for `kind = "task"`.
@@ -694,9 +724,6 @@ impl TaskConfig {
             }
             if self.check.is_some() {
                 return Err("a test-speedup has no task [check]: its evidence is the [[slow]] checks' recorded times on main".to_string());
-            }
-            if self.milestone {
-                return Err("a test-speedup can't be a milestone".to_string());
             }
         } else if !self.slow.is_empty() {
             return Err("[[slow]] is only for kind = \"test-speedup\"".to_string());
@@ -757,9 +784,6 @@ impl TaskConfig {
             }
             if !self.depends_on.is_empty() {
                 return Err("a spike can't depend on other tasks".to_string());
-            }
-            if self.milestone {
-                return Err("a spike can't be a milestone".to_string());
             }
         }
         Ok(())
@@ -1449,6 +1473,7 @@ pub fn roadmap_config_from_str(s: &str) -> Result<RoadmapConfig, String> {
     let cfg: RoadmapConfig = toml::from_str(s).map_err(|e| e.to_string())?;
     cfg.sandbox.validate()?;
     cfg.budget.validate()?;
+    validate_milestones(&cfg.milestones)?;
     Ok(cfg)
 }
 
@@ -1471,6 +1496,7 @@ mod tests {
         let cfg = roadmap_config_from_str("").unwrap();
         assert_eq!(cfg.title, None);
         assert!(cfg.phases.is_empty());
+        assert!(cfg.milestones.is_empty());
         assert!(cfg.docs_paths.is_empty());
         assert_eq!(cfg.limits.max_review_rounds, 2);
         assert_eq!(cfg.limits.max_contest_rounds, 2);
@@ -1495,6 +1521,11 @@ mod tests {
             title = "Phase One"
             goal = "get started"
 
+            [[milestones]]
+            id = "mvp"
+            title = "MVP"
+            after = ["a", "b"]
+
             [limits]
             max_review_rounds = 3
             max_relaunches = 4
@@ -1516,6 +1547,8 @@ mod tests {
         assert_eq!(cfg.phases.len(), 1);
         assert_eq!(cfg.phases[0].id, "p1");
         assert_eq!(cfg.phases[0].title.as_deref(), Some("Phase One"));
+        assert_eq!(cfg.milestones[0].id, "mvp");
+        assert_eq!(cfg.milestones[0].after, ["a", "b"]);
         assert_eq!(cfg.limits.max_review_rounds, 3);
         assert_eq!(cfg.limits.max_relaunches, 4);
         assert_eq!(cfg.limits.strikes.suite, 5);
@@ -1607,9 +1640,19 @@ mod tests {
         let err = task_config_from_str("title = \"t\"\nmodules = [\"a\", \"a\"]\n").unwrap_err();
         assert!(err.contains("named twice"), "{err}");
         assert_eq!(cfg.phase, "");
-        assert!(!cfg.milestone);
         assert_eq!(cfg.depends_on, vec!["a".to_string(), "b".to_string()]);
         assert!(cfg.check.is_none());
+    }
+
+    #[test]
+    fn milestones_are_validated() {
+        let m = |body: &str| roadmap_config_from_str(&format!("[[milestones]]\n{body}"));
+        assert!(m("id = \"m\"\nafter = []\n").unwrap_err().contains("at least one"));
+        assert!(m("id = \"m\"\nafter = [\"a\", \"a\"]\n").unwrap_err().contains("twice"));
+        assert!(m("id = \"\"\nafter = [\"a\"]\n").is_err());
+        let two = "[[milestones]]\nid = \"m\"\nafter = [\"a\"]\n";
+        assert!(roadmap_config_from_str(&format!("{two}{two}")).unwrap_err().contains("twice"));
+        assert!(m("id = \"m\"\nafter = [\"a\"]\n").is_ok());
     }
 
     #[test]
@@ -1628,7 +1671,6 @@ mod tests {
             TaskKind::Task
         );
         assert!(task_config_from_str("kind = \"spike\"\ndepends_on = [\"a\"]\n").is_err());
-        assert!(task_config_from_str("kind = \"spike\"\nmilestone = true\n").is_err());
         assert!(
             task_config_from_str("kind = \"spike\"\n[check]\nname = \"c\"\ncmd = \"true\"\n")
                 .is_err()

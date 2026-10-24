@@ -1,6 +1,6 @@
 /-
 The plan's data (spec §8.2, §10, §14, §15): the types a project's tasks
-package writes, `tasks/Roadmap.lean` (phases, limits, the player's settings)
+package writes, `tasks/Roadmap.lean` (phases, milestones, limits, the player's settings)
 and `tasks/<slug>/Task.lean` (one task). It names the architecture's nodes,
 so it imports `Architect.Types` (and `Architect.Tests.Types` for a flaky
 fix's check); it imports no syntax, so
@@ -32,6 +32,14 @@ structure Phase where
   id : String
   title : Option String := none
   goal : Option String := none
+  deriving Repr, DecidableEq, Inhabited
+
+/-- A point the roadmap reaches once every task in `after` is accepted (a
+spike: explored). It names tasks and holds no work of its own. -/
+structure Milestone where
+  id : String
+  title : Option String := none
+  after : List Slug
   deriving Repr, DecidableEq, Inhabited
 
 /-- `[limits.strikes]` (spec §10): one counter per rejection reason. -/
@@ -106,6 +114,7 @@ structure Player where
 structure Roadmap where
   title : Option String := none
   phases : List Phase := []
+  milestones : List Milestone := []
   docs_paths : List String := []
   limits : Limits := {}
   player : Player := {}
@@ -121,7 +130,6 @@ structure Header where
   slug : Slug
   title : String
   phase : String
-  milestone : Bool := false
   dependsOn : List Slug := []
   components : List Component := []
   brief : String := ""

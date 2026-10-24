@@ -131,7 +131,7 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     let mut out: Vec<String> = Vec::new();
 
     // Spikes never merge and nothing depends on them (spec §14), so they stay
-    // out of the progress counts, phases, milestones and ready list; they get
+    // out of the progress counts, phases and ready list; they get
     // their own section, and still show up wherever a task is in flight or
     // escalated.
     let is_spike = |t: &&TaskState| t.config.kind == TaskKind::Spike;
@@ -247,22 +247,43 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     }
 
     // ---- milestones ----
-    let milestones: Vec<&TaskState> = live
-        .iter()
-        .filter(|t| t.config.milestone)
-        .copied()
-        .collect();
+    // A milestone is reached once every task it follows is accepted (a
+    // spike: explored); the rest are listed as what it still waits on.
     out.push(style("⚑ Milestones", &[c::BOLD, c::MAGENTA], color));
-    if milestones.is_empty() {
+    if state.roadmap.milestones.is_empty() {
         out.push(none_line(color));
-    } else {
-        for t in &milestones {
-            let ss = status_style(t.status);
+    }
+    for m in &state.roadmap.milestones {
+        let waiting: Vec<&str> = m
+            .after
+            .iter()
+            .filter(|a| {
+                !state.tasks.iter().any(|t| {
+                    &t.slug == *a && matches!(t.status, Status::Accepted | Status::Explored)
+                })
+            })
+            .map(String::as_str)
+            .collect();
+        let label = m.title.clone().unwrap_or_else(|| m.id.clone());
+        let done = m.after.len() - waiting.len();
+        let progress = format!("{done}/{}", m.after.len());
+        if waiting.is_empty() {
+            let ss = status_style(Status::Accepted);
             out.push(format!(
-                "  {} {} {}",
+                "  {} {} {}  {}",
                 ss.icon,
-                style(&format!("{:<11}", t.status.as_str()), ss.codes, color),
-                truncate(&t.config.title, width.saturating_sub(20))
+                style(&format!("{:<11}", "reached"), ss.codes, color),
+                truncate(&label, width.saturating_sub(24)),
+                style(&progress, &[c::DIM], color)
+            ));
+        } else {
+            let ss = status_style(Status::Pending);
+            out.push(format!(
+                "  {} {} {}  {}",
+                ss.icon,
+                style(&format!("{:<11}", "pending"), ss.codes, color),
+                truncate(&label, width.saturating_sub(24)),
+                style(&format!("{progress}, after {}", waiting.join(", ")), &[c::DIM], color)
             ));
         }
     }
@@ -704,7 +725,6 @@ fn render_phase(
     }
     for t in tasks {
         let ss = status_style(t.status);
-        let mark = if t.config.milestone { " ⚑" } else { "  " };
         let slug = format!("{:<24}", t.slug);
         let status_label = format!("{:<11}", t.status.as_str());
         let title_w = width.saturating_sub(46).max(10);
@@ -717,11 +737,10 @@ fn render_phase(
             badges.push_str(&style(&format!("  impure: {}", t.impure), &[c::RED], color));
         }
         out.push(format!(
-            "  {} {} {}{} {}{}",
+            "  {} {} {}   {}{}",
             ss.icon,
             style(&status_label, ss.codes, color),
             style(&slug, &[c::DIM], color),
-            mark,
             truncate(&t.config.title, title_w),
             badges
         ));
@@ -937,7 +956,7 @@ fn format_suite(suite: &SuiteResult) -> String {
 mod tests {
     use super::*;
     use crate::checks::CheckResult;
-    use crate::config::{Limits, Phase, RoadmapConfig, StrikeLimits, TaskConfig};
+    use crate::config::{Limits, Milestone, Phase, RoadmapConfig, StrikeLimits, TaskConfig};
     use crate::events::EventKind;
     use std::collections::BTreeMap;
 
@@ -949,6 +968,7 @@ mod tests {
                 title: Some("Phase One".to_string()),
                 goal: Some("ship the widget".to_string()),
             }],
+            milestones: vec![],
             docs_paths: vec![],
             limits: Limits {
                 max_review_rounds: 2,
@@ -968,7 +988,6 @@ mod tests {
             config: TaskConfig {
                 title: format!("Title for {slug}"),
                 phase: phase.to_string(),
-                milestone: false,
                 depends_on: vec![],
                 check: None,
                 kind: TaskKind::Task,
@@ -1068,12 +1087,27 @@ mod tests {
     }
 
     #[test]
-    fn milestones_section_lists_milestone_tasks() {
-        let mut t = task("m1", "p1", Status::Ready);
-        t.config.milestone = true;
-        let out = render_plain(&hub_state(vec![t]));
-        assert!(out.contains("⚑ Milestones"), "{out}");
-        assert!(out.contains("m1") || out.contains("Title for m1"), "{out}");
+    fn milestones_are_reached_once_every_task_after_is_done() {
+        let mut state = hub_state(vec![
+            task("a", "p1", Status::Accepted),
+            task("b", "p1", Status::Ready),
+        ]);
+        state.roadmap.milestones = vec![Milestone {
+            id: "mvp".to_string(),
+            title: Some("Minimum viable".to_string()),
+            after: vec!["a".to_string(), "b".to_string()],
+        }];
+        let section = |s: &HubState| {
+            let out = render_plain(s);
+            let m = out.split("⚑ Milestones").nth(1).unwrap().to_string();
+            m.split("▶ Ready").next().unwrap().to_string()
+        };
+        let pending = section(&state);
+        assert!(pending.contains("pending") && pending.contains("Minimum viable"), "{pending}");
+        assert!(pending.contains("1/2, after b"), "{pending}");
+        state.tasks[1].status = Status::Accepted;
+        let reached = section(&state);
+        assert!(reached.contains("reached") && reached.contains("2/2"), "{reached}");
     }
 
     #[test]
