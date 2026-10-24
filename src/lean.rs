@@ -448,12 +448,12 @@ pub fn parse(text: &str) -> Result<Exported, String> {
     if let Some(frames) = json.get("frames") {
         arch.frames = serde_json::from_value(frames.clone()).map_err(|e| format!("frames: {e}"))?;
     }
-    // Every API's every problem, not just the first.
+    // Every API's decode error, not just the first.
     let mut idls = BTreeMap::new();
     let mut errs = Vec::new();
     if let Some(map) = json.get("idls").and_then(|i| i.as_object()) {
         for (name, v) in map {
-            match serde_json::from_value(v.clone()).map_err(|e| e.to_string()).and_then(Idl::from_export) {
+            match serde_json::from_value::<Idl>(v.clone()).map_err(|e| e.to_string()) {
                 Ok(idl) => {
                     idls.insert(name.clone(), idl);
                 }

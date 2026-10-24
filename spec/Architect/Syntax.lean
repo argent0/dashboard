@@ -428,7 +428,10 @@ macro_rules
         sums := $(← listTerm acc.sums),
         fns := $(← listTerm acc.fns) })
     cmds := cmds.push spec
-    let all := #[← `(namespace $n)] ++ cmds ++ #[← `(end $n)]
+    -- The IDL's rules against its API: an error lands on the block.
+    let specOf := Lean.mkIdent (n.getId ++ `spec)
+    let check ← `(#eval Dashboard.ensure (Dashboard.Idl.problems $specOf $n))
+    let all := #[← `(namespace $n)] ++ cmds ++ #[← `(end $n), check]
     return Lean.mkNullNode (all.map (·.raw))
 
 -- ---------------------------------------------------------------------------

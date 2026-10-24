@@ -65,19 +65,18 @@ fn lean_type_checks_the_manifest_and_the_tool_checks_the_rest() {
     assert!(arch::load(d.path()).unwrap_err().contains("max_apples"));
     write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("constructor X : Id", "constructor X : Nope"))], &[]);
     assert!(arch::load(d.path()).unwrap_err().contains("Nope"));
-    // Lean can't know a type is unused or a string unbounded: the tool does.
-    // Every problem at once, not one per run.
+    // The `idl` block checks its rules against its api: every problem at
+    // once, on the block.
     let unused = LEAN_AB_IDL.replace("constructor X : Id", "constructor X").replace("  type Id", "  type Extra : i64\n  type Id");
     write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &unused)], &[]);
     let e = arch::load(d.path()).unwrap_err();
-    assert!(e.contains("Apis/ab.lean: type Extra: declared but never used\n") && e.contains("Apis/ab.lean: type Id: declared but never used"), "{e}");
+    assert!(e.contains("Apis/ab.lean") && e.contains("api ab: type Extra: declared but never used\napi ab: type Id: declared but never used"), "{e}");
     write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("string 16", "string"))], &[]);
-    let loaded = arch::load(d.path()).unwrap();
-    let (problems, _) = report(d.path(), &loaded);
-    assert!(problems.iter().any(|p| p.contains("type Id: a string or bytes type needs a max_len")), "{problems:?}");
+    let e = arch::load(d.path()).unwrap_err();
+    assert!(e.contains("api ab: type Id: a string or bytes type needs a max_len"), "{e}");
     write_lean_arch(d.path(), LEAN_AB_MANIFEST, &[("ab", &LEAN_AB_IDL.replace("string 16", "string 300"))], &[]);
-    let (problems, _) = report(d.path(), &arch::load(d.path()).unwrap());
-    assert!(problems.iter().any(|p| p.contains("string max_len 300 exceeds the api's max_string_len 256")), "{problems:?}");
+    let e = arch::load(d.path()).unwrap_err();
+    assert!(e.contains("api ab: a string max_len 300 exceeds the api's max_string_len 256"), "{e}");
     let raised = LEAN_AB_MANIFEST.replace("paths = [\"api\"]", "paths = [\"api\"]\n  max_string_len = 400");
     write_lean_arch(d.path(), &raised, &[("ab", &LEAN_AB_IDL.replace("string 16", "string 300"))], &[]);
     let (problems, headroom) = report(d.path(), &arch::load(d.path()).unwrap());
@@ -226,11 +225,12 @@ fn refinements_and_tokens_are_elaborated_exported_budgeted_and_linted() {
     // Budgets, and the mint lint: a consumer minting evidence is caught, the
     // generator is not.
     write_lean_arch(r, &PROOFS_MANIFEST.replace("max_rules = 9", "max_rules = 8").replace("max_tokens = 3", "max_tokens = 2"), &[("nutrition-db", PROOFS_IDL), ("nutrition-web", PROOFS_WEB)], &[]);
+    let e = arch::load(r).unwrap_err();
+    assert!(e.contains("api nutrition-db: refinement rules 9 exceeds budget 8\napi nutrition-db: tokens 3 exceeds budget 2"), "{e}");
+    write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", PROOFS_IDL), ("nutrition-web", PROOFS_WEB)], &[]);
     write_file(r, "nutrition/lib.rs", "fn f() { let _p = ProductRef::mint(1); }\n");
     write_file(r, "db/lib.rs", "fn f() { let _p = ProductRef::mint(1); }\n");
     let (problems, _) = report(r, &arch::load(r).unwrap());
-    assert!(problems.iter().any(|p| p == "api nutrition-db: refinement rules 9 exceeds budget 8"), "{problems:?}");
-    assert!(problems.iter().any(|p| p == "api nutrition-db: tokens 3 exceeds budget 2"), "{problems:?}");
     assert!(problems.iter().any(|p| p == "nutrition/lib.rs:1: mints the evidence token ProductRef; only the generator of its api may"), "{problems:?}");
     assert!(!problems.iter().any(|p| p.starts_with("db/lib.rs")), "{problems:?}");
     // A task check's files stand in for the generator and may mint; a

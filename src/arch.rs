@@ -210,41 +210,6 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
     for a in &cfg.apis {
         let Some(idl) = idls.get(a.name.as_str()) else { continue };
         let who = format!("api {}", a.name);
-        if a.max_constructors > 0 && idl.constructors() > a.max_constructors {
-            errs.push(format!("{who}: constructors {} exceeds budget {}", idl.constructors(), a.max_constructors));
-        }
-        if a.max_types > 0 && idl.slots() > a.max_types {
-            errs.push(format!("{who}: T slots {} exceeds budget {}", idl.slots(), a.max_types));
-        }
-        if a.max_elements > 0 && idl.element_variants() > a.max_elements {
-            errs.push(format!("{who}: element variants {} exceeds budget {}", idl.element_variants(), a.max_elements));
-        }
-        if a.max_fields > 0 && idl.element_fields() > a.max_fields {
-            errs.push(format!("{who}: element fields {} exceeds budget {}", idl.element_fields(), a.max_fields));
-        }
-        if a.max_fns > 0 && idl.fn_count() > a.max_fns {
-            errs.push(format!("{who}: fns {} exceeds budget {}", idl.fn_count(), a.max_fns));
-        }
-        if a.max_inputs > 0 && idl.inputs() > a.max_inputs {
-            errs.push(format!("{who}: fn inputs {} exceeds budget {}", idl.inputs(), a.max_inputs));
-        }
-        if a.max_rules > 0 && idl.rules() > a.max_rules {
-            errs.push(format!("{who}: refinement rules {} exceeds budget {}", idl.rules(), a.max_rules));
-        }
-        if a.max_tokens > 0 && idl.token_count() > a.max_tokens {
-            errs.push(format!("{who}: tokens {} exceeds budget {}", idl.token_count(), a.max_tokens));
-        }
-        // No tunnels (architect-v3.md): every string and bytes is bounded,
-        // and no bound exceeds the API's cap.
-        errs.extend(idl.unbounded().into_iter().map(|e| format!("{who}: {e}")));
-        let (s, b) = idl.longest();
-        let cap = string_cap(a);
-        if s > cap {
-            errs.push(format!("{who}: a string max_len {s} exceeds the api's max_string_len {cap} (a raise: commit if it is no tunnel)"));
-        }
-        if a.max_bytes_len > 0 && b > a.max_bytes_len {
-            errs.push(format!("{who}: a bytes max_len {b} exceeds the api's max_bytes_len {}", a.max_bytes_len));
-        }
         // The callee folds an input container, so the generator must consume
         // the class API for its Seq (architect-v3.md, §1). A container only
         // returned is folded by the consumer, which refs it already. A named
@@ -1124,14 +1089,8 @@ mod tests {
     }
 
     #[test]
-    fn api_budgets_drift_and_languages() {
+    fn api_drift_and_languages() {
         let d = fixture();
-        let mut m = manifest();
-        m["api"][0]["max_constructors"] = json!(1);
-        m["api"][0]["max_types"] = json!(1);
-        let all = run(d.path(), &m).problems.join("\n");
-        assert!(all.contains("constructors 2 exceeds budget 1"), "{all}");
-        assert!(!all.contains("T slots"), "{all}");
         // Hand-editing a binding is drift.
         write(d.path(), "api/gen/ab.rs", "pub enum Ab {}");
         let all = run(d.path(), &manifest()).problems.join("\n");

@@ -348,224 +348,7 @@ pub struct Idl {
     pub fns: Vec<Fn>,
 }
 
-fn ident_ok(s: &str) -> bool {
-    let mut c = s.chars();
-    matches!(c.next(), Some(f) if f.is_ascii_uppercase())
-        && c.all(|c| c.is_ascii_alphanumeric())
-}
-
 impl Idl {
-    /// An IDL the Lean exporter produced (`lean::export`), validated here
-    /// since Lean type-checks only part of it. Every problem is listed, one
-    /// per line.
-    pub fn from_export(idl: Idl) -> Result<Idl, String> {
-        let errs = idl.validate();
-        if !errs.is_empty() {
-            return Err(errs.join("\n"));
-        }
-        Ok(idl)
-    }
-
-    /// Every problem with the IDL, not just the first.
-    pub(crate) fn validate(&self) -> Vec<String> {
-        let mut errs = Vec::new();
-        let mut names = BTreeSet::new();
-        for t in &self.types {
-            if !ident_ok(&t.name) || !names.insert(t.name.as_str()) {
-                errs.push(format!("type {:?}: not a CamelCase identifier, or duplicate", t.name));
-            }
-            if let Kind::Tuple(fs) = &t.kind {
-                if !(2..=4).contains(&fs.len()) {
-                    errs.push(format!("type {}: a product has two to four components", t.name));
-                }
-            }
-            if let Some(p) = &t.pred {
-                if matches!(t.kind, Kind::Ref(..)) {
-                    errs.push(format!("type {}: a ref carries its own refinement; `where` is for a repr or a product", t.name));
-                }
-                if let Err(e) = p.check(&self.components(t)) {
-                    errs.push(format!("type {}: {e}", t.name));
-                }
-            }
-        }
-        for k in &self.tokens {
-            if !ident_ok(&k.name) || !names.insert(k.name.as_str()) {
-                errs.push(format!("token {:?}: not a CamelCase identifier, or duplicate", k.name));
-            }
-        }
-        for (what, n) in self
-            .elements
-            .iter()
-            .map(|e| ("element", &e.name))
-            .chain(self.containers.iter().map(|c| ("container", &c.name)))
-        {
-            if !ident_ok(n) || !names.insert(n.as_str()) {
-                errs.push(format!("{what} {n:?}: not a CamelCase identifier, or duplicate"));
-            }
-        }
-        for e in &self.elements {
-            let mut vs = BTreeSet::new();
-            for v in &e.variants {
-                if !ident_ok(&v.name) || !vs.insert(v.name.as_str()) {
-                    errs.push(format!("element {}: variant {:?}: not a CamelCase identifier, or duplicate", e.name, v.name));
-                }
-            }
-            if e.variants.is_empty() {
-                errs.push(format!("element {}: no variants", e.name));
-            }
-            if !self.containers.iter().any(|c| matches!(&c.kind, ContainerKind::Of(of, ..) if *of == e.name)) {
-                errs.push(format!("element {}: no container holds it (an element is reachable only through one)", e.name));
-            }
-        }
-        for c in &self.containers {
-            match &c.kind {
-                ContainerKind::Generic(classes) => {
-                    if !classes.contains(&Class::Foldable) {
-                        errs.push(format!("container {}: a generic's classes must include Foldable, its primitive", c.name));
-                    }
-                    if !self.instances.is_empty() {
-                        errs.push(format!("container {}: an api owning a container adds no instances to another's", c.name));
-                    }
-                }
-                ContainerKind::Of(of, ..) => {
-                    if !self.elements.iter().any(|e| e.name == *of) {
-                        errs.push(format!("container {}: of={of:?} is not an element of this api", c.name));
-                    }
-                }
-            }
-        }
-        for i in self.instances.iter().filter(|i| i.class == Class::Foldable) {
-            errs.push(format!("instance Foldable for {}.{}: Foldable is declared by the api owning the container", i.api, i.container));
-        }
-        if self.instances.iter().any(|i| i.api != self.instances[0].api) {
-            errs.push("instances: all for containers of one api".to_string());
-        }
-        let mut cnames = BTreeSet::new();
-        let mut used = BTreeSet::new();
-        for c in &self.ctors {
-            if !ident_ok(&c.name) || !cnames.insert(c.name.as_str()) {
-                errs.push(format!("constructor {:?}: not a CamelCase identifier, or duplicate", c.name));
-            }
-            for a in &c.args {
-                if self.is_sum(a) {
-                    // A named sum nests: the consumer matches it in turn.
-                    used.insert(a.as_str());
-                    continue;
-                }
-                if !names.contains(a.as_str()) {
-                    errs.push(format!("constructor {}: unknown type {a:?}", c.name));
-                }
-                if self.elements.iter().any(|e| e.name == *a) {
-                    errs.push(format!("constructor {}: element {a} is reachable only through a container", c.name));
-                }
-                if self.containers.iter().any(|x| x.name == *a && matches!(x.kind, ContainerKind::Generic(_))) {
-                    errs.push(format!("constructor {}: {a} is generic; instantiate it with `container ... of=`", c.name));
-                }
-                used.insert(a.as_str());
-            }
-        }
-        // Named sums and fns (architect-v3.md, "APIs are signatures").
-        let mut snames = BTreeSet::new();
-        for s in &self.sums {
-            if !ident_ok(&s.name) || names.contains(s.name.as_str()) || !snames.insert(s.name.as_str()) {
-                errs.push(format!("sum {:?}: not a CamelCase identifier, or duplicate", s.name));
-            }
-            if s.ctors.is_empty() {
-                errs.push(format!("sum {}: no constructors", s.name));
-            }
-            for c in &s.ctors {
-                if !ident_ok(&c.name) || !cnames.insert(c.name.as_str()) {
-                    errs.push(format!("sum {}: constructor {:?}: not a CamelCase identifier, or duplicate across the api's sums", s.name, c.name));
-                }
-                for a in &c.args {
-                    if self.is_sum(a) {
-                        // Declared before this one: sums nest, never recursively.
-                        if snames.contains(a.as_str()) && *a != s.name {
-                            used.insert(a.as_str());
-                        } else {
-                            errs.push(format!("sum {}: constructor {}: sum {a} must be declared before {} (a sum never contains itself)", s.name, c.name, s.name));
-                        }
-                        continue;
-                    }
-                    if !names.contains(a.as_str()) {
-                        errs.push(format!("sum {}: constructor {}: unknown type {a:?}", s.name, c.name));
-                    }
-                    if self.elements.iter().any(|e| e.name == *a) {
-                        errs.push(format!("sum {}: constructor {}: element {a} is reachable only through a container", s.name, c.name));
-                    }
-                    if self.containers.iter().any(|x| x.name == *a && matches!(x.kind, ContainerKind::Generic(_))) {
-                        errs.push(format!("sum {}: constructor {}: {a} is generic; instantiate it with `container ... of=`", s.name, c.name));
-                    }
-                    used.insert(a.as_str());
-                }
-            }
-        }
-        let mut fnames = BTreeSet::new();
-        for f in &self.fns {
-            if f.name.is_empty()
-                || !f.name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-                || !f.name.chars().all(|c| c.is_ascii_alphanumeric())
-                || !fnames.insert(f.name.as_str())
-            {
-                errs.push(format!("fn {:?}: not a camelCase identifier, or duplicate", f.name));
-            }
-            for a in &f.inputs {
-                if snames.contains(a.as_str()) {
-                    // A closed vocabulary: the one input a callee may match on.
-                    used.insert(a.as_str());
-                    continue;
-                }
-                if !names.contains(a.as_str()) {
-                    errs.push(format!("fn {}: unknown input {a:?}", f.name));
-                }
-                if self.elements.iter().any(|e| e.name == *a) {
-                    errs.push(format!("fn {}: element {a} is reachable only through a container", f.name));
-                }
-                if self.containers.iter().any(|x| x.name == *a && matches!(x.kind, ContainerKind::Generic(_))) {
-                    errs.push(format!("fn {}: {a} is generic; instantiate it with `container ... of=`", f.name));
-                }
-                used.insert(a.as_str());
-            }
-            if !snames.contains(f.returns.as_str()) {
-                errs.push(format!("fn {}: returns {:?}, which is not a sum of this api", f.name, f.returns));
-            }
-            used.insert(f.returns.as_str());
-        }
-        for s in self.sums.iter().filter(|s| !used.contains(s.name.as_str())) {
-            errs.push(format!("sum {}: declared but no fn returns or takes it", s.name));
-        }
-        for t in self.types.iter().filter(|t| !used.contains(t.name.as_str())) {
-            errs.push(format!("type {}: declared but never used", t.name));
-        }
-        for k in self.tokens.iter().filter(|k| !used.contains(k.name.as_str())) {
-            errs.push(format!("token {}: declared but never used", k.name));
-        }
-        // A fact that can change by the call: the signature admits it.
-        for k in &self.tokens {
-            let Some(c) = k.kind.failure() else { continue };
-            for f in self.fns_missing(&k.name, c) {
-                errs.push(format!(
-                    "fn {}: takes {} ({}), so {} must have a `{c}` constructor: the fact may have changed by the call",
-                    f.name,
-                    k.name,
-                    k.kind.word(),
-                    f.returns
-                ));
-            }
-        }
-        for c in self
-            .containers
-            .iter()
-            .filter(|c| matches!(c.kind, ContainerKind::Of(..)) && !used.contains(c.name.as_str()))
-        {
-            errs.push(format!("container {}: declared but never used", c.name));
-        }
-        if self.ctors.is_empty() && self.fns.is_empty() && self.classes().is_empty() {
-            errs.push("no constructors".to_string());
-        }
-        errs
-    }
-
     /// Every constructor across the default sum and the named sums.
     fn all_ctors(&self) -> impl Iterator<Item = &Ctor> {
         self.ctors.iter().chain(self.sums.iter().flat_map(|s| s.ctors.iter()))
@@ -677,39 +460,6 @@ impl Idl {
         }
         for f in self.elements.iter().flat_map(|e| &e.variants).flat_map(|v| &v.fields) {
             see(f.repr, f.max_len);
-        }
-        out
-    }
-
-    /// Strings and bytes with no `max_len` (architect-v3.md, "No tunnels"):
-    /// one line each. The Lean IDL requires a bound on every one.
-    pub fn unbounded(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for t in &self.types {
-            if matches!(t.kind, Kind::Repr(Repr::String | Repr::Bytes, _)) && t.max_len == 0 {
-                out.push(format!("type {}: a string or bytes type needs a max_len (a tunnel otherwise)", t.name));
-            }
-            if let Kind::Tuple(fs) = &t.kind {
-                for (i, f) in fs.iter().enumerate() {
-                    if matches!(f.repr, Repr::String | Repr::Bytes) && f.max_len == 0 {
-                        out.push(format!("type {}: component {} needs a max_len (`string 64`)", t.name, i + 1));
-                    }
-                }
-            }
-        }
-        for k in &self.tokens {
-            if matches!(k.repr, Repr::String | Repr::Bytes) && k.max_len == 0 {
-                out.push(format!("token {}: a string or bytes token needs a max_len", k.name));
-            }
-        }
-        for e in &self.elements {
-            for v in &e.variants {
-                for (i, f) in v.fields.iter().enumerate() {
-                    if matches!(f.repr, Repr::String | Repr::Bytes) && f.max_len == 0 {
-                        out.push(format!("element {}: variant {}: field {i} needs a max_len (`string 64`)", e.name, v.name));
-                    }
-                }
-            }
         }
         out
     }
@@ -2010,22 +1760,6 @@ impl Atom {
         }
     }
 
-    fn is_literal(&self) -> bool {
-        matches!(self, Atom::Num(_) | Atom::Str(_) | Atom::Bool(_))
-    }
-
-    fn check(&self, comps: &[Field]) -> Result<(), String> {
-        match self {
-            Atom::V if comps.len() != 1 => Err("a product is compared by component: v.1, v.2, …".into()),
-            Atom::Field(i) if comps.len() < 2 => Err(format!("v.{i} is for a product type")),
-            Atom::Field(i) if *i == 0 || *i as usize > comps.len() => Err(format!("v.{i}: the product has {} components", comps.len())),
-            Atom::Len if comps.len() != 1 || !matches!(comps[0].repr, Repr::String | Repr::Bytes) => {
-                Err("`.length` is for a string or bytes type".into())
-            }
-            _ => Ok(()),
-        }
-    }
-
     /// The Lean text.
     fn render(&self) -> String {
         match self {
@@ -2156,29 +1890,6 @@ impl Pred {
             Pred::Cmp(..) | Pred::Mem(..) => 1,
             Pred::And(p, q) | Pred::Or(p, q) => p.leaves() + q.leaves(),
             Pred::Not(p) => p.leaves(),
-        }
-    }
-
-    /// Structural checks against the type's components (Lean has already
-    /// type-checked the predicate; an export is trusted but not blindly).
-    pub(crate) fn check(&self, comps: &[Field]) -> Result<(), String> {
-        match self {
-            Pred::Cmp(_, l, r) => {
-                l.check(comps)?;
-                r.check(comps)
-            }
-            Pred::Mem(a, ls) => {
-                a.check(comps)?;
-                if a.is_literal() || ls.is_empty() || !ls.iter().all(Atom::is_literal) {
-                    return Err("`∈` compares v with a non-empty list of literals".into());
-                }
-                Ok(())
-            }
-            Pred::And(p, q) | Pred::Or(p, q) => {
-                p.check(comps)?;
-                q.check(comps)
-            }
-            Pred::Not(p) => p.check(comps),
         }
     }
 
@@ -2468,10 +2179,10 @@ const MONOID_LAWS: &str = "
     }
 ";
 
-/// An IDL from its export JSON, validated like `lean::export`'s (unit tests).
+/// An IDL from its export JSON (unit tests).
 #[cfg(test)]
 pub(crate) fn idl_from_json(json: &str) -> Result<Idl, String> {
-    Idl::from_export(serde_json::from_str(json).map_err(|e| e.to_string())?)
+    serde_json::from_str(json).map_err(|e| e.to_string())
 }
 
 /// `api.user_events` for API `user-events`.
@@ -2505,37 +2216,6 @@ mod tests {
         assert!(idl.type_decl("UserId").unwrap().shows());
     }
 
-    #[test]
-    fn rejects_bad_idl() {
-        for (bad, want) in [
-            (r#"{"api":"a","ctors":[{"name":"X","args":["Nope"]}]}"#, "unknown type"),
-            (r#"{"api":"a","types":[{"name":"T","kind":{"repr":"string"}}],"ctors":[{"name":"X"}]}"#, "never used"),
-            (r#"{"api":"a"}"#, "no constructors"),
-        ] {
-            let e = idl_from_json(bad).unwrap_err();
-            assert!(e.contains(want), "{bad}: {e}");
-        }
-    }
-
-    #[test]
-    fn lists_every_problem_at_once() {
-        let e = idl_from_json(
-            r#"{"api":"a","types":[{"name":"T","kind":{"repr":"string"}},{"name":"U","kind":{"repr":"i64"}}],
-                "ctors":[{"name":"X","args":["Nope"]},{"name":"x"}]}"#,
-        )
-        .unwrap_err();
-        let lines: Vec<&str> = e.lines().collect();
-        assert_eq!(
-            lines,
-            [
-                "constructor X: unknown type \"Nope\"",
-                "constructor \"x\": not a CamelCase identifier, or duplicate",
-                "type T: declared but never used",
-                "type U: declared but never used",
-            ]
-        );
-    }
-
     const DB: &str = r#"{"api":"db",
         "elements":[{"name":"Row","variants":[{"name":"Meal","fields":[{"repr":"f64"},{"repr":"string"}]},{"name":"Note","fields":[{"repr":"string"}]}]}],
         "containers":[{"name":"Rows","kind":{"of":["Row","foldable","Seq"]}}],
@@ -2561,26 +2241,6 @@ mod tests {
         assert!(rs.contains("#[path = \"../../m/seq.rs\"]\nmod impl_seq;"), "{rs}");
         assert!(rs.contains("pub fn fold_map") && rs.contains("fn monoid_seq_laws()"), "{rs}");
         assert!(!rs.contains("pub enum M"), "{rs}");
-    }
-
-    #[test]
-    fn rejects_bad_containers() {
-        let el = r#""elements":[{"name":"Row","variants":[{"name":"A","fields":[{"repr":"i64"}]}]}]"#;
-        let rs = r#""containers":[{"name":"Rs","kind":{"of":["Row","f","Seq"]}}]"#;
-        let seq = |classes: &str| format!(r#""containers":[{{"name":"Seq","kind":{{"generic":[{classes}]}}}}]"#);
-        let inst = |class: &str, api: &str| format!(r#"{{"class":"{class}","api":"{api}","container":"Seq"}}"#);
-        for (bad, want) in [
-            (format!(r#"{el},"ctors":[{{"name":"X","args":["Row"]}}]"#), "no container holds it"),
-            (format!(r#"{el},{rs},"ctors":[{{"name":"X","args":["Row","Rs"]}}]"#), "reachable only through a container"),
-            (seq(r#""Functor""#), "must include Foldable"),
-            (format!(r#"{},"ctors":[{{"name":"X","args":["Seq"]}}]"#, seq(r#""Foldable""#)), "is generic"),
-            (format!(r#"{el},{rs},"ctors":[{{"name":"X"}}]"#), "never used"),
-            (format!(r#""instances":[{}]"#, inst("Foldable", "f")), "Foldable is declared by"),
-            (format!(r#""instances":[{},{}]"#, inst("Functor", "f"), inst("Monoid", "g")), "of one api"),
-        ] {
-            let e = idl_from_json(&format!(r#"{{"api":"a",{bad}}}"#)).unwrap_err();
-            assert!(e.contains(want), "{bad}: {e}");
-        }
     }
 
     #[test]
@@ -2614,7 +2274,6 @@ mod tests {
                 "fns":[{"name":"insertProduct","inputs":["Name","Name"],"returns":"Written"}]}"#,
         )
         .unwrap();
-        let idl = Idl::from_export(idl).unwrap();
         assert_eq!((idl.fn_count(), idl.inputs(), idl.constructors(), idl.slots(), idl.longest()), (1, 2, 2, 1, (64, 0)));
         let rs = idl.rust(true, &[]);
         assert!(rs.contains("pub trait NutritionDb {\n    fn insert_product(&mut self, name0: Name, name1: Name) -> Written;\n}"), "{rs}");
@@ -2631,18 +2290,6 @@ mod tests {
         let kt = idl.kotlin(true);
         assert!(kt.contains("interface NutritionDb {\n    fun insertProduct(name0: Name, name1: Name): Written\n}"), "{kt}");
         assert!(kt.contains("fun fromJsonWritten(s: String): Written"), "{kt}");
-        // Validation: a fn must return a sum, every sum must be returned.
-        let bad = |fix: &str| {
-            let mut v: serde_json::Value = serde_json::from_str(&format!(r#"{{"api":"x","types":[{{"name":"Id","kind":{{"repr":"i64"}}}}],
-                "sums":[{{"name":"S","ctors":[{{"name":"C","args":["Id"]}}]}}],"fns":[{{"name":"f","inputs":[],"returns":"S"}}]}}"#)).unwrap();
-            let (k, j) = fix.split_once('=').unwrap();
-            v[k] = serde_json::from_str(j).unwrap();
-            Idl::from_export(serde_json::from_value(v).unwrap()).unwrap_err()
-        };
-        assert!(bad(r#"fns=[{"name":"f","inputs":[],"returns":"Id"}]"#).contains("not a sum"));
-        assert!(bad(r#"fns=[]"#).contains("no fn returns or takes it"));
-        assert!(bad(r#"fns=[{"name":"F","inputs":[],"returns":"S"}]"#).contains("camelCase"));
-        assert!(bad(r#"sums=[{"name":"S","ctors":[{"name":"C","args":["Id"]},{"name":"C"}]}]"#).contains("duplicate"));
     }
 
     const PROOFS: &str = r#"{"api":"nutrition-db","types":[
@@ -2663,7 +2310,7 @@ mod tests {
 
     #[test]
     fn refinements_and_tokens_generate_checks_and_mint() {
-        let idl = Idl::from_export(serde_json::from_str(PROOFS).unwrap()).unwrap();
+        let idl: Idl = serde_json::from_str(PROOFS).unwrap();
         assert_eq!((idl.rules(), idl.token_count(), idl.slots(), idl.inputs()), (6, 3, 2, 7));
         assert_eq!(idl.type_decl("Unit").unwrap().pred.as_ref().unwrap().render(), "v ∈ [\"g\", \"ml\"] ∨ ¬(v.length ≠ 0)");
         let rs = idl.rust(true, &[]);
@@ -2688,17 +2335,11 @@ mod tests {
         assert!(kt.contains("class Span(private val v1: Long, private val v2: Long) {\n    init { if (!((v1 < v2))) throw Violation(\"Span\""), "{kt}");
         assert!(kt.contains("(v in listOf(\"g\", \"ml\"))") && kt.contains("((0.0 < v) && (v <= 20000.0))"), "{kt}");
         assert!(kt.contains("class ProductRef private constructor(private val v: Long)") && kt.contains("fun mint(v: Long, version: Long): EventTypeRef"), "{kt}");
-        // Validation.
-        let bad = |from: &str, to: &str| Idl::from_export(serde_json::from_str(&PROOFS.replace(from, to)).unwrap()).unwrap_err();
-        assert!(bad(r#"{"name":"Retired"},"#, "").contains("fn tick: takes EventTypeRef (versioned), so Written must have a `Retired` constructor"));
-        assert!(bad(r#"{"name":"Spent"}"#, r#"{"name":"Used"}"#).contains("fn apply: takes Funds (linear)"));
-        assert!(bad(r#"{"field":2}"#, r#"{"field":3}"#).contains("v.3: the product has 2 components"));
-        assert!(bad(r#"{"cmp":["=","len",{"num":"10"}]}"#, r#"{"cmp":["=","v",{"num":"10"}]}}, {"name":"Bad","kind":{"repr":"i64"},"pred":{"cmp":["=","len",{"num":"1"}]}"#).contains("`.length` is for a string"));
+        // A product carries no adapters.
         let product = PROOFS.replace(r#""tuple":[{"repr":"i64"},{"repr":"i64"}]}"#, r#""tuple":[{"repr":"i64"},{"repr":"i64"}],"adapters":["display"]}"#);
         assert_ne!(product, PROOFS);
         let err = serde_json::from_str::<Idl>(&product).unwrap_err().to_string();
         assert!(err.contains("adapters are for scalar types, not a product"), "{err}");
-        assert!(bad(r#"{"name":"apply","inputs":["Funds"],"returns":"Written"}"#, r#"{"name":"apply","inputs":[],"returns":"Written"}"#).contains("token Funds: declared but never used"));
     }
 
     #[test]

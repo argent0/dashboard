@@ -48,6 +48,9 @@ api «beta-alpha» : beta → alpha where
 api self : alpha → alpha where
   paths = ["api/self"]
 
+api «self-check» : alpha → cli where
+  paths = ["api/self-check"]
+
 /-- error: fixture dice: stand_in = alpha-beta, so users are exactly alpha and beta (the stand-in compiles only in their views) -/
 #guard_msgs in
 fixture dice where
@@ -71,11 +74,63 @@ check busy where
   covers = all
   retry_on = ["Text file busy", ""]
 
+-- An IDL against its API: each `idl` block checks itself.
+
+api «beta-cli» : beta → cli where
+  paths = ["api/beta-cli"]
+  max_constructors = 2
+  max_string_len = 8
+
+idl «alpha-beta» where
+  type Id : i64
+  constructor Found : Id
+  constructor Missing
+
+/-- error: api beta-cli: type Extra: declared but never used
+api beta-cli: fn tick: takes Ref (versioned), so Ticked must have a `Retired` constructor: the fact may have changed by the call
+api beta-cli: type Name: a string or bytes type needs a max_len (a tunnel otherwise)
+api beta-cli: a string max_len 300 exceeds the api's max_string_len 8 (a raise: commit if it is no tunnel)
+api beta-cli: constructors 3 exceeds budget 2 -/
+#guard_msgs in
+idl «beta-cli» where
+  type Name : string
+  type Label : string 300
+  type Extra : i64
+  token Ref : i64 versioned stale=Retired
+  sum Ticked | Done : Name | Shown : Label | Late
+  fn tick : Ref → Ticked
+
+/-- error: api self-check: element Row: a container holds it (an element is reachable only through one)
+api self-check: fn "Go": a camelCase identifier, declared once -/
+#guard_msgs in
+idl «self-check» where
+  element Row | One : i64
+  sum Inner | Leaf
+  fn Go : Inner
+
+-- Containers and instances, as data.
+def row : Element := { name := "Row", variants := [{ name := "A", fields := [.int64] }] }
+
+#guard ({ apiName := "a", elements := [row], containers := [{ name := "Rs", kind := .ofElement "Row" "f" "Seq" }],
+          ctors := [{ name := "X", args := ["Row", "Rs"] }] } : Idl).shape ==
+  ["constructor X: element Row is reachable only through a container"]
+#guard ({ apiName := "a", containers := [{ name := "Seq", kind := .generic [.Functor] }] } : Idl).shape ==
+  ["container Seq: a generic's classes include Foldable, its primitive"]
+#guard ({ apiName := "a", containers := [{ name := "Seq", kind := .generic [.Foldable] }],
+          ctors := [{ name := "X", args := ["Seq"] }] } : Idl).shape ==
+  ["constructor X: Seq is generic; instantiate it with `container ... of=`"]
+#guard ({ apiName := "a", instances := [{ cls := .Foldable, owner := "f", seq := "Seq" }, { cls := .Monoid, owner := "g", seq := "Seq" }] } : Idl).shape ==
+  ["instance Foldable for f.Seq: Foldable is declared by the api owning the container",
+   "instances: all for containers of one api"]
+
 -- The cross-file rules, on manifests built as data.
+
+/-- The smallest IDL: one constructor. -/
+def idlOf (name : String) : Idl := { apiName := name, ctors := [{ name := "Go" }] }
 
 def base : Manifest :=
   { modules := [alpha, beta], roots := [cli], apis := [«alpha-beta»],
-    idls := [{ apiName := "alpha-beta" }] }
+    idls := [idlOf "alpha-beta"] }
 
 #guard base.wellformed
 
@@ -83,7 +138,7 @@ def base : Manifest :=
 def twice : Manifest :=
   { base with
     apis := base.apis ++ [{ «alpha-beta» with name := "again" }, { name := "back", generator := beta, consumer := alpha, paths := ["api/back"] }],
-    idls := base.idls ++ [{ apiName := "again" }, { apiName := "back" }] }
+    idls := base.idls ++ [idlOf "again", idlOf "back"] }
 
 #guard twice.problems ==
   ["api again: a second api for alpha → beta (one api per connected pair)",
@@ -94,7 +149,7 @@ and totals over budget. -/
 def loose : Manifest :=
   { base with
     settings := { max_modules := 1 },
-    idls := [{ apiName := "ghost" }],
+    idls := [idlOf "ghost"],
     fixtures := [{ name := "seed", users := [beta], paths := ["alpha/seed"] }] }
 
 #guard loose.problems ==
