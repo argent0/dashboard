@@ -8,7 +8,7 @@ mod common;
 
 use common::*;
 use dashboard::checks::{self, Runner};
-use dashboard::config::Check;
+use dashboard::config::{Check, Covers};
 use dashboard::git::Git;
 use dashboard::init;
 use dashboard::paths::Home;
@@ -491,23 +491,23 @@ fn a_run_set_runs_each_check_in_a_view_of_what_it_covers() {
     let first = runner.run_set(&commit, &set);
     assert!(first.pass, "{}", first.summary());
     let only_a = first.checks.iter().find(|c| c.name == "only_a").unwrap();
-    assert_eq!((only_a.view.as_str(), only_a.covers.clone()), ("v2 view", vec!["a".to_string()]));
+    assert_eq!((only_a.view.as_str(), only_a.covers.clone()), ("v2 view", Covers::Only(vec!["a".to_string()])));
     // The second run is all cache hits.
     let second = runner.run_set(&commit, &set);
     assert_eq!(first.checks, second.checks);
     // A changed `covers` is another check: it re-runs.
     let mut wider = set.checks.iter().find(|c| c.name == "only_a").unwrap().clone();
-    wider.covers.push("b".into());
+    wider.covers = Covers::Only(vec!["a".into(), "b".into()]);
     let r = runner.run_check(&commit, &wider);
     assert!(!r.pass, "b/lib.rs is in the view now: {r:?}");
-    assert_eq!(r.covers, ["a", "b"]);
+    assert_eq!(r.covers.components(), ["a", "b"]);
 }
 
 #[test]
 fn a_view_check_that_writes_leaks_unless_the_path_is_ignored() {
     let (_repo, _home_dir, home, commit) = ab_hub();
     let runner = Runner::new(&home);
-    let in_a = |name: &str, cmd: &str| Check { covers: vec!["a".into()], ..check(name, cmd, 1, 1) };
+    let in_a = |name: &str, cmd: &str| Check { covers: Covers::Only(vec!["a".into()]), ..check(name, cmd, 1, 1) };
     let r = runner.run_check(&commit, &in_a("writes", "echo x > a/new.txt"));
     assert!(!r.pass);
     assert!(r.leaked.iter().any(|l| l.contains("a/new.txt")), "{r:?}");
@@ -515,7 +515,7 @@ fn a_view_check_that_writes_leaks_unless_the_path_is_ignored() {
     assert!(r.pass, "{r:?}");
     let r = runner.run_check(&commit, &in_a("env", "test \"$DASHBOARD_COVERS\" = a && test -d \"$DASHBOARD_ROOT/b\""));
     assert!(r.pass, "{r:?}");
-    let r = runner.run_check(&commit, &Check { covers: vec!["zzz".into()], ..check("ghost", "true", 1, 1) });
+    let r = runner.run_check(&commit, &Check { covers: Covers::Only(vec!["zzz".into()]), ..check("ghost", "true", 1, 1) });
     assert!(!r.pass && r.exits.is_empty(), "{r:?}");
     assert!(r.output_tail.as_deref().unwrap_or("").contains("zzz"), "{r:?}");
 }
@@ -533,9 +533,9 @@ fn a_view_may_rewrite_its_view_rewritable_files_and_the_worktree_stays_strict() 
     let (_home_dir, home) = init_hub(&repo);
     let runner = Runner::new(&home);
     let rewrite = "echo 2 > shared.txt";
-    let r = runner.run_check(&commit, &Check { covers: vec!["a".into()], ..check("trims", rewrite, 2, 2) });
+    let r = runner.run_check(&commit, &Check { covers: Covers::Only(vec!["a".into()]), ..check("trims", rewrite, 2, 2) });
     assert!(r.pass, "{r:?}");
-    let r = runner.run_check(&commit, &Check { covers: vec!["a".into()], ..check("writes", "echo x > a/new.txt", 1, 1) });
+    let r = runner.run_check(&commit, &Check { covers: Covers::Only(vec!["a".into()]), ..check("writes", "echo x > a/new.txt", 1, 1) });
     assert!(r.leaked.iter().any(|l| l.contains("a/new.txt")), "{r:?}");
     let r = runner.run_check(&commit, &check("whole", rewrite, 1, 1));
     assert!(r.leaked.iter().any(|l| l.contains("shared.txt")), "{r:?}");

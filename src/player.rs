@@ -2850,10 +2850,10 @@ impl<S: Sessions> Player<S> {
             }
             // A task's checks test what it changes: within its modules.
             for c in &own {
-                if c.all {
+                if c.covers == config::Covers::All {
                     return Err(format!("post: task/{slug}: check {} in {tests_path} covers all; a task's checks cover its modules ({})", c.name, cfg.modules.join(", ")));
                 }
-                if let Some(n) = c.covers.iter().find(|n| !cfg.modules.contains(n)) {
+                if let Some(n) = c.covers.components().iter().find(|n| !cfg.modules.contains(n)) {
                     return Err(format!("post: task/{slug}: check {} in {tests_path} covers {n}, outside the task's modules ({})", c.name, cfg.modules.join(", ")));
                 }
             }

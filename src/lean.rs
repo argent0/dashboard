@@ -513,7 +513,7 @@ fn parse_suite(json: &serde_json::Value, arch: &ArchConfig) -> Result<config::Su
         let mut c: config::Check = serde_json::from_value(v.clone()).map_err(|e| format!("check: {e}"))?;
         let source = source_of(v.get("module").and_then(|m| m.as_str()).unwrap_or("Tests"));
         c.validate().map_err(|e| format!("{source}: {e}"))?;
-        if !c.all && c.covers.is_empty() {
+        if c.covers.is_default() {
             return Err(format!("{source}: check {:?}: covers is empty: write covers = all or covers = [module, …]", c.name));
         }
         c.source = Some(source);
@@ -558,7 +558,7 @@ fn parse_suite(json: &serde_json::Value, arch: &ArchConfig) -> Result<config::Su
             out.push(config::Check {
                 name: m.name.clone(),
                 cmd: cmd.clone(),
-                covers: vec![m.name.clone()],
+                covers: config::Covers::Only(vec![m.name.clone()]),
                 source: Some(config::ARCH_LEAN_MANIFEST.to_string()),
                 ..config::Check::default()
             });

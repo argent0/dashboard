@@ -68,7 +68,7 @@ pub(crate) fn scope_problems(base: &Suite, cand: &Suite) -> Vec<String> {
             if old.runs != new.runs || old.min_pass != new.min_pass {
                 problems.push(format!("check {name:?}: runs / min_pass changed"));
             }
-            if old.covers != new.covers || old.all != new.all || old.files != new.files {
+            if old.covers != new.covers || old.files != new.files {
                 problems.push(format!("check {name:?}: covers / files changed"));
             }
         }
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(scope_problems(&base, &cfg(&[("a", "x", 3)])).len(), 1);
         assert_eq!(scope_problems(&base, &cfg(&[("b", "x", 1)])).len(), 2);
         let mut covers = cfg(&[("a", "x", 1)]);
-        covers.checks[0].all = true;
+        covers.checks[0].covers = crate::config::Covers::All;
         assert_eq!(scope_problems(&base, &covers).len(), 1);
         let mut moved = cfg(&[("a", "x", 1)]);
         moved.test_paths.clear();

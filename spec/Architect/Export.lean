@@ -127,13 +127,17 @@ def Fixture.toJson (f : Fixture) : Json :=
   Json.mkObj [("name", f.name), ("users", strs (f.users.map Component.name)), ("paths", strs f.paths),
     ("max_bytes", f.max_bytes), ("stand_in", opt (f.stand_in.map (·.name)))]
 
+/-- `"all"`, or the list of component names. -/
+def Covers.toJson : Covers → Json
+  | .all => "all"
+  | .only cs => strs (cs.map Component.name)
+
 /-- `module` is the Lean module that declared the check as a path
 (`Tests`, `Tests/x.worker`): `dashboard` maps it back to the file. -/
 def Check.toJson (c : Check) (file : String) : Json :=
   Json.mkObj [("name", c.name), ("cmd", c.cmd), ("runs", c.runs), ("min_pass", c.min_pass),
     ("retry_failed", c.retry_failed), ("retry_on", strs c.retry_on),
-    ("covers", strs (match c.covers with | .all => [] | .only cs => cs.map Component.name)),
-    ("all", c.covers == .all), ("files", strs c.files),
+    ("covers", c.covers.toJson), ("files", strs c.files),
     ("module", file)]
 
 def Suite.toJson (s : Suite) : Json :=

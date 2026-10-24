@@ -1209,7 +1209,7 @@ pub fn workspace_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::l
     let mut nodes: Vec<&str> = scope.modules.iter().map(|m| m.as_str()).collect();
     for c in e.suite.checks.iter().filter(|c| scope.run_set.contains(&c.name)) {
         c.files.iter().for_each(|p| add(p, format!("files of {}", c.name)));
-        nodes.extend(c.covers.iter().map(|n| n.as_str()));
+        nodes.extend(c.covers.components().iter().map(|n| n.as_str()));
     }
     for f in e.arch.fixtures_of(&nodes) {
         f.paths.iter().for_each(|p| add(p, format!("fixture {}", f.name)));
@@ -1354,10 +1354,10 @@ pub fn scope_violations(
     let mut out = Vec::new();
     let mut paths = scope.paths.clone();
     for c in cand.from_file(&scope.worker_file) {
-        if c.all {
+        if c.covers == crate::config::Covers::All {
             out.push(format!("check {} covers all, outside modules", c.name));
         }
-        for n in c.covers.iter().filter(|n| !scope.modules.contains(n)) {
+        for n in c.covers.components().iter().filter(|n| !scope.modules.contains(n)) {
             out.push(format!("check {} covers {n}, outside modules", c.name));
         }
         paths.extend(c.files.iter().cloned());

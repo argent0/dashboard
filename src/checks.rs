@@ -5,7 +5,7 @@
 // commit already seen. A view check's verdict is also noted on its view's
 // tree, so a later commit whose view is the same reuses it.
 
-use crate::config::{self, BudgetConfig, Check, Claim, Evidence};
+use crate::config::{self, BudgetConfig, Check, Claim, Covers, Evidence};
 use crate::git::Git;
 use crate::lean::Exporter;
 use crate::paths::Home;
@@ -87,12 +87,10 @@ pub struct CheckResult {
     /// A run was killed for exceeding `timeout`; never retried.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
-    /// The check's `covers`, `all` and `files` when it ran: a changed scope
+    /// The check's `covers` and `files` when it ran: a changed scope
     /// never reuses an old verdict.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub covers: Vec<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub all: bool,
+    #[serde(default, skip_serializing_if = "Covers::is_default")]
+    pub covers: Covers,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
     /// Where it ran (`view_kind`): older notes lack it and so re-run.
@@ -103,7 +101,7 @@ pub struct CheckResult {
 /// Whether `check` runs in a view of its `covers` (spec §6.6) rather than
 /// the whole worktree.
 fn in_view(check: &Check) -> bool {
-    !check.all && !check.covers.is_empty()
+    !check.covers.components().is_empty()
 }
 
 /// The fingerprint of where `check` runs, versioned like the sandbox's.
@@ -198,7 +196,6 @@ impl CheckResult {
             && self.retry_failed == check.retry_failed
             && self.retry_on == check.retry_on
             && self.covers == check.covers
-            && self.all == check.all
             && self.files == check.files
             && self.view == view_kind(check)
     }
@@ -755,7 +752,6 @@ impl Runner {
             timeout: timeout.map_or(0, |t| t.as_secs()),
             timed_out: false,
             covers: check.covers.clone(),
-            all: check.all,
             files: check.files.clone(),
             view: view_kind(check).to_string(),
         };
@@ -770,7 +766,7 @@ impl Runner {
             Some(Ok(dir)) => Some(dir),
             Some(Err(e)) => {
                 return CheckResult {
-                    output_tail: Some(format!("view of {}: {e}", check.covers.join(", "))),
+                    output_tail: Some(format!("view of {}: {e}", check.covers.components().join(", "))),
                     ..base
                 };
             }
@@ -792,10 +788,10 @@ impl Runner {
     fn view_inputs(&self, commit: &str, check: &Check) -> Result<ViewInputs, String> {
         let e = crate::records::exported_at(&self.hub, commit, Some(&self.exporter))?
             .ok_or("no architecture/Architecture.lean")?;
-        if let Some(n) = check.covers.iter().find(|n| e.arch.node(n).is_none()) {
+        if let Some(n) = check.covers.components().iter().find(|n| e.arch.node(n).is_none()) {
             return Err(format!("covers names {n:?}, which the architecture lacks"));
         }
-        let nodes: Vec<&str> = check.covers.iter().map(|s| s.as_str()).collect();
+        let nodes: Vec<&str> = check.covers.components().iter().map(|s| s.as_str()).collect();
         let paths = crate::arch::view_paths(&e.arch, &e.idls, &nodes, &e.suite.test_paths);
         let module_check = check.source.as_deref() == Some(config::ARCH_LEAN_MANIFEST);
         let others: Vec<&String> = e
@@ -925,7 +921,7 @@ impl Runner {
         let cmd = if view {
             format!(
                 "export DASHBOARD_COVERS={} DASHBOARD_ROOT={}; {}",
-                shell_word(&check.covers.join(",")),
+                shell_word(&check.covers.components().join(",")),
                 shell_word(&self.work.display().to_string()),
                 check.cmd
             )
@@ -1357,7 +1353,7 @@ mod tests {
         assert!(result.reusable_for(&check, None, "", None));
         assert!(!result.reusable_for(&check, Some(2), "", None));
         assert!(!result.reusable_for(&check, None, "v1 jail=off", None));
-        let in_view = Check { covers: vec!["a".into()], ..check.clone() };
+        let in_view = Check { covers: Covers::Only(vec!["a".into()]), ..check.clone() };
         assert!(!result.reusable_for(&in_view, None, "", None), "another scope");
 
         let mut other_cmd = check.clone();

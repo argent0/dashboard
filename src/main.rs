@@ -994,10 +994,9 @@ fn run_scope(home: Option<PathBuf>) {
         if check.source.as_deref() == Some(config::ARCH_LEAN_MANIFEST) {
             line.push_str(" module test ");
         }
-        if check.all {
-            line.push_str(" all");
-        } else {
-            line.push_str(&format!(" covers {}", check.covers.join(", ")));
+        match &check.covers {
+            config::Covers::All => line.push_str(" all"),
+            config::Covers::Only(cs) => line.push_str(&format!(" covers {}", cs.join(", "))),
         }
         if !check.files.is_empty() {
             line.push_str(&format!("  files {}", check.files.join(", ")));

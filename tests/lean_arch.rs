@@ -6,6 +6,7 @@ mod common;
 
 use common::*;
 use dashboard::arch::{self, Loaded, check, sync_bindings};
+use dashboard::config::Covers;
 use dashboard::lean;
 use dashboard::sandbox::Sandbox;
 use std::path::Path;
@@ -338,14 +339,14 @@ fn checks_and_the_suite_block_export_with_their_sources() {
     assert_eq!(s.test_paths, ["stories"]);
     assert_eq!(s.checks.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["ab_story", "arch", "wcheck", "a"]);
     let story = s.check("ab_story").unwrap();
-    assert_eq!((story.covers.clone(), story.all, story.files.clone()), (vec!["a".to_string(), "b".into()], false, vec!["stories".to_string()]));
+    assert_eq!((story.covers.clone(), story.files.clone()), (Covers::Only(vec!["a".to_string(), "b".into()]), vec!["stories".to_string()]));
     assert_eq!(story.source.as_deref(), Some("architecture/Tests.lean"));
-    assert!(s.check("arch").unwrap().all);
+    assert_eq!(s.check("arch").unwrap().covers, Covers::All);
     assert_eq!(s.check("wcheck").unwrap().source.as_deref(), Some("architecture/Tests/x.worker.lean"));
     assert_eq!(s.from_file("architecture/Tests/x.worker.lean").len(), 1);
     // The implicit module check: `a`'s test_cmd, covering `a`.
     let a = s.check("a").unwrap();
-    assert_eq!((a.cmd.as_str(), a.covers.clone(), a.source.as_deref()), ("cargo test -p a", vec!["a".to_string()], Some("architecture/Architecture.lean")));
+    assert_eq!((a.cmd.as_str(), a.covers.clone(), a.source.as_deref()), ("cargo test -p a", Covers::Only(vec!["a".to_string()]), Some("architecture/Architecture.lean")));
     assert_eq!(s.files_of(&["ab_story", "arch"]), ["stories"]);
 }
 

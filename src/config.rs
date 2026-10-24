@@ -358,13 +358,10 @@ pub struct Check {
     /// Empty means every failure is retried (while `retry_failed` lasts).
     #[serde(default)]
     pub retry_on: Vec<String>,
-    /// The modules and roots this check tests (spec §6.6): it runs in a
-    /// view of their files and joins the run set of a task on any of them.
+    /// What this check tests (spec §6.6), `"all"` or a list of modules and
+    /// roots.
     #[serde(default)]
-    pub covers: Vec<String>,
-    /// `covers = all`: runs in the whole worktree, in every run set.
-    #[serde(default)]
-    pub all: bool,
+    pub covers: Covers,
     /// The check's own test files, beyond `test_paths`: in its view, and
     /// pinned like the check.
     #[serde(default)]
@@ -385,10 +382,64 @@ impl Default for Check {
             min_pass: 1,
             retry_failed: 0,
             retry_on: Vec::new(),
-            covers: Vec::new(),
-            all: false,
+            covers: Covers::default(),
             files: Vec::new(),
             source: None,
+        }
+    }
+}
+
+/// What a check tests (spec §6.6). `Only` names modules and roots: the check
+/// runs in a view of their files and joins the run set of a task on any of
+/// them. `All` (written `covers = all`, `"all"` in JSON and TOML) runs it in
+/// the whole worktree, in every run set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Covers {
+    All,
+    Only(Vec<String>),
+}
+
+impl Default for Covers {
+    fn default() -> Covers {
+        Covers::Only(Vec::new())
+    }
+}
+
+impl Covers {
+    /// The components it names; empty for `All`.
+    pub fn components(&self) -> &[String] {
+        match self {
+            Covers::All => &[],
+            Covers::Only(cs) => cs,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Covers::default()
+    }
+}
+
+impl Serialize for Covers {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Covers::All => s.serialize_str("all"),
+            Covers::Only(cs) => cs.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Covers {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Covers, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Word(String),
+            List(Vec<String>),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Word(w) if w == "all" => Ok(Covers::All),
+            Raw::Word(w) => Err(serde::de::Error::custom(format!("covers is \"all\" or a list, got {w:?}"))),
+            Raw::List(cs) => Ok(Covers::Only(cs)),
         }
     }
 }
@@ -424,9 +475,6 @@ impl Check {
                 "check {:?}: retry_on needs retry_failed >= 1",
                 self.name
             ));
-        }
-        if self.all && !self.covers.is_empty() {
-            return Err(format!("check {:?}: covers is either all or a list", self.name));
         }
         for f in &self.files {
             if f.is_empty() || f.starts_with('/') || f.split('/').any(|c| c == "..") {
@@ -567,7 +615,7 @@ impl Evidence {
             cmd: self.cmd.clone(),
             runs: self.runs,
             min_pass: self.min_pass,
-            all: true,
+            covers: Covers::All,
             ..Check::default()
         }
     }
@@ -815,7 +863,7 @@ impl Claim {
             cmd: self.cmd.clone(),
             runs: self.runs,
             min_pass: self.min_pass,
-            all: true,
+            covers: Covers::All,
             ..Check::default()
         }
     }
@@ -1508,13 +1556,14 @@ mod tests {
     #[test]
     fn checks_default_and_validate() {
         let c = check_from_str("name = \"unit\"\ncmd = \"true\"\n").unwrap();
-        assert_eq!((c.runs, c.min_pass, c.all), (1, 1, false));
+        assert_eq!((c.runs, c.min_pass, c.covers), (1, 1, Covers::default()));
         let err = check_from_str("name = \"b\"\ncmd = \"true\"\nruns = 3\nmin_pass = 4\n").unwrap_err();
         assert!(err.contains("min_pass"), "unexpected error: {err}");
         let err = check_from_str("name = \"b\"\ncmd = \"true\"\nruns = 0\n").unwrap_err();
         assert!(err.contains("runs"), "unexpected error: {err}");
-        let err = check_from_str("name = \"b\"\ncmd = \"true\"\nall = true\ncovers = [\"a\"]\n").unwrap_err();
-        assert!(err.contains("either all or a list"), "{err}");
+        assert_eq!(check_from_str("name = \"b\"\ncmd = \"true\"\ncovers = \"all\"\n").unwrap().covers, Covers::All);
+        let err = check_from_str("name = \"b\"\ncmd = \"true\"\ncovers = \"some\"\n").unwrap_err();
+        assert!(err.contains("covers is \"all\" or a list"), "{err}");
         for bad in ["../x", "/abs", "a/../b", ""] {
             let err = check_from_str(&format!("name = \"b\"\ncmd = \"true\"\ncovers = [\"a\"]\nfiles = [{bad:?}]\n")).unwrap_err();
             assert!(err.contains("relative path"), "{bad}: {err}");
