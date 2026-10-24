@@ -104,9 +104,9 @@ pub fn gate(m: Marker, slug: &str, ctx: Option<Ctx>) -> Gate {
             let msg = if status != Some(needs) {
                 format!("{name}: task/{slug} is {shown} — only a {} task can be {name}d", needs.as_str())
             } else if m == Marker::Stage {
-                format!("stage: task/{slug} is a spike — it has no task agent to start")
+                format!("stage: task/{slug} is a spike — it has no foreman to start")
             } else {
-                format!("unstage: task/{slug}'s task agent is already running — retire the task to stop it")
+                format!("unstage: task/{slug}'s foreman is already running — retire the task to stop it")
             };
             (Reason::Plan, msg)
         }
@@ -160,7 +160,7 @@ pub struct Args {
 /// Fetches the hub into `director` (its `hub` remote) and commits marker
 /// `m` on `task/<slug>`, on top of the hub's tip, once the player's gate
 /// allows it there. The body is `args.why`; an accept without one takes
-/// the task agent's latest accept report's why, a retire and a conclude
+/// the foreman's latest accept report's why, a retire and a conclude
 /// need one. A conclude's answer is the player's verified one; a given
 /// answer must be it.
 pub fn run(hub: &Git, director: &Git, m: Marker, slug: &str, args: &Args) -> Result<Outcome, String> {
@@ -186,7 +186,7 @@ pub fn run(hub: &Git, director: &Git, m: Marker, slug: &str, args: &Args) -> Res
             let body = match why {
                 Some(w) => w.to_string(),
                 None => accept_why(hub, &tip).ok_or_else(|| {
-                    format!("accept: no task agent's accept report on task/{slug} to take the why from: pass --why")
+                    format!("accept: no foreman's accept report on task/{slug} to take the why from: pass --why")
                 })?,
             };
             (slug.to_string(), body)
@@ -227,14 +227,14 @@ pub fn run(hub: &Git, director: &Git, m: Marker, slug: &str, args: &Args) -> Res
     Ok(Outcome { commit, message })
 }
 
-/// The why of the task agent's latest review verdict on `tip`'s
+/// The why of the foreman's latest review verdict on `tip`'s
 /// first-parent history when it is an accept: a newer `unsure` or
 /// send-back leaves none.
 pub fn accept_why(hub: &Git, tip: &str) -> Option<String> {
     let review = |v: &str| matches!(v, "accept" | "unsure" | "sent-back");
     hub.rev_list(&["--first-parent", tip, "^refs/heads/main"])
         .into_iter()
-        .find_map(|c| records::agent_reports(hub, &c).into_iter().rev().find(|r| review(&r.verdict)))
+        .find_map(|c| records::foreman_reports(hub, &c).into_iter().rev().find(|r| review(&r.verdict)))
         .filter(|r| r.verdict == report::Verdict::Accept.as_str())
         .and_then(|r| report::why_of(&r.text).map(str::to_string))
 }
@@ -336,8 +336,8 @@ fn commit_worktree(git: &Git, base: &str, files: &[String], message: &str) -> Re
 mod tests {
     use super::*;
 
-    fn ctx(status: Status, spike: bool, agent: bool) -> Option<Ctx> {
-        Some(Ctx { status, managed: !spike, spike, agent })
+    fn ctx(status: Status, spike: bool, foreman: bool) -> Option<Ctx> {
+        Some(Ctx { status, managed: !spike, spike, foreman })
     }
 
     #[test]

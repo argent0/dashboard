@@ -1061,7 +1061,7 @@ fn reset_clears_a_relaunch_limit_escalation_and_the_cap_applies_again() {
     player.tick().expect("tick");
     assert_eq!(events_of(&home, EventKind::Escalated).len(), 1);
 
-    // Refused while the session is alive, and for the task agent's limit.
+    // Refused while the session is alive, and for the foreman's limit.
     player.sessions_mut().alive.insert("r".to_string());
     let err = player.reset_relaunch("r", false).expect_err("alive");
     assert!(err.contains("already alive"), "{err}");

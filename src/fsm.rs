@@ -6,7 +6,7 @@
 //! A task's status is *derived* (`state::derive_task`: tip note, dependencies,
 //! liveness, records), so this is not that derivation. It is only the gate
 //! the player's import paths apply before looking at a commit's content
-//! (`try_existing`, `try_marker`, `try_agent_commit`, `import_workers`, and
+//! (`try_existing`, `try_marker`, `try_foreman_commit`, `import_workers`, and
 //! the status checks inside `try_accept`/`try_retire`/…). Content checks
 //! (pins, suite, paths, a post's tests) stay where they are. The `Reason` of
 //! a `Reject` is the one the player records for a commit that fails the gate.
@@ -69,7 +69,7 @@ impl Move {
     ];
 }
 
-pub const ACTORS: [Actor; 3] = [Actor::Director, Actor::TaskAgent, Actor::Worker];
+pub const ACTORS: [Actor; 3] = [Actor::Director, Actor::Foreman, Actor::Worker];
 
 pub const STATUSES: [Status; 14] = [
     Status::Pending,
@@ -92,12 +92,12 @@ pub const STATUSES: [Status; 14] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ctx {
     pub status: Status,
-    /// Task agents are on for this task (`state::task_agent_managed`):
+    /// Foremen are on for this task (`state::foreman_managed`):
     /// posts, send-backs and contest replies are theirs, not the director's.
     pub managed: bool,
     pub spike: bool,
-    /// A task agent was launched for it (`refs/dashboard/agent/<slug>`).
-    pub agent: bool,
+    /// A foreman was launched for it (`refs/dashboard/foreman-tip/<slug>`).
+    pub foreman: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +109,7 @@ pub enum Verdict {
     /// listened to at this status.
     Ignore,
     /// Neither imported nor struck: the sender did nothing wrong, the task
-    /// just isn't where the move makes sense (a task agent's post after the
+    /// just isn't where the move makes sense (a foreman's post after the
     /// director sent the task back to `pending`). Judged again each tick, so
     /// it imports once the task is back.
     Hold,
@@ -122,9 +122,9 @@ impl Ctx {
         let task = hub_state.tasks.iter().find(|t| t.slug == slug)?;
         Some(Ctx {
             status: task.status,
-            managed: crate::state::task_agent_managed(&hub_state.roadmap, &task.config),
+            managed: crate::state::foreman_managed(&hub_state.roadmap, &task.config),
             spike: task.spike.is_some(),
-            agent: task.agent.is_some(),
+            foreman: task.foreman.is_some(),
         })
     }
 }
@@ -149,7 +149,7 @@ pub fn decide(actor: Actor, mv: Move, ctx: Ctx) -> Verdict {
         status,
         managed,
         spike,
-        agent,
+        foreman,
     } = ctx;
     match actor {
         Actor::Worker => match mv {
@@ -176,18 +176,18 @@ pub fn decide(actor: Actor, mv: Move, ctx: Ctx) -> Verdict {
             | Move::Resolve
             | Move::Other => Reject(Reason::Ownership),
         },
-        // A task agent posts while staged, sends back while tested, replies
+        // A foreman posts while staged, sends back while tested, replies
         // to a contest while contested; never a trim (`dashboard trim` is
         // the director's), a marker or the plan.
-        Actor::TaskAgent => match mv {
+        Actor::Foreman => match mv {
             Move::Post if status == Status::Staged && managed => Allow,
             // The director's plan moved the task out from under a running
-            // agent (a replan onto an unmet dependency, a retired one): not
-            // the agent's mistake, and it may come back to `staged`.
+            // foreman (a replan onto an unmet dependency, a retired one): not
+            // the foreman's mistake, and it may come back to `staged`.
             Move::Post
                 if matches!(status, Status::Pending | Status::Ready | Status::Orphaned)
                     && managed
-                    && agent =>
+                    && foreman =>
             {
                 Hold
             }
@@ -225,10 +225,10 @@ pub fn decide(actor: Actor, mv: Move, ctx: Ctx) -> Verdict {
                         Reject(Reason::Post)
                     }
                 }
-                // Once an agent exists the plan is frozen for it (its prompt is
+                // Once a foreman exists the plan is frozen for it (its prompt is
                 // written at launch), as for `unstage:`: retire to change it.
                 Move::Replan => {
-                    if status == Status::Staged && agent {
+                    if status == Status::Staged && foreman {
                         Reject(Reason::Plan)
                     } else if pending_family(status) {
                         Allow
@@ -267,7 +267,7 @@ pub fn decide(actor: Actor, mv: Move, ctx: Ctx) -> Verdict {
                     }
                 }
                 Move::Unstage => {
-                    if status == Status::Staged && !agent {
+                    if status == Status::Staged && !foreman {
                         Allow
                     } else {
                         Reject(Reason::Plan)
@@ -335,14 +335,14 @@ mod tests {
         for managed in [false, true] {
             for spike in [false, true] {
                 if spike && managed {
-                    continue; // `task_agent_managed` is false for a spike
+                    continue; // `foreman_managed` is false for a spike
                 }
-                for agent in [false, true] {
+                for foreman in [false, true] {
                     v.push(Ctx {
                         status,
                         managed,
                         spike,
-                        agent,
+                        foreman,
                     });
                 }
             }
@@ -427,7 +427,7 @@ mod tests {
             (
                 Actor::Director,
                 Move::Replan,
-                // not `staged` once an agent exists (any flags allow one)
+                // not `staged` once a foreman exists (any flags allow one)
                 &["pending", "orphaned", "ready", "staged"],
             ),
             (Actor::Director, Move::SendBack, &["tested"]),
@@ -456,18 +456,18 @@ mod tests {
             (Actor::Director, Move::Block, &[]),
             (Actor::Director, Move::Contest, &[]),
             (Actor::Director, Move::Other, &[]),
-            (Actor::TaskAgent, Move::Post, &["staged"]),
-            (Actor::TaskAgent, Move::SendBack, &["tested"]),
-            (Actor::TaskAgent, Move::Trim, &[]),
-            (Actor::TaskAgent, Move::ContestReply, &["contested"]),
-            (Actor::TaskAgent, Move::Replan, &[]),
-            (Actor::TaskAgent, Move::Stage, &[]),
-            (Actor::TaskAgent, Move::Unstage, &[]),
-            (Actor::TaskAgent, Move::Accept, &[]),
-            (Actor::TaskAgent, Move::Retire, &[]),
-            (Actor::TaskAgent, Move::Conclude, &[]),
-            (Actor::TaskAgent, Move::Resolve, &[]),
-            (Actor::TaskAgent, Move::Other, &[]),
+            (Actor::Foreman, Move::Post, &["staged"]),
+            (Actor::Foreman, Move::SendBack, &["tested"]),
+            (Actor::Foreman, Move::Trim, &[]),
+            (Actor::Foreman, Move::ContestReply, &["contested"]),
+            (Actor::Foreman, Move::Replan, &[]),
+            (Actor::Foreman, Move::Stage, &[]),
+            (Actor::Foreman, Move::Unstage, &[]),
+            (Actor::Foreman, Move::Accept, &[]),
+            (Actor::Foreman, Move::Retire, &[]),
+            (Actor::Foreman, Move::Conclude, &[]),
+            (Actor::Foreman, Move::Resolve, &[]),
+            (Actor::Foreman, Move::Other, &[]),
             (
                 Actor::Worker,
                 Move::Finish,
@@ -514,7 +514,7 @@ mod tests {
             if decide(a, m, c) != Allow {
                 continue;
             }
-            // Posts, send-backs and contest replies belong to the task agent
+            // Posts, send-backs and contest replies belong to the foreman
             // when one is on; the director's are only for unmanaged tasks
             // (or a spike's send-back).
             if a == Actor::Director && c.managed {
@@ -523,10 +523,10 @@ mod tests {
                     "director {m:?} allowed on a managed task: {c:?}"
                 );
             }
-            if a == Actor::TaskAgent {
+            if a == Actor::Foreman {
                 assert!(
                     c.managed,
-                    "task agent {m:?} allowed on an unmanaged task: {c:?}"
+                    "foreman {m:?} allowed on an unmanaged task: {c:?}"
                 );
             }
             // A spike never merges, is never staged and keeps no tests;
@@ -539,9 +539,9 @@ mod tests {
             } else {
                 assert!(m != Move::Conclude, "conclude allowed on a task: {c:?}");
             }
-            // Unstaging is refused once an agent exists.
+            // Unstaging is refused once a foreman exists.
             if m == Move::Unstage {
-                assert!(!c.agent, "{c:?}");
+                assert!(!c.foreman, "{c:?}");
             }
         }
     }
@@ -571,11 +571,11 @@ mod tests {
     /// change of strike category is a visible edit here.
     #[test]
     fn gate_failures_use_the_moves_own_reason() {
-        let at = |status, managed, spike, agent| Ctx {
+        let at = |status, managed, spike, foreman| Ctx {
             status,
             managed,
             spike,
-            agent,
+            foreman,
         };
         let d = |m, c| decide(Actor::Director, m, c);
         assert_eq!(
@@ -623,7 +623,7 @@ mod tests {
             d(Move::Conclude, at(Status::Tested, false, false, false)),
             Reject(Reason::Ownership)
         );
-        // A replan is refused once the agent exists, allowed before.
+        // A replan is refused once the foreman exists, allowed before.
         assert_eq!(
             d(Move::Replan, at(Status::Staged, true, false, true)),
             Reject(Reason::Plan)
@@ -636,16 +636,16 @@ mod tests {
             d(Move::Replan, at(Status::Pending, true, false, true)),
             Allow
         );
-        // A task agent's post after the task left `staged` is held, not struck.
+        // A foreman's post after the task left `staged` is held, not struck.
         for status in [Status::Pending, Status::Ready, Status::Orphaned] {
             assert_eq!(
-                decide(Actor::TaskAgent, Move::Post, at(status, true, false, true)),
+                decide(Actor::Foreman, Move::Post, at(status, true, false, true)),
                 Hold
             );
         }
         assert_eq!(
             decide(
-                Actor::TaskAgent,
+                Actor::Foreman,
                 Move::Post,
                 at(Status::Posted, true, false, true)
             ),

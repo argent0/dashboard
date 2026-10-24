@@ -45,7 +45,7 @@ pub struct Loaded {
     /// Problems reading an API's IDL (reported by `bindings`).
     pub errors: Vec<String>,
     /// The test files: the suite's `test_paths`, every fixture's paths and
-    /// the `files` of every check the director or a task agent declared (a
+    /// the `files` of every check the director or a foreman declared (a
     /// worker's own checks add none). A test stands in for an API's generator, so it may mint
     /// that API's evidence; production code may reach into none of them.
     pub test_files: Vec<String>,

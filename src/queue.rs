@@ -1,4 +1,4 @@
-// The test queue (`[player] runs = "queued"`): agents don't run the suite
+// The test queue (`[player] runs = "queued"`): foremen don't run the suite
 // themselves, they ask the player with `dashboard test`, which snapshots the
 // worktree, files a request in the home's `queue/` and waits for the result
 // file the player writes once it has run the suite (one request per tick, so
@@ -46,11 +46,11 @@ pub fn result_path(home: &Home, id: &str) -> PathBuf {
 }
 
 /// The task a worktree belongs to, from its branch (`task/<slug>` for a
-/// worker, `agent/<slug>` for a task agent).
+/// worker, `foreman/<slug>` for a foreman).
 pub fn slug_of_branch(branch: &str) -> Option<&str> {
     branch
         .strip_prefix("task/")
-        .or_else(|| branch.strip_prefix("agent/"))
+        .or_else(|| branch.strip_prefix("foreman/"))
         .filter(|s| !s.is_empty())
 }
 
@@ -177,7 +177,7 @@ fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// What the agent reads: which checks ran (`why`, the run set's), then
+/// What the foreman reads: which checks ran (`why`, the run set's), then
 /// every check's verdict, command and output tail.
 pub fn render(why: Option<&str>, suite: &SuiteResult) -> String {
     if let Some(e) = &suite.error {

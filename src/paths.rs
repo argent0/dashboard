@@ -65,8 +65,8 @@ impl Home {
         self.root.join("player-state.json")
     }
 
-    /// One file per session key (a worker's slug, or a task agent's
-    /// `<slug>_agent`) holding the id of its latest launch, written by
+    /// One file per session key (a worker's slug, or a foreman's
+    /// `<slug>_foreman`) holding the id of its latest launch, written by
     /// whichever process launched it (the player, or `dashboard relaunch`),
     /// so the player can tell a new launch's death from one it reported.
     pub fn launches(&self) -> PathBuf {
@@ -90,7 +90,7 @@ impl Home {
 /// gitignores this subfolder.
 ///
 /// Each one is a `git worktree` of `worker_workspace` (never a fresh
-/// `git clone`), because an agent CLI's workspace trust is scoped to a git
+/// `git clone`), because a foreman CLI's workspace trust is scoped to a git
 /// *repository*, not a filesystem path: a fresh clone is always a fresh
 /// repository, and nobody is present to click through its first-run
 /// trust dialog. A worktree shares its repository's identity with
@@ -111,12 +111,12 @@ pub fn worker_clone(director: &Path, slug: &str) -> PathBuf {
     workers_root(director).join(slug)
 }
 
-/// Where a task's task agent works (spec §17): another worktree of
+/// Where a task's foreman works (spec §17): another worktree of
 /// `worker_workspace`, for the same trust reason, on the local branch
-/// `agent/<slug>` (the worker's worktree has `task/<slug>`), with a full
+/// `foreman/<slug>` (the worker's worktree has `task/<slug>`), with a full
 /// working tree.
-pub fn agent_clone(director: &Path, slug: &str) -> PathBuf {
-    director.join(".dashboard").join("agents").join(slug)
+pub fn foreman_clone(director: &Path, slug: &str) -> PathBuf {
+    director.join(".dashboard").join("foremen").join(slug)
 }
 
 /// The one persistent clone of the hub every worker's worktree hangs off

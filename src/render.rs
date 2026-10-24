@@ -105,7 +105,7 @@ fn actor_label(actor: Actor) -> &'static str {
         Actor::Director => "director",
         Actor::Worker => "worker",
         Actor::Player => "player",
-        Actor::TaskAgent => "task agent",
+        Actor::Foreman => "foreman",
     }
 }
 
@@ -304,11 +304,11 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
         out.push(none_line(color));
     } else {
         for t in &ready {
-            let agent = match &t.agent {
-                Some(a) if a.alive => style("  (task agent posting)", &[c::DIM], color),
+            let foreman = match &t.foreman {
+                Some(a) if a.alive => style("  (foreman posting)", &[c::DIM], color),
                 Some(a) => style(
                     &format!(
-                        "  (task agent dead{})",
+                        "  (foreman dead{})",
                         relaunched(a.relaunches, state.roadmap.limits.max_relaunches)
                     ),
                     &[c::RED],
@@ -317,7 +317,7 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
                 None => String::new(),
             };
             out.push(format!(
-                "  {}  {}{agent}",
+                "  {}  {}{foreman}",
                 style(&t.slug, &[c::CYAN], color),
                 truncate(
                     &t.config.title,
@@ -330,7 +330,7 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
     }
     out.push(String::new());
 
-    // ---- staged (released by the director: the task agent posts) ----
+    // ---- staged (released by the director: the foreman posts) ----
     let staged: Vec<&TaskState> = live
         .iter()
         .filter(|t| t.status == Status::Staged)
@@ -343,11 +343,11 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
             color,
         ));
         for t in &staged {
-            let agent = match &t.agent {
-                Some(a) if a.alive => style("  (task agent posting)", &[c::DIM], color),
+            let foreman = match &t.foreman {
+                Some(a) if a.alive => style("  (foreman posting)", &[c::DIM], color),
                 Some(a) => style(
                     &format!(
-                        "  (task agent dead{})",
+                        "  (foreman dead{})",
                         relaunched(a.relaunches, state.roadmap.limits.max_relaunches)
                     ),
                     &[c::RED],
@@ -356,7 +356,7 @@ pub fn render(state: &HubState, events: &[Event], color: bool, width: usize) -> 
                 None => String::new(),
             };
             out.push(format!(
-                "  {}  {}{agent}",
+                "  {}  {}{foreman}",
                 style(&t.slug, &[c::YELLOW], color),
                 truncate(
                     &t.config.title,
@@ -889,22 +889,22 @@ fn render_in_flight(
     let relaunches = relaunched(t.relaunches, max_relaunches);
     out.push(format!("  session: {session} ({alive}{relaunches})"));
 
-    if let Some(agent) = &t.agent {
+    if let Some(foreman) = &t.foreman {
         let session =
-            crate::state::tmux_session_name(&state.project, &crate::state::agent_key(&t.slug));
-        let alive = if agent.alive {
+            crate::state::tmux_session_name(&state.project, &crate::state::foreman_key(&t.slug));
+        let alive = if foreman.alive {
             style("alive", &[c::GREEN], color)
         } else {
             style("dead", &[c::RED], color)
         };
-        let verdict = agent
+        let verdict = foreman
             .report
             .as_ref()
             .map(|r| format!(", reported: {}", r.verdict))
             .unwrap_or_default();
-        let relaunches = relaunched(agent.relaunches, max_relaunches);
+        let relaunches = relaunched(foreman.relaunches, max_relaunches);
         out.push(format!(
-            "  task agent: {session} ({alive}{relaunches}){verdict}"
+            "  foreman: {session} ({alive}{relaunches}){verdict}"
         ));
     }
 }
@@ -1008,7 +1008,7 @@ mod tests {
             flaky: 0,
             impure: 0,
             conflict: None,
-            agent: None,
+            foreman: None,
         }
     }
 
@@ -1164,11 +1164,11 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_and_ready_show_the_task_agent() {
+    fn in_flight_and_ready_show_the_foreman() {
         let mut t = task("a", "p1", Status::Tested);
-        t.agent = Some(crate::state::AgentState {
+        t.foreman = Some(crate::state::ForemanState {
             alive: true,
-            report: Some(crate::records::AgentReport {
+            report: Some(crate::records::ForemanReport {
                 verdict: "accept".to_string(),
                 text: String::new(),
                 at: 0,
@@ -1176,30 +1176,30 @@ mod tests {
             relaunches: 0,
         });
         let mut r = task("b", "p1", Status::Ready);
-        r.agent = Some(crate::state::AgentState {
+        r.foreman = Some(crate::state::ForemanState {
             alive: true,
             report: None,
             relaunches: 0,
         });
         let out = render_plain(&hub_state(vec![t, r]));
         assert!(
-            out.contains("task agent: dash-widget-a_agent (alive), reported: accept"),
+            out.contains("foreman: dash-widget-a_foreman (alive), reported: accept"),
             "{out}"
         );
-        assert!(out.contains("(task agent posting)"), "{out}");
+        assert!(out.contains("(foreman posting)"), "{out}");
     }
 
     #[test]
     fn sessions_show_their_relaunch_count() {
         let mut t = task("a", "p1", Status::InProgress);
         t.relaunches = 1;
-        t.agent = Some(crate::state::AgentState {
+        t.foreman = Some(crate::state::ForemanState {
             alive: false,
             report: None,
             relaunches: 2,
         });
         let mut r = task("b", "p1", Status::Ready);
-        r.agent = Some(crate::state::AgentState {
+        r.foreman = Some(crate::state::ForemanState {
             alive: false,
             report: None,
             relaunches: 1,
@@ -1210,10 +1210,10 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("task agent: dash-widget-a_agent (dead, relaunched 2/2)"),
+            out.contains("foreman: dash-widget-a_foreman (dead, relaunched 2/2)"),
             "{out}"
         );
-        assert!(out.contains("(task agent dead, relaunched 1/2)"), "{out}");
+        assert!(out.contains("(foreman dead, relaunched 1/2)"), "{out}");
     }
 
     #[test]

@@ -54,7 +54,7 @@ fn director_repo_with_docs_paths() -> DirectorRepo {
         repo.path(),
         "roadmap.toml",
         &format!(
-            "title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"
+            "title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_FOREMEN}"
         ),
     );
     commit(repo.path(), "declare docs_paths");
@@ -133,7 +133,7 @@ fn a_failing_main_is_reported_once_and_only_new_failures_reject() {
         repo.path(),
         "roadmap.toml",
         &format!(
-            "title = \"Updated Title\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"
+            "title = \"Updated Title\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_FOREMEN}"
         ),
     );
     let titled = commit(repo.path(), "update title");

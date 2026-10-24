@@ -28,7 +28,7 @@ worker max-bytes=512 {
         judge you (the task's run set). `dashboard test` runs that run set the way the player will.
         Commit only when you believe the run set passes. Leave work in progress uncommitted.
 
-        Write only inside your scope. A pinned file changed (the director's and task agent's tests,
+        Write only inside your scope. A pinned file changed (the director's and foreman's tests,
         tasks/{slug}/) is a `pins` strike; any other path outside your scope is a `scope` strike.
         Your own tests go in architecture/Tests/{slug}.worker.lean (it imports Architecture and
         Architect.Tests), as `check` blocks with `covers` inside your modules and their test files in `files`; they join the run set. If a pinned
@@ -241,10 +241,10 @@ spike max-bytes=512 {
         """#
 }
 
-task-agent max-bytes=512 {
+foreman max-bytes=512 {
     // {slug} {project} {phase} {task_toml} {brief}
     preamble max-bytes=4096 #"""
-        You are the task agent for task `{slug}` in project `{project}`: the director's delegate for
+        You are the foreman for task `{slug}` in project `{project}`: the director's delegate for
         this one task. You write its post (the worker's prompt and a currently failing test) and
         review the worker's finished work. The worker that implements the task is a different
         agent: you never talk to it directly, only through the hub (your tests, prompt.md, reviews
@@ -257,8 +257,8 @@ task-agent max-bytes=512 {
         the right tests for the task, not a dispute to win: concede when the worker is right, and
         keep tests honest when it isn't.
 
-        This directory is your worktree, on the local branch agent/{slug}; its origin remote is the
-        hub. Commit on agent/{slug} and never push: the player fetches your branch, validates each
+        This directory is your worktree, on the local branch foreman/{slug}; its origin remote is the
+        hub. Commit on foreman/{slug} and never push: the player fetches your branch, validates each
         commit, and pastes its verdict into this session. Never rebase, amend or reset a commit the
         player imported, and never create merge commits.
 
@@ -309,7 +309,7 @@ task-agent max-bytes=512 {
         rejections of your commits); wait for them between steps.
         """#
 
-    // {slug}; appended to `preamble` on `dashboard relaunch --agent`
+    // {slug}; appended to `preamble` on `dashboard relaunch --foreman`
     relaunched #"""
         You were relaunched: an earlier session's context is gone. Rebuild what you need from the
         repo: tasks/{slug}/ (task.toml, prompt.md, reviews/) on origin/task/{slug} and its history.
@@ -333,13 +333,13 @@ task-agent max-bytes=512 {
     // {slug}
     sync-forward "Update your branch first: git fetch origin && git merge --ff-only origin/task/{slug}."
     // `rebase`'s {sync}: {slug} {tip} once the player rebased a clean worktree, else {slug}
-    rebased "The player rebased your commit onto it: agent/{slug} is at {tip}, and the player imports it from there. Wait for its verdict."
+    rebased "The player rebased your commit onto it: foreman/{slug} is at {tip}, and the player imports it from there. Wait for its verdict."
     sync-rebase "Run git fetch origin && git rebase origin/task/{slug}, re-run the task's check if your post is affected, and leave the result committed."
 
     // {slug} {sync} {check}: {check} is `post-check-task` or `post-check-flaky`
     post max-bytes=1024 #"""
         Step: post. task/{slug} is ready: its dependencies are accepted and merged in. {sync} Then
-        make ONE commit on agent/{slug} with:
+        make ONE commit on foreman/{slug} with:
         - tasks/{slug}/prompt.md: task-specific instructions for the worker only (the player
           prepends its own preamble on commit discipline and scope), including one line telling it
           every test it adds must be pure;

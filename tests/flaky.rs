@@ -165,7 +165,7 @@ fn a_higher_evidence_limit_only_strikes() {
         repo.path(),
         "roadmap.toml",
         &format!(
-            "title = \"t\"\n\n[[phases]]\nid = \"p1\"\n\n[limits.strikes]\nevidence = 2\n{NO_TASK_AGENTS}"
+            "title = \"t\"\n\n[[phases]]\nid = \"p1\"\n\n[limits.strikes]\nevidence = 2\n{NO_FOREMEN}"
         ),
     );
     commit(repo.path(), "docs: raise the evidence limit");

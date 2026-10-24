@@ -2,7 +2,7 @@
 // fixture only for its users; a post changing a shared fixture keeps its
 // users' checks passing; a branch that changed one runs every user's
 // checks; the worker reads it pinned; a check's `files` never reach into
-// one; a task agent writes the fixtures of its modules only.
+// one; a foreman writes the fixtures of its modules only.
 
 mod common;
 
@@ -116,12 +116,12 @@ fn a_check_declaring_files_inside_a_fixture_is_refused() {
 }
 
 #[test]
-fn a_task_agent_writes_the_fixtures_of_its_modules_only() {
+fn a_foreman_writes_the_fixtures_of_its_modules_only() {
     let (_repo, _home_dir, home, _player) = hub_with_task("\"b\"");
     let hub = Git::new(home.hub());
     let tip = hub.rev_parse("refs/heads/task/s").unwrap();
     let runner = dashboard::checks::Runner::for_cli(&home);
-    let scope = dashboard::records::agent_scope_at(&hub, "s", &tip, Some(runner.exporter()));
+    let scope = dashboard::records::foreman_scope_at(&hub, "s", &tip, Some(runner.exporter()));
     assert!(scope.iter().any(|p| p == "fixtures/ab"), "{scope:?}");
     assert!(!scope.iter().any(|p| p == "fixtures/a"), "{scope:?}");
     // The worker of a task on `b` reads `both`, and `a`'s own stays absent.

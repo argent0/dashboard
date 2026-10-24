@@ -168,18 +168,18 @@ enum Command {
     Relaunch {
         /// The task's slug.
         slug: String,
-        /// Restart the task's task agent (spec.md §17) instead of its worker.
+        /// Restart the task's foreman (spec.md §17) instead of its worker.
         #[arg(long)]
-        agent: bool,
+        foreman: bool,
         /// Clear a relaunch-limit escalation for this session (worker, or
-        /// task agent with --agent), start its relaunch count over and
+        /// foreman with --foreman), start its relaunch count over and
         /// relaunch it. Only for that cause: every other escalation is
         /// retire-only. The cleared escalation stays in the hub as evidence.
         #[arg(long)]
         reset: bool,
     },
-    /// Paste a question from the director into a task agent's session
-    /// (spec.md §17); its answer arrives as an `agent_report` event.
+    /// Paste a question from the director into a foreman's session
+    /// (spec.md §17); its answer arrives as an `foreman_report` event.
     Ask {
         /// The task's slug.
         slug: String,
@@ -187,7 +187,7 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         question: Vec<String>,
     },
-    /// From a task agent's worktree: report to the director on the step the
+    /// From a foreman's worktree: report to the director on the step the
     /// player waits on (spec.md §17). The player fills in slug, step and
     /// commit. A review closes with accept (with --suite) or unsure, a
     /// question with answer or unsure, a post or contest with unsure; a
@@ -237,7 +237,7 @@ enum Command {
         kind: DraftKind,
     },
     /// From the director clone: release a ready task (spec.md §17): its
-    /// task agent launches. Fetches the hub and commits `stage: <slug>` on
+    /// foreman launches. Fetches the hub and commits `stage: <slug>` on
     /// task/<slug>, on top of the hub's tip, once the player would take it.
     Stage {
         slug: String,
@@ -246,7 +246,7 @@ enum Command {
         why: Option<String>,
     },
     /// From the director clone: put a staged task back to ready while no
-    /// task agent exists (`unstage: <slug>`).
+    /// foreman exists (`unstage: <slug>`).
     Unstage {
         slug: String,
         #[arg(long)]
@@ -254,7 +254,7 @@ enum Command {
     },
     /// From the director clone: accept a tested task (spec.md §9, §11);
     /// the player lands it. Commits `accept: <slug>` with the why as its
-    /// body; by default the task agent's latest accept report's why.
+    /// body; by default the foreman's latest accept report's why.
     Accept {
         slug: String,
         #[arg(long)]
@@ -290,11 +290,11 @@ enum Command {
         #[arg(long)]
         reason: String,
     },
-    /// Print the task's scope from a worker's or task agent's clone: its
+    /// Print the task's scope from a worker's or foreman's clone: its
     /// modules, the paths it may write, what else its working tree holds
     /// (read-only) and the checks that judge it.
     Scope,
-    /// Run the task's run set from a worker's or task agent's worktree, the
+    /// Run the task's run set from a worker's or foreman's worktree, the
     /// way the player will: snapshots the working tree and prints each
     /// check's result and output. Runs it here, in its own worktree, unless
     /// `[player] runs = "queued"`, where it waits its turn in the player's
@@ -310,8 +310,8 @@ enum Command {
         #[arg(long)]
         timeout: Option<u64>,
     },
-    /// Build the task's modules, or the named ones, from a worker's or task
-    /// agent's worktree (spec §21): snapshots the working tree, then runs
+    /// Build the task's modules, or the named ones, from a worker's or the
+    /// foreman's worktree (spec §21): snapshots the working tree, then runs
     /// each module's `build_cmd` in its view, generators first, and each
     /// root's in a full worktree of the snapshot. Compiles only, streams
     /// the output and records no verdict; runs here even when `[player]
@@ -354,8 +354,8 @@ fn main() {
             run_watch(args.home, args.no_color, args.width, interval)
         }
         Some(Command::Player { once, interval }) => run_player(args.home, once, interval),
-        Some(Command::Relaunch { slug, agent, reset }) => {
-            run_relaunch(args.home, &slug, agent, reset)
+        Some(Command::Relaunch { slug, foreman, reset }) => {
+            run_relaunch(args.home, &slug, foreman, reset)
         }
         Some(Command::Ask { slug, question }) => run_ask(args.home, &slug, &question.join(" ")),
         Some(Command::Report { verdict, why, check, suite, concerns }) => run_report(
@@ -730,12 +730,12 @@ fn run_player(home: Option<PathBuf>, once: bool, interval: u64) {
 // dashboard relaunch
 // --------------------------------------------------------------------------
 
-fn run_relaunch(home: Option<PathBuf>, slug: &str, agent: bool, reset: bool) {
+fn run_relaunch(home: Option<PathBuf>, slug: &str, foreman: bool, reset: bool) {
     let mut player = open_player(home);
     let result = if reset {
-        player.reset_relaunch(slug, agent)
-    } else if agent {
-        player.relaunch_agent(slug)
+        player.reset_relaunch(slug, foreman)
+    } else if foreman {
+        player.relaunch_foreman(slug)
     } else {
         player.relaunch(slug)
     };
@@ -745,7 +745,7 @@ fn run_relaunch(home: Option<PathBuf>, slug: &str, agent: bool, reset: bool) {
         String::new()
     };
     match result {
-        Ok(()) if agent => println!("{cleared}relaunched task/{slug}'s task agent"),
+        Ok(()) if foreman => println!("{cleared}relaunched task/{slug}'s foreman"),
         Ok(()) => println!("{cleared}relaunched task/{slug}"),
         Err(e) => {
             eprintln!("error: {e}");
@@ -762,7 +762,7 @@ fn run_ask(home: Option<PathBuf>, slug: &str, question: &str) {
     let mut player = open_player(home);
     match player.ask(slug, question) {
         Ok(()) => println!(
-            "asked task/{slug}'s task agent; its answer arrives as an agent_report event (dashboard wait)"
+            "asked task/{slug}'s foreman; its answer arrives as a foreman_report event (dashboard wait)"
         ),
         Err(e) => {
             eprintln!("error: {e}");
@@ -777,8 +777,8 @@ fn run_ask(home: Option<PathBuf>, slug: &str, question: &str) {
 
 fn run_report(home: Option<PathBuf>, draft: dashboard::report::Draft) {
     let c = task_clone(home);
-    if !c.agent {
-        fail("dashboard report runs in a task agent's worktree (branch agent/<slug>)".into());
+    if !c.foreman {
+        fail("dashboard report runs in a foreman's worktree (branch foreman/<slug>)".into());
     }
     let git_dir = c
         .worktree
@@ -913,12 +913,12 @@ fn run_raise(home: Option<PathBuf>, slug: Option<&str>, reason: &str) {
 
 /// `dashboard test`: see `queue.rs`.
 /// What `dashboard scope` and `dashboard test` start from: the home, the
-/// worktree they run in, its task's slug and whether it's a task agent's.
+/// worktree they run in, its task's slug and whether it's a foreman's.
 struct TaskClone {
     home: Home,
     worktree: git::Git,
     slug: String,
-    agent: bool,
+    foreman: bool,
 }
 
 fn fail(msg: String) -> ! {
@@ -934,9 +934,9 @@ fn task_clone(home: Option<PathBuf>) -> TaskClone {
         .run(&["symbolic-ref", "--short", "HEAD"])
         .unwrap_or_else(|e| fail(e.to_string()));
     let slug = queue::slug_of_branch(&branch)
-        .unwrap_or_else(|| fail(format!("branch {branch} is not a task/<slug> or agent/<slug> branch")))
+        .unwrap_or_else(|| fail(format!("branch {branch} is not a task/<slug> or foreman/<slug> branch")))
         .to_string();
-    TaskClone { home, worktree, slug, agent: branch.starts_with("agent/"), }
+    TaskClone { home, worktree, slug, foreman: branch.starts_with("foreman/"), }
 }
 
 /// The roadmap on the hub's main.
@@ -970,8 +970,8 @@ fn run_scope(home: Option<PathBuf>) {
     let suite = dashboard::records::suite_at(&hub, &tip, ex).unwrap_or_else(|e| fail(e));
     println!("task/{slug}  modules: {}", scope.modules.join(", "));
     println!("writable:");
-    if c.agent {
-        for p in dashboard::records::agent_scope_at(&hub, slug, &tip, ex) {
+    if c.foreman {
+        for p in dashboard::records::foreman_scope_at(&hub, slug, &tip, ex) {
             println!("  {p}");
         }
     } else {
@@ -979,7 +979,7 @@ fn run_scope(home: Option<PathBuf>) {
             println!("  {p:<30} ({why})");
         }
     }
-    if c.agent {
+    if c.foreman {
         println!("working tree: full");
     } else {
         println!("working tree:");

@@ -593,7 +593,7 @@ fn send_back_exceeding_max_review_rounds_escalates_instead_of_importing() {
         repo.path(),
         "roadmap.toml",
         &format!(
-            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n\n[limits]\nmax_review_rounds = 1\n{NO_TASK_AGENTS}"
+            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n\n[limits]\nmax_review_rounds = 1\n{NO_FOREMEN}"
         ),
     );
     commit(repo.path(), "set max_review_rounds = 1");
@@ -807,7 +807,7 @@ fn accept_stops_at_a_conflict_with_a_main_that_moved() {
         repo.path(),
         "roadmap.toml",
         &format!(
-            "title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"
+            "title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_FOREMEN}"
         ),
     );
     commit(repo.path(), "declare docs_paths over docs/");

@@ -30,9 +30,9 @@ pub enum Actor {
     Director,
     Worker,
     Player,
-    /// A task's task agent (spec §17): posts and sends back on the
+    /// A task's foreman (spec §17): posts and sends back on the
     /// director's behalf, from its own clone.
-    TaskAgent,
+    Foreman,
 }
 
 /// The kind of commit an import note attaches to. Director-on-main paths
@@ -65,9 +65,9 @@ pub enum Transition {
     Resolve,
     /// A worker's `contest:` marker: a test it must pass is wrong (spec §18).
     Contest,
-    /// The reply to a contest (task agent, or director): back to the worker.
+    /// The reply to a contest (foreman, or director): back to the worker.
     ContestReply,
-    /// A director's `stage:` marker: hold a `ready` task so its task agent
+    /// A director's `stage:` marker: hold a `ready` task so its foreman
     /// isn't launched.
     Stage,
     /// A director's `unstage:` marker: release a `staged` task.
@@ -462,7 +462,7 @@ pub struct EscalationRecord {
     pub cause: String,
     pub at: u64,
     /// Set on a `[limits] max_relaunches` escalation: the session whose
-    /// relaunches ran out, `"worker"` or `"agent"`. Only such an escalation
+    /// relaunches ran out, `"worker"` or `"foreman"`. Only such an escalation
     /// can be cleared (`clear_escalation`, `dashboard relaunch --reset`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relaunch_limit: Option<String>,
@@ -470,13 +470,13 @@ pub struct EscalationRecord {
 
 impl EscalationRecord {
     /// The session a relaunch-limit escalation is for (`Some(true)`: the
-    /// task agent), or `None` for any other cause. A record written before
+    /// foreman), or `None` for any other cause. A record written before
     /// `relaunch_limit` existed is read off its cause text.
     pub fn relaunch_session(&self) -> Option<bool> {
         match self.relaunch_limit.as_deref() {
             Some(s) => Some(s == session_name(true)),
             None if self.cause.starts_with("relaunch limit (") => {
-                Some(self.cause.contains("the task agent was relaunched"))
+                Some(self.cause.contains("the foreman was relaunched"))
             }
             None => None,
         }
@@ -484,8 +484,8 @@ impl EscalationRecord {
 }
 
 /// The name a relaunch-limit record gives a session.
-pub fn session_name(agent: bool) -> &'static str {
-    if agent { "agent" } else { "worker" }
+pub fn session_name(foreman: bool) -> &'static str {
+    if foreman { "foreman" } else { "worker" }
 }
 
 /// Records an escalation whose cause isn't a strike limit or a block (e.g. a
@@ -508,9 +508,9 @@ pub fn record_relaunch_escalation(
     slug: &str,
     commit: &str,
     cause: &str,
-    agent: bool,
+    foreman: bool,
 ) -> Result<EscalationRecord, String> {
-    write_escalation(hub, slug, commit, cause, Some(agent))
+    write_escalation(hub, slug, commit, cause, Some(foreman))
 }
 
 fn write_escalation(
@@ -518,7 +518,7 @@ fn write_escalation(
     slug: &str,
     commit: &str,
     cause: &str,
-    relaunch_agent: Option<bool>,
+    relaunch_foreman: Option<bool>,
 ) -> Result<EscalationRecord, String> {
     hub.update_ref(&format!("refs/dashboard/escalated/{slug}"), commit)
         .map_err(|e| e.to_string())?;
@@ -526,7 +526,7 @@ fn write_escalation(
         slug: slug.to_string(),
         cause: cause.to_string(),
         at: now_unix(),
-        relaunch_limit: relaunch_agent.map(|a| session_name(a).to_string()),
+        relaunch_limit: relaunch_foreman.map(|a| session_name(a).to_string()),
     };
     let json = serde_json::to_string(&record).map_err(|e| e.to_string())?;
     hub.notes_add(ESCALATIONS_NOTES_REF, commit, &json)
@@ -559,7 +559,7 @@ pub struct ClearedEscalation {
     /// Which `refs/dashboard/escalation-cleared/<slug>/<n>` this is.
     pub n: u32,
     pub cause: String,
-    /// The session whose relaunch limit it was, `"worker"` or `"agent"`.
+    /// The session whose relaunch limit it was, `"worker"` or `"foreman"`.
     pub session: String,
     #[serde(default)]
     pub escalated_at: u64,
@@ -568,24 +568,24 @@ pub struct ClearedEscalation {
 }
 
 /// Clears `slug`'s escalation, which must be a relaunch-limit one for the
-/// worker (or, with `agent`, the task agent): the escalation ref moves to
+/// worker (or, with `foreman`, the foreman): the escalation ref moves to
 /// `refs/dashboard/escalation-cleared/<slug>/<n>` in one transaction with
 /// old-value checks (so an escalation the player records meanwhile is never
 /// lost), then a `ClearedEscalation` is noted on its commit. The caller
 /// checks it's also the task's *current* cause (`state::escalation_cause`
 /// ranks strikes and `block:` above a record).
-pub fn clear_escalation(hub: &Git, slug: &str, agent: bool) -> Result<ClearedEscalation, String> {
+pub fn clear_escalation(hub: &Git, slug: &str, foreman: bool) -> Result<ClearedEscalation, String> {
     let escalated = format!("refs/dashboard/escalated/{slug}");
     let sha = hub
         .rev_parse(&escalated)
         .ok_or_else(|| format!("task/{slug} has no escalation record"))?;
     let rec = escalation(hub, slug)
         .ok_or_else(|| format!("task/{slug}'s escalation record is unreadable"))?;
-    if rec.relaunch_session() != Some(agent) {
+    if rec.relaunch_session() != Some(foreman) {
         return Err(format!(
             "task/{slug} is escalated for {}, not the {}'s relaunch limit",
             rec.cause,
-            session_name(agent)
+            session_name(foreman)
         ));
     }
     let n = cleared_refs(hub, slug)
@@ -604,7 +604,7 @@ pub fn clear_escalation(hub: &Git, slug: &str, agent: bool) -> Result<ClearedEsc
         slug: slug.to_string(),
         n,
         cause: rec.cause,
-        session: session_name(agent).to_string(),
+        session: session_name(foreman).to_string(),
         escalated_at: rec.at,
         at: now_unix(),
     };
@@ -651,12 +651,12 @@ const RELAUNCHES_NOTES_REF: &str = "refs/notes/dashboard-relaunches";
 /// on the task branch is progress, so a moved tip starts both counts over.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelaunchRecord {
-    /// The task agent's session (`--agent`), else the worker's.
+    /// The foreman's session (`--foreman`), else the worker's.
     #[serde(default)]
-    pub agent: bool,
-    /// Task agent reports noted on the tip at the time: a report collected
+    pub foreman: bool,
+    /// Foreman reports noted on the tip at the time: a report collected
     /// since is progress too, so only records matching the current count
-    /// count toward the task agent's limit.
+    /// count toward the foreman's limit.
     #[serde(default)]
     pub reports: usize,
     /// Not a relaunch: the operator cleared this session's relaunch-limit
@@ -674,37 +674,37 @@ fn relaunch_records(hub: &Git, tip: &str) -> Vec<RelaunchRecord> {
         .unwrap_or_default()
 }
 
-/// Relaunches of the worker (or, with `agent`, the task agent) since that
+/// Relaunches of the worker (or, with `foreman`, the foreman) since that
 /// session's last progress: noted on `tip` after its last reset and, for
-/// the task agent, with no report collected since.
-pub fn relaunch_count(hub: &Git, tip: &str, agent: bool) -> u32 {
-    let reports = agent_reports(hub, tip).len();
+/// the foreman, with no report collected since.
+pub fn relaunch_count(hub: &Git, tip: &str, foreman: bool) -> u32 {
+    let reports = foreman_reports(hub, tip).len();
     let records = relaunch_records(hub, tip);
     let start = records
         .iter()
-        .rposition(|r| r.reset && r.agent == agent)
+        .rposition(|r| r.reset && r.foreman == foreman)
         .map_or(0, |i| i + 1);
     records[start..]
         .iter()
-        .filter(|r| !r.reset && r.agent == agent && (!agent || r.reports == reports))
+        .filter(|r| !r.reset && r.foreman == foreman && (!foreman || r.reports == reports))
         .count() as u32
 }
 
 /// Notes one relaunch on `tip`. `dashboard relaunch` runs beside the
 /// player, so the append is a `notes_modify` (a re-read on a race).
-pub fn record_relaunch(hub: &Git, tip: &str, agent: bool) -> Result<(), String> {
-    append_relaunch_record(hub, tip, agent, false)
+pub fn record_relaunch(hub: &Git, tip: &str, foreman: bool) -> Result<(), String> {
+    append_relaunch_record(hub, tip, foreman, false)
 }
 
 /// Notes a reset on `tip`: the session's relaunches before it stop counting.
-pub fn record_relaunch_reset(hub: &Git, tip: &str, agent: bool) -> Result<(), String> {
-    append_relaunch_record(hub, tip, agent, true)
+pub fn record_relaunch_reset(hub: &Git, tip: &str, foreman: bool) -> Result<(), String> {
+    append_relaunch_record(hub, tip, foreman, true)
 }
 
-fn append_relaunch_record(hub: &Git, tip: &str, agent: bool, reset: bool) -> Result<(), String> {
+fn append_relaunch_record(hub: &Git, tip: &str, foreman: bool, reset: bool) -> Result<(), String> {
     let record = RelaunchRecord {
-        agent,
-        reports: agent_reports(hub, tip).len(),
+        foreman,
+        reports: foreman_reports(hub, tip).len(),
         reset,
         at: now_unix(),
     };
@@ -765,7 +765,7 @@ pub fn conflict(hub: &Git, tip: &str) -> Option<ConflictRecord> {
 const SPEEDUPS_NOTES_REF: &str = "refs/notes/dashboard-speedups";
 
 /// Notes what a test-speedup finish `commit` removed or rewired (spec
-/// §15.1), for the review the task agent and director make of it.
+/// §15.1), for the review the foreman and director make of it.
 pub fn record_speedup(hub: &Git, commit: &str, text: &str) -> Result<(), String> {
     hub.notes_add(SPEEDUPS_NOTES_REF, commit, text)
         .map_err(|e| e.to_string())
@@ -806,39 +806,39 @@ pub fn budget_raises(hub: &Git) -> Vec<Raise> {
 }
 
 // --------------------------------------------------------------------------
-// Task agents (spec §17): refs/dashboard/agent/<slug>,
-// refs/dashboard/agent-asked/<slug>, refs/notes/dashboard-agent-reports
+// Foremen (spec §17): refs/dashboard/foreman-tip/<slug>,
+// refs/dashboard/foreman-asked/<slug>, refs/notes/dashboard-foreman-reports
 // --------------------------------------------------------------------------
 
-const AGENT_REPORTS_NOTES_REF: &str = "refs/notes/dashboard-agent-reports";
+const FOREMAN_REPORTS_NOTES_REF: &str = "refs/notes/dashboard-foreman-reports";
 
-/// Records that `slug`'s task agent was launched, at the task tip `commit`.
-pub fn set_agent_launched(hub: &Git, slug: &str, commit: &str) -> Result<(), String> {
-    hub.update_ref(&format!("refs/dashboard/agent/{slug}"), commit)
+/// Records that `slug`'s foreman was launched, at the task tip `commit`.
+pub fn set_foreman_launched(hub: &Git, slug: &str, commit: &str) -> Result<(), String> {
+    hub.update_ref(&format!("refs/dashboard/foreman-tip/{slug}"), commit)
         .map_err(|e| e.to_string())
 }
 
-/// Whether `slug`'s task agent was ever launched (it is launched at most once;
-/// `dashboard relaunch --agent` restarts it by hand).
-pub fn agent_launched(hub: &Git, slug: &str) -> bool {
-    hub.ref_exists(&format!("refs/dashboard/agent/{slug}"))
+/// Whether `slug`'s foreman was ever launched (it is launched at most once;
+/// `dashboard relaunch --foreman` restarts it by hand).
+pub fn foreman_launched(hub: &Git, slug: &str) -> bool {
+    hub.ref_exists(&format!("refs/dashboard/foreman-tip/{slug}"))
 }
 
-/// Records that the task agent was asked to review the tested tip `commit`.
-pub fn set_agent_asked(hub: &Git, slug: &str, commit: &str) -> Result<(), String> {
-    hub.update_ref(&format!("refs/dashboard/agent-asked/{slug}"), commit)
+/// Records that the foreman was asked to review the tested tip `commit`.
+pub fn set_foreman_asked(hub: &Git, slug: &str, commit: &str) -> Result<(), String> {
+    hub.update_ref(&format!("refs/dashboard/foreman-asked/{slug}"), commit)
         .map_err(|e| e.to_string())
 }
 
-/// The tested tip the task agent was last asked to review.
-pub fn agent_asked(hub: &Git, slug: &str) -> Option<String> {
-    hub.rev_parse(&format!("refs/dashboard/agent-asked/{slug}"))
+/// The tested tip the foreman was last asked to review.
+pub fn foreman_asked(hub: &Git, slug: &str) -> Option<String> {
+    hub.rev_parse(&format!("refs/dashboard/foreman-asked/{slug}"))
 }
 
-/// One report a task agent filed with `dashboard report` (`report::take`
+/// One report a foreman filed with `dashboard report` (`report::take`
 /// renders its block), noted on the task tip it was collected at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentReport {
+pub struct ForemanReport {
     /// One of `report::Verdict`, checked against the step it closes.
     pub verdict: String,
     pub text: String,
@@ -847,23 +847,23 @@ pub struct AgentReport {
 }
 
 /// Appends `report` to the reports noted on `tip`.
-pub fn record_agent_report(
+pub fn record_foreman_report(
     hub: &Git,
     tip: &str,
-    mut report: AgentReport,
-) -> Result<AgentReport, String> {
+    mut report: ForemanReport,
+) -> Result<ForemanReport, String> {
     report.at = now_unix();
-    let mut all = agent_reports(hub, tip);
+    let mut all = foreman_reports(hub, tip);
     all.push(report.clone());
     let json = serde_json::to_string(&all).map_err(|e| e.to_string())?;
-    hub.notes_add(AGENT_REPORTS_NOTES_REF, tip, &json)
+    hub.notes_add(FOREMAN_REPORTS_NOTES_REF, tip, &json)
         .map_err(|e| e.to_string())?;
     Ok(report)
 }
 
 /// Every report noted on `commit`, oldest first.
-pub fn agent_reports(hub: &Git, commit: &str) -> Vec<AgentReport> {
-    hub.notes_show(AGENT_REPORTS_NOTES_REF, commit)
+pub fn foreman_reports(hub: &Git, commit: &str) -> Vec<ForemanReport> {
+    hub.notes_show(FOREMAN_REPORTS_NOTES_REF, commit)
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default()
 }
@@ -929,7 +929,7 @@ pub fn pinned_files(hub: &Git, slug: &str) -> Option<BTreeMap<String, String>> {
 
     // The architecture (architect-v3.md): the whole Lean package with its
     // suite files and every API's paths are the
-    // director's and task agent's, never a worker's. A spike never merges;
+    // director's and foreman's, never a worker's. A spike never merges;
     // a test-speedup owns the suite files.
     if !is_spike_at(hub, &commit, slug) {
         add_pinned_path(hub, &commit, &format!("{}/", config::ARCH_DIR), &mut map);
@@ -1183,8 +1183,8 @@ pub struct Workspace {
     /// (paths and impl files of every API a node in `modules` generates,
     /// consumes or refs), `files of <check>` for each run-set check,
     /// `fixture <name>` for each fixture a node of `modules` or a run-set
-    /// check's covers uses, `test_paths`, `.gitignore`, and the agent config
-    /// (`.claude/`, `CLAUDE.md`) the worker's agent reads.
+    /// check's covers uses, `test_paths`, `.gitignore`, and the foreman config
+    /// (`.claude/`, `CLAUDE.md`) the worker's foreman reads.
     pub readonly: Vec<(String, String)>,
 }
 
@@ -1217,7 +1217,7 @@ pub fn workspace_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::l
     e.suite.test_paths.iter().for_each(|p| add(p, "test_paths".into()));
     add(&".gitignore".to_string(), ".gitignore".into());
     for p in [".claude/", "CLAUDE.md"] {
-        add(&p.to_string(), "agent config".into());
+        add(&p.to_string(), "foreman config".into());
     }
     Ok(Workspace { scope, readonly })
 }
@@ -1286,7 +1286,7 @@ pub fn sparse_pattern(path: &str) -> String {
     out
 }
 
-/// Where `slug`'s task agent (or the director's send-back and contest
+/// Where `slug`'s foreman (or the director's send-back and contest
 /// reply) may write, read at `tip` (spec §17): its own `Tests/<slug>.lean`,
 /// `tasks/<slug>/`, the `files` of the checks in the task's run set, the
 /// APIs whose generator and consumer are both in its modules (their Lean
@@ -1294,7 +1294,7 @@ pub fn sparse_pattern(path: &str) -> String {
 /// and its skeleton), every fixture one of its modules uses (every fixture
 /// with no modules), `test_paths` and the roadmap's `[player] lock_files`.
 /// Paths and directory prefixes.
-pub fn agent_scope_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::lean::Exporter>) -> Vec<String> {
+pub fn foreman_scope_at(hub: &Git, slug: &str, tip: &str, exporter: Option<&crate::lean::Exporter>) -> Vec<String> {
     let mut out = vec![config::tests_file(slug), format!("tasks/{slug}/")];
     let modules = task_config_at(hub, tip, slug).map(|c| c.modules).unwrap_or_default();
     if let Ok(Some(e)) = exported_at(hub, tip, exporter) {

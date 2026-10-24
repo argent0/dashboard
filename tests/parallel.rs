@@ -318,7 +318,7 @@ fn declare_lock_regen(repo: &DirectorRepo, regen: &str) {
         repo.path(),
         "roadmap.toml",
         &format!(
-            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}\n[player.lock_regen]\n\"src/shared.txt\" = \"{regen}\"\n"
+            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_FOREMEN}\n[player.lock_regen]\n\"src/shared.txt\" = \"{regen}\"\n"
         ),
     );
     commit(repo.path(), "declare lock_regen");
@@ -365,7 +365,7 @@ fn a_resolution_must_merge_the_recorded_main_commit() {
         repo.path(),
         "roadmap.toml",
         &format!(
-            "title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"
+            "title = \"Test Project\"\ndocs_paths = [\"docs\"]\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_FOREMEN}"
         ),
     );
     commit(repo.path(), "declare docs_paths");

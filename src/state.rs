@@ -26,8 +26,8 @@ pub enum Status {
     Orphaned,
     Ready,
     /// A `ready` task the director released with a `stage:` marker: its task
-    /// agent is launched (a `ready` task never starts on its own); `unstage:`
-    /// puts it back, until the agent exists.
+    /// foreman is launched (a `ready` task never starts on its own); `unstage:`
+    /// puts it back, until the foreman exists.
     Staged,
     Posted,
     InProgress,
@@ -37,7 +37,7 @@ pub enum Status {
     /// director must resolve that specific conflict (spec §11).
     Conflicted,
     /// The worker contested a test it must pass (spec §18): the task
-    /// agent (or the director) must reply.
+    /// foreman (or the director) must reply.
     Contested,
     Escalated,
     Accepted,
@@ -109,15 +109,15 @@ pub struct TaskState {
     pub impure: u32,
     /// The conflict to resolve, set only when `status == Conflicted`.
     pub conflict: Option<records::ConflictRecord>,
-    /// The task's task agent (spec §17), once one was launched.
-    pub agent: Option<AgentState>,
+    /// The task's foreman (spec §17), once one was launched.
+    pub foreman: Option<ForemanState>,
 }
 
-/// A task agent's runtime state and its latest report on the task's tip.
+/// A foreman's runtime state and its latest report on the task's tip.
 #[derive(Debug, Clone)]
-pub struct AgentState {
+pub struct ForemanState {
     pub alive: bool,
-    pub report: Option<records::AgentReport>,
+    pub report: Option<records::ForemanReport>,
     /// Its relaunches since its last progress, counted apart from the worker's.
     pub relaunches: u32,
 }
@@ -376,8 +376,8 @@ fn derive_task(
     let is_accepted = accepted.contains_key(slug);
     let is_explored = records::is_explored(hub, slug);
     let alive = live_session(slug);
-    let agent = records::agent_launched(hub, slug).then(|| AgentState {
-        alive: live_session(&agent_key(slug)),
+    let foreman = records::foreman_launched(hub, slug).then(|| ForemanState {
+        alive: live_session(&foreman_key(slug)),
         report: None,
         relaunches: 0,
     });
@@ -500,8 +500,8 @@ fn derive_task(
         }
     };
 
-    let agent = agent.map(|a| AgentState {
-        report: records::agent_reports(hub, &tip).pop(),
+    let foreman = foreman.map(|a| ForemanState {
+        report: records::foreman_reports(hub, &tip).pop(),
         relaunches: records::relaunch_count(hub, &tip, true),
         ..a
     });
@@ -524,15 +524,15 @@ fn derive_task(
         flaky,
         impure,
         conflict,
-        agent,
+        foreman,
     })
 }
 
-/// Whether `cfg`'s post and send-backs belong to a task agent (spec §17):
-/// task agents are on (`[player] task_agent_cmd`), and it isn't a spike,
+/// Whether `cfg`'s post and send-backs belong to a foreman (spec §17):
+/// foremen are on (`[player] foreman_cmd`), and it isn't a spike,
 /// whose question the director writes with the operator.
-pub fn task_agent_managed(roadmap: &RoadmapConfig, cfg: &TaskConfig) -> bool {
-    roadmap.player.task_agents_enabled() && cfg.kind != TaskKind::Spike
+pub fn foreman_managed(roadmap: &RoadmapConfig, cfg: &TaskConfig) -> bool {
+    roadmap.player.foremen_enabled() && cfg.kind != TaskKind::Spike
 }
 
 /// Escalation causes that aren't already covered by retired/accepted: a
@@ -633,16 +633,16 @@ pub fn tmux_session_name(project: &str, slug: &str) -> String {
     format!("dash-{}-{}", sanitize(project), sanitize(slug))
 }
 
-/// The `Sessions` key of `slug`'s task agent (spec §17), next to the
+/// The `Sessions` key of `slug`'s foreman (spec §17), next to the
 /// worker's own key `slug`. `_` never appears in a slug, so it can't
 /// collide with another task's worker session.
-pub fn agent_key(slug: &str) -> String {
-    format!("{slug}_agent")
+pub fn foreman_key(slug: &str) -> String {
+    format!("{slug}_foreman")
 }
 
-/// Whether the agent in tmux session `name` is currently alive: the
+/// Whether the foreman in tmux session `name` is currently alive: the
 /// session exists *and* its pane's command is still running. Sessions are
-/// launched with `remain-on-exit`, so a crashed agent's pane lingers, dead,
+/// launched with `remain-on-exit`, so a crashed foreman's pane lingers, dead,
 /// until the player reaps it (`Sessions::reap`); that's dead here already.
 /// `false` if tmux itself isn't installed, not just if the session is
 /// missing (`display-message` on a missing target prints nothing).

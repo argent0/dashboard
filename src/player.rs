@@ -192,7 +192,7 @@ impl Sessions for TmuxSessions {
     /// interpolated into the inner `sh -c` string, so it's the one path that
     /// needs shell quoting. `remain-on-exit` (in the same command list, so
     /// the server sets it before it can see the command exit) keeps a
-    /// crashed agent's pane, dead, for `reap`. A dead session still holding
+    /// crashed foreman's pane, dead, for `reap`. A dead session still holding
     /// the name (a relaunch before the player reaped it) is killed first.
     fn launch(
         &mut self,
@@ -435,15 +435,15 @@ fn shell_quote(s: &str) -> String {
 // --------------------------------------------------------------------------
 
 /// Written by the session's hooks into its worktree's git dir (beside
-/// `dashboard-prompt.md`) when the agent ends a turn: `stop <unix> <pid>`,
+/// `dashboard-prompt.md`) when the foreman ends a turn: `stop <unix> <pid>`,
 /// or `error <unix> <pid>` when the turn ended on an API error (a usage
-/// limit, an overload). Removed when a prompt is submitted (the agent's
+/// limit, an overload). Removed when a prompt is submitted (the foreman's
 /// `UserPromptSubmit` hook) and by the player before every launch or relay,
-/// so it only ever exists while the agent sits waiting for input. The whole
+/// so it only ever exists while the foreman sits waiting for input. The whole
 /// line identifies one stop.
 pub const STOPPED_FILE: &str = "dashboard-stopped";
-/// Written by the player beside it when it collects a task agent's report:
-/// the agent answered, so its stop is the expected wait for the director.
+/// Written by the player beside it when it collects a foreman's report:
+/// the foreman answered, so its stop is the expected wait for the director.
 /// Removed with `STOPPED_FILE`.
 const REPORTED_FILE: &str = "dashboard-reported";
 /// Where the hooks go: the worktree's own, never-committed Claude Code
@@ -455,7 +455,7 @@ const SETTINGS_FILE: &str = ".claude/settings.local.json";
 struct Stop {
     /// `STOPPED_FILE`'s line, unique per stop.
     id: String,
-    /// The turn ended on an API error rather than by the agent's choice.
+    /// The turn ended on an API error rather than by the foreman's choice.
     error: bool,
 }
 
@@ -475,7 +475,7 @@ fn clear_stop(git_dir: &Path) {
     let _ = std::fs::remove_file(git_dir.join(REPORTED_FILE));
 }
 
-/// The stop marker path of the agent working in `clone_dir`, for tests and
+/// The stop marker path of the foreman working in `clone_dir`, for tests and
 /// tools that want to play the hook's part.
 pub fn stop_marker(clone_dir: &Path) -> Result<PathBuf, String> {
     Ok(Player::<NullSessions>::git_dir(clone_dir)?.join(STOPPED_FILE))
@@ -531,7 +531,7 @@ fn install_stop_hook(clone_dir: &Path, git_dir: &Path) -> Result<(), String> {
     hide_from_git(clone_dir)
 }
 
-/// Keeps the settings file out of anything the agent could commit: an
+/// Keeps the settings file out of anything the foreman could commit: an
 /// untracked one goes in the repository's `info/exclude` (shared by every
 /// worktree of the workspace), a tracked one is marked `--skip-worktree` in
 /// this worktree's index, or `--assume-unchanged` in a sparse one (spec
@@ -599,10 +599,10 @@ pub struct TickReport {
     /// Accepts whose merge with `main` failed the suite: (slug, message).
     pub merge_failed: Vec<(String, String)>,
     pub launched: Vec<String>,
-    /// Task agents started this tick (spec §17).
-    pub agents_launched: Vec<String>,
-    /// Reports task agents handed the player this tick: (slug, report).
-    pub agent_reports: Vec<(String, records::AgentReport)>,
+    /// Foremen started this tick (spec §17).
+    pub foremen_launched: Vec<String>,
+    /// Reports foremen handed the player this tick: (slug, report).
+    pub foreman_reports: Vec<(String, records::ForemanReport)>,
     /// `main`'s impure checks, when newly found (spec §20): one line each.
     pub main_impure: Vec<String>,
     /// `main`'s suite is over its `[budget]` (a check killed, or the total
@@ -630,8 +630,8 @@ impl TickReport {
             && self.conflicts.is_empty()
             && self.merge_failed.is_empty()
             && self.launched.is_empty()
-            && self.agents_launched.is_empty()
-            && self.agent_reports.is_empty()
+            && self.foremen_launched.is_empty()
+            && self.foreman_reports.is_empty()
             && self.main_impure.is_empty()
             && self.main_over_budget.is_empty()
             && self.main_failing.is_empty()
@@ -671,11 +671,11 @@ impl fmt::Display for TickReport {
         for slug in &self.launched {
             lines.push(format!("launched {slug}"));
         }
-        for slug in &self.agents_launched {
-            lines.push(format!("launched task agent {slug}"));
+        for slug in &self.foremen_launched {
+            lines.push(format!("launched foreman {slug}"));
         }
-        for (slug, r) in &self.agent_reports {
-            lines.push(format!("task agent {slug} reported: {}", r.verdict));
+        for (slug, r) in &self.foreman_reports {
+            lines.push(format!("foreman {slug} reported: {}", r.verdict));
         }
         for line in &self.main_impure {
             lines.push(format!("main impure: {line}"));
@@ -708,16 +708,16 @@ fn short(sha: &str) -> &str {
 }
 
 // --------------------------------------------------------------------------
-// Tree sync: the player brings an agent's tree to its task branch at a step
+// Tree sync: the player brings a foreman's tree to its task branch at a step
 // boundary, just before it pastes the step (spec §5)
 // --------------------------------------------------------------------------
 
-/// How an agent's tree reaches `origin/task/<slug>`.
+/// How a foreman's tree reaches `origin/task/<slug>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TreeSync {
-    /// A fast-forward: the hub built on what the agent has.
+    /// A fast-forward: the hub built on what the foreman has.
     Forward,
-    /// The agent's own unimported commits, replayed onto the hub's tip.
+    /// The foreman's own unimported commits, replayed onto the hub's tip.
     Rebase,
     /// A reset dropping a history the hub rejected.
     Reset,
@@ -725,7 +725,7 @@ enum TreeSync {
 
 impl TreeSync {
     /// The templates of `section` for this sync: the one saying the player
-    /// did it (`{slug}` `{tip}`), and the one handing it to the agent
+    /// did it (`{slug}` `{tip}`), and the one handing it to the foreman
     /// (`{slug}`).
     fn templates(self, section: &str) -> (String, String) {
         let (done, todo) = match self {
@@ -737,8 +737,8 @@ impl TreeSync {
     }
 }
 
-/// Settings for every git command the player runs in an agent's tree: the
-/// agent's hooks and fsmonitor stay unrun, and a commit the player
+/// Settings for every git command the player runs in a foreman's tree: the
+/// foreman's hooks and fsmonitor stay unrun, and a commit the player
 /// rewrites (a rebase) carries the player as committer, its author kept.
 const TREE_GIT: &[&str] = &["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 const TREE_IDENTITY: &[(&str, &str)] = &[
@@ -746,12 +746,12 @@ const TREE_IDENTITY: &[(&str, &str)] = &[
     ("GIT_COMMITTER_EMAIL", "dashboard-player@localhost"),
 ];
 
-/// Brings `dir`, an agent's worktree on `branch`, to the hub's
+/// Brings `dir`, a foreman's worktree on `branch`, to the hub's
 /// `task/<slug>` by `how`, and returns its new HEAD. It acts only on a
 /// clean tree (no change to a tracked file, no untracked file outside the
 /// ignored ones) still on `branch`, and only by a fast-forward, a rebase
 /// without conflicts or a reset; a rebase that conflicts is aborted, so the
-/// tree stays as the agent left it. `None` leaves the sync to the agent.
+/// tree stays as the foreman left it. `None` leaves the sync to the foreman.
 fn sync_tree(dir: &Path, branch: &str, slug: &str, how: TreeSync) -> Option<String> {
     if !dir.exists() {
         return None;
@@ -825,11 +825,11 @@ pub struct Player<S: Sessions> {
     /// "The very first run with no state file initializes silently, without
     /// emitting").
     first_run: bool,
-    /// The last stale-base commit of each task agent the player told to
-    /// rebase (`import_task_agent`), so it says so once, not every tick.
-    agent_rebase_told: BTreeMap<String, String>,
-    /// The agent commit last told it is held (`fsm::Verdict::Hold`), per slug.
-    agent_hold_told: BTreeMap<String, String>,
+    /// The last stale-base commit of each foreman the player told to
+    /// rebase (`import_foreman`), so it says so once, not every tick.
+    foreman_rebase_told: BTreeMap<String, String>,
+    /// The foreman commit last told it is held (`fsm::Verdict::Hold`), per slug.
+    foreman_hold_told: BTreeMap<String, String>,
     /// The fingerprint of the last sandbox policy that passed its
     /// preflight, so a tick re-runs it only when `[sandbox]` changes.
     sandbox_preflighted: Option<String>,
@@ -893,8 +893,8 @@ impl<S: Sessions> Player<S> {
             panes: saved.panes,
             clock: None,
             first_run,
-            agent_rebase_told: BTreeMap::new(),
-            agent_hold_told: BTreeMap::new(),
+            foreman_rebase_told: BTreeMap::new(),
+            foreman_hold_told: BTreeMap::new(),
             sandbox_preflighted: None,
             arch_tried: None,
             main_impure: BTreeMap::new(),
@@ -1181,11 +1181,11 @@ impl<S: Sessions> Player<S> {
         self.report_main(&mut report);
         self.release_held(&mut report)?;
         self.import_task_branches(&mut report)?;
-        self.import_task_agents(&mut report)?;
+        self.import_foremen(&mut report)?;
         self.launch_workers(&mut report)?;
         self.import_workers(&mut report)?;
         self.unblock_merges(&mut report)?;
-        self.run_task_agents(&mut report)?;
+        self.run_foremen(&mut report)?;
         self.serve_queue()?;
         self.emit_events(&report)?;
         Ok(report)
@@ -1201,7 +1201,7 @@ impl<S: Sessions> Player<S> {
 
     /// `[player] runs = "queued"`: runs the oldest waiting `dashboard test`
     /// request (one per tick, so runs never overlap) and writes its result
-    /// for the agent to read. Never a strike, an event or a hub record.
+    /// for the foreman to read. Never a strike, an event or a hub record.
     fn serve_queue(&mut self) -> Result<(), String> {
         if !self.queued() {
             return Ok(());
@@ -1247,9 +1247,9 @@ impl<S: Sessions> Player<S> {
     /// from this tick's report, then diffs every task's status against
     /// `self.last` to emit `Tested`/`Escalated`/`Ready`/`Accepted`/
     /// `Retired`, and reports each dead session once per launch
-    /// (`SessionDied`/`AgentDied`, `report_death`) and each live one idle
+    /// (`SessionDied`/`ForemanDied`, `report_death`) and each live one idle
     /// while it owes work once per stop or stale screen (`SessionIdle`/
-    /// `AgentIdle`, `report_idle`). The persisted state (and
+    /// `ForemanIdle`, `report_idle`). The persisted state (and
     /// the "first run" silence) is what makes this idempotent across player
     /// restarts.
     fn emit_events(&mut self, report: &TickReport) -> Result<(), String> {
@@ -1300,17 +1300,17 @@ impl<S: Sessions> Player<S> {
             let slug = (slug != "_main").then_some(slug.as_str());
             events::append(&self.home, EventKind::SuiteSlow, slug, msg)?;
         }
-        for slug in &report.agents_launched {
-            let session = state::tmux_session_name(&self.project, &state::agent_key(slug));
+        for slug in &report.foremen_launched {
+            let session = state::tmux_session_name(&self.project, &state::foreman_key(slug));
             events::append(
                 &self.home,
-                EventKind::AgentLaunched,
+                EventKind::ForemanLaunched,
                 Some(slug),
-                &format!("task agent launched; watch it: tmux attach -t {session}"),
+                &format!("foreman launched; watch it: tmux attach -t {session}"),
             )?;
         }
-        for (slug, r) in &report.agent_reports {
-            events::append(&self.home, EventKind::AgentReport, Some(slug), &r.text)?;
+        for (slug, r) in &report.foreman_reports {
+            events::append(&self.home, EventKind::ForemanReport, Some(slug), &r.text)?;
         }
 
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
@@ -1319,19 +1319,19 @@ impl<S: Sessions> Player<S> {
             let prev = self.last.get(&task.slug).copied();
             next.insert(task.slug.clone(), task.status);
 
-            // A task agent's liveness is tracked under its own key.
+            // A foreman's liveness is tracked under its own key.
             let finished = matches!(
                 task.status,
                 Status::Accepted | Status::Retired | Status::Explored
             );
-            if let Some(agent) = &task.agent {
+            if let Some(foreman) = &task.foreman {
                 self.report_death(
-                    &state::agent_key(&task.slug),
-                    agent.alive,
+                    &state::foreman_key(&task.slug),
+                    foreman.alive,
                     !finished,
-                    EventKind::AgentDied,
+                    EventKind::ForemanDied,
                     &task.slug,
-                    &format!("task/{}'s task agent session died", task.slug),
+                    &format!("task/{}'s foreman session died", task.slug),
                 )?;
             }
 
@@ -1350,7 +1350,7 @@ impl<S: Sessions> Player<S> {
             )?;
             let idle_after = hub_state.roadmap.player.idle_after;
             self.report_idle(task, false, idle_after)?;
-            if task.agent.is_some() {
+            if task.foreman.is_some() {
                 self.report_idle(task, true, idle_after)?;
             }
 
@@ -1358,7 +1358,7 @@ impl<S: Sessions> Player<S> {
                 continue;
             }
 
-            let managed = state::task_agent_managed(&hub_state.roadmap, &task.config);
+            let managed = state::foreman_managed(&hub_state.roadmap, &task.config);
             let left_escalation = prev == Some(Status::Escalated)
                 && !matches!(
                     task.status,
@@ -1471,7 +1471,7 @@ impl<S: Sessions> Player<S> {
         record_launch(&self.home, key)
     }
 
-    /// Every message into a session goes through here: the agent resumes
+    /// Every message into a session goes through here: the foreman resumes
     /// on it, so whatever stop it sat at is answered (`clear_stop`) before
     /// the paste. On disk, since `dashboard ask` runs in its own process.
     fn relay(&mut self, key: &str, text: &str) {
@@ -1482,14 +1482,14 @@ impl<S: Sessions> Player<S> {
         self.sessions.send(key, text);
     }
 
-    /// Syncs `slug`'s worker tree (or, with `agent`, its task agent's) by
+    /// Syncs `slug`'s worker tree (or, with `foreman`, its foreman's) by
     /// `how` (`sync_tree`) and renders what the message about to be pasted
     /// says of it: the tree is at its new tip, or the command to run.
-    /// Called only at a step boundary, right before that message: the agent
+    /// Called only at a step boundary, right before that message: the foreman
     /// sits waiting for it.
-    fn sync_text(&self, prompts: &Prompts, agent: bool, slug: &str, how: TreeSync) -> String {
-        let (section, dir, branch) = if agent {
-            ("task-agent", paths::agent_clone(&self.director, slug), format!("agent/{slug}"))
+    fn sync_text(&self, prompts: &Prompts, foreman: bool, slug: &str, how: TreeSync) -> String {
+        let (section, dir, branch) = if foreman {
+            ("foreman", paths::foreman_clone(&self.director, slug), format!("foreman/{slug}"))
         } else {
             ("worker", paths::worker_clone(&self.director, slug), format!("task/{slug}"))
         };
@@ -1502,8 +1502,8 @@ impl<S: Sessions> Player<S> {
 
     /// The git dir of session `key`'s worktree, if it has one.
     fn session_git_dir(&self, key: &str) -> Option<PathBuf> {
-        let dir = match key.strip_suffix("_agent") {
-            Some(slug) => paths::agent_clone(&self.director, slug),
+        let dir = match key.strip_suffix("_foreman") {
+            Some(slug) => paths::foreman_clone(&self.director, slug),
             None => paths::worker_clone(&self.director, key),
         };
         if !dir.exists() {
@@ -1512,20 +1512,20 @@ impl<S: Sessions> Player<S> {
         Self::git_dir(&dir).ok()
     }
 
-    /// Whether `task`'s worker (or, with `agent`, its task agent) owes the
+    /// Whether `task`'s worker (or, with `foreman`, its foreman) owes the
     /// hub something right now, i.e. nobody but that agent is holding the
     /// task up, so its sitting idle is worth reporting. The worker: pinned
     /// (launched), `posted`/`in_progress`/`in_revision`, and no finish held
     /// on `main`'s impure checks — a finish, block or contest moves the task
-    /// past these. A task agent: launched, the task `staged` (it owes the
+    /// past these. A foreman: launched, the task `staged` (it owes the
     /// post), `tested` (a review) or `contested` (a reply), and no report
     /// collected since its last launch or message (`REPORTED_FILE` in
     /// `git_dir`, its worktree's git dir) — a report hands the turn to the
     /// director. A commit of its own moves the task on; a rejected one is
     /// relayed, which owes the fix. Liveness is the caller's business.
-    pub fn owes_work(&self, task: &state::TaskState, agent: bool, git_dir: &Path) -> bool {
-        if agent {
-            task.agent.is_some()
+    pub fn owes_work(&self, task: &state::TaskState, foreman: bool, git_dir: &Path) -> bool {
+        if foreman {
+            task.foreman.is_some()
                 && matches!(
                     task.status,
                     Status::Staged | Status::Tested | Status::Contested
@@ -1543,7 +1543,7 @@ impl<S: Sessions> Player<S> {
     /// Reports a live session idle while it `owes_work`: the director is
     /// the only one who can get it going again. Two ways, one event kind:
     /// sitting at a stop (its `Stop`/`StopFailure` hook's marker), once per
-    /// stop; or, for any agent, a screen unchanged for `idle_after` seconds
+    /// stop; or, for any foreman, a screen unchanged for `idle_after` seconds
     /// (`watch_pane`: hung, or on a dialog), once per unchanged screen. A
     /// stop covers its whole wait: no stale report while the marker is
     /// there, and a stop on a screen already reported stale isn't reported
@@ -1553,12 +1553,12 @@ impl<S: Sessions> Player<S> {
     fn report_idle(
         &mut self,
         task: &state::TaskState,
-        agent: bool,
+        foreman: bool,
         idle_after: u64,
     ) -> Result<(), String> {
-        let (key, alive) = if agent {
-            let alive = task.agent.as_ref().is_some_and(|a| a.alive);
-            (state::agent_key(&task.slug), alive)
+        let (key, alive) = if foreman {
+            let alive = task.foreman.as_ref().is_some_and(|a| a.alive);
+            (state::foreman_key(&task.slug), alive)
         } else {
             (task.slug.clone(), self.sessions.alive(&task.slug))
         };
@@ -1567,7 +1567,7 @@ impl<S: Sessions> Player<S> {
             self.panes.remove(&key);
             return Ok(());
         };
-        let owes = self.owes_work(task, agent, &git_dir);
+        let owes = self.owes_work(task, foreman, &git_dir);
         let stale = if owes {
             self.watch_pane(&key, idle_after)
         } else {
@@ -1591,7 +1591,7 @@ impl<S: Sessions> Player<S> {
                 }
                 if stop.error {
                     "stopped on an API error (a usage limit or an overload?) and is waiting for input".to_string()
-                } else if agent {
+                } else if foreman {
                     format!(
                         "ended its turn without a commit or report while the task is {} and is waiting for input",
                         task.status.as_str()
@@ -1608,7 +1608,7 @@ impl<S: Sessions> Player<S> {
                 if let Some(seen) = self.panes.get_mut(&key) {
                     seen.told = true;
                 }
-                let owed = if agent {
+                let owed = if foreman {
                     format!("while the task is {}", task.status.as_str())
                 } else {
                     "while it owes a finish".to_string()
@@ -1620,10 +1620,10 @@ impl<S: Sessions> Player<S> {
             }
         };
         if !self.first_run {
-            let who = if agent { "task agent" } else { "worker" };
+            let who = if foreman { "foreman" } else { "worker" };
             let session = state::tmux_session_name(&self.project, &key);
-            let kind = if agent {
-                EventKind::AgentIdle
+            let kind = if foreman {
+                EventKind::ForemanIdle
             } else {
                 EventKind::SessionIdle
             };
@@ -1808,7 +1808,7 @@ impl<S: Sessions> Player<S> {
     }
 
     /// Exports main's Lean architecture into the hub's cache once per tree,
-    /// so pins and the task agent's path allowance read it even when this
+    /// so pins and the foreman's path allowance read it even when this
     /// player never imported main (a hub `init` made from one).
     fn ensure_arch(&mut self, report: &mut TickReport) {
         let Some(main) = self.hub.rev_parse("refs/heads/main") else { return };
@@ -2306,7 +2306,7 @@ impl<S: Sessions> Player<S> {
                 let has_prompt = self.hub.blob_hash(candidate, &prompt_path).is_some();
                 if has_prompt && verdict(Move::Post) == Some(Verdict::Reject(Reason::Ownership)) {
                     let msg = format!(
-                        "task/{slug}'s post is its task agent's (spec §17), not the director's; with `[player] task_agent_cmd = \"\"` the director posts itself"
+                        "task/{slug}'s post is its foreman's (spec §17), not the director's; with `[player] foreman_cmd = \"\"` the director posts itself"
                     );
                     return self.reject(slug, candidate, Reason::Ownership, msg, report);
                 }
@@ -2325,7 +2325,7 @@ impl<S: Sessions> Player<S> {
                 if diffs.len() == 1 && diffs[0].1 == task_toml_path {
                     if let Some(Verdict::Reject(reason)) = verdict(Move::Replan) {
                         let msg = format!(
-                            "{}: task/{slug}'s task agent is already running on this plan (its prompt was written at launch): retire the task to change it",
+                            "{}: task/{slug}'s foreman is already running on this plan (its prompt was written at launch): retire the task to change it",
                             reason.as_str()
                         );
                         return self.reject(slug, candidate, reason, msg, report);
@@ -2370,7 +2370,7 @@ impl<S: Sessions> Player<S> {
                 ),
                 Some(Verdict::Reject(reason)) => {
                     let msg = format!(
-                        "task/{slug}'s send-backs are its task agent's (spec §17), not the director's: accept, or ask it (`dashboard ask {slug}`)"
+                        "task/{slug}'s send-backs are its foreman's (spec §17), not the director's: accept, or ask it (`dashboard ask {slug}`)"
                     );
                     self.reject(slug, candidate, reason, msg, report)
                 }
@@ -2388,7 +2388,7 @@ impl<S: Sessions> Player<S> {
                 ),
                 Some(Verdict::Reject(reason)) => {
                     let msg = format!(
-                        "task/{slug}'s contest is its task agent's to answer (spec §18), not the director's: ask it (`dashboard ask {slug}`)"
+                        "task/{slug}'s contest is its foreman's to answer (spec §18), not the director's: ask it (`dashboard ask {slug}`)"
                     );
                     self.reject(slug, candidate, reason, msg, report)
                 }
@@ -2440,7 +2440,7 @@ impl<S: Sessions> Player<S> {
         self.reject_by(Actor::Director, slug, candidate, reason, msg, report)
     }
 
-    /// `reject` for a commit by `actor`: a task agent's rejection is also
+    /// `reject` for a commit by `actor`: a foreman's rejection is also
     /// relayed to its session (spec §17), like a worker's; a director's
     /// never is.
     fn reject_by(
@@ -2454,16 +2454,16 @@ impl<S: Sessions> Player<S> {
     ) -> Result<(), String> {
         let rec = records::record_rejection(&self.hub, slug, candidate, reason, actor, &msg)?;
         report.rejected.push(rec);
-        if actor == Actor::TaskAgent {
+        if actor == Actor::Foreman {
             let prompts = self.prompts()?;
             let recovery = match reason {
                 Reason::History => self.sync_text(&prompts, true, slug, TreeSync::Reset),
-                _ => prompts.render("task-agent.recovery-other", &[("slug", slug)]),
+                _ => prompts.render("foreman.recovery-other", &[("slug", slug)]),
             };
             self.relay(
-                &state::agent_key(slug),
+                &state::foreman_key(slug),
                 &prompts.render(
-                    "task-agent.rejected",
+                    "foreman.rejected",
                     &[("message", &msg), ("recovery", &recovery)],
                 ),
             );
@@ -2523,10 +2523,10 @@ impl<S: Sessions> Player<S> {
 
     // ---- stage / unstage ----
 
-    /// A `stage:` releases a `ready` task: its task agent launches (a
+    /// A `stage:` releases a `ready` task: its foreman launches (a
     /// `ready` task never starts on its own). An `unstage:` puts a `staged`
-    /// one back, while no task agent exists yet. Neither moves anything but
-    /// the branch tip. A spike is never staged: it has no task agent.
+    /// one back, while no foreman exists yet. Neither moves anything but
+    /// the branch tip. A spike is never staged: it has no foreman.
     fn try_stage(
         &mut self,
         slug: &str,
@@ -2927,7 +2927,7 @@ impl<S: Sessions> Player<S> {
             return self.reject_by(actor, slug, candidate, Reason::Review, msg, report);
         }
 
-        let scope = self.agent_scope(slug, tip);
+        let scope = self.foreman_scope(slug, tip);
         for (_, path) in diffs {
             if path_under_test_paths(path, &scope) {
                 continue;
@@ -3019,7 +3019,7 @@ impl<S: Sessions> Player<S> {
     /// and remove checks from `architecture/Tests/<slug>.lean` and
     /// `<slug>.worker.lean` (with their `files`); the suite
     /// must still pass. The task stays `tested`, re-pinned at the trim, and
-    /// its task agent is asked for no new review.
+    /// its foreman is asked for no new review.
     fn try_trim(
         &mut self,
         slug: &str,
@@ -3094,13 +3094,13 @@ impl<S: Sessions> Player<S> {
             .push((hub_ref, candidate.to_string(), Transition::Trim));
         self.pin(slug, candidate, report)?;
         // Already reviewed: the trim is the review's outcome, not new work.
-        let agent = hub_state
+        let foreman = hub_state
             .tasks
             .iter()
             .find(|t| t.slug == slug)
-            .is_some_and(|t| t.agent.is_some());
-        if agent && records::agent_asked(&self.hub, slug).as_deref() == Some(tip) {
-            records::set_agent_asked(&self.hub, slug, candidate)?;
+            .is_some_and(|t| t.foreman.is_some());
+        if foreman && records::foreman_asked(&self.hub, slug).as_deref() == Some(tip) {
+            records::set_foreman_asked(&self.hub, slug, candidate)?;
         }
         Ok(())
     }
@@ -3109,7 +3109,7 @@ impl<S: Sessions> Player<S> {
 
     /// A worker's `contest:` marker: a test it must pass is wrong. Like a
     /// block it must be a clean marker on the hub tip, but it doesn't
-    /// escalate: the task is `contested` until the task agent (or the
+    /// escalate: the task is `contested` until the foreman (or the
     /// director) replies. A contest beyond `max_contest_rounds` escalates
     /// instead of importing, as a send-back beyond `max_review_rounds` does.
     fn try_contest(
@@ -3169,7 +3169,7 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
-    /// The reply to a contest, by the task agent or (task agents off) the
+    /// The reply to a contest, by the foreman or (foremen off) the
     /// director: one commit adding `tasks/<slug>/contests/c<N>.md` and
     /// optionally fixed tests, nothing else. No suite requirement, and no
     /// review round spent: the reply may keep the test and explain it. The
@@ -3195,7 +3195,7 @@ impl<S: Sessions> Player<S> {
             let msg = format!("ownership: task/{slug} is contested: the reply must add {expected}");
             return self.reject_by(actor, slug, candidate, Reason::Ownership, msg, report);
         }
-        let scope = self.agent_scope(slug, tip);
+        let scope = self.foreman_scope(slug, tip);
         if let Some((_, path)) = diffs.iter().find(|(_, p)| !path_under_test_paths(p, &scope)) {
             let msg = format!(
                 "ownership: task/{slug}: a contest reply may only add the reply and fix tests, not {path:?}"
@@ -3260,7 +3260,7 @@ impl<S: Sessions> Player<S> {
     /// `candidate`, every check of the fixture's users that passes at `tip`
     /// must still pass. So a new failing test beside a new scenario, or a
     /// worker's half-done code, never counts against it. The worker reads a
-    /// fixture pinned, so a fixture the task agent breaks would cost the
+    /// fixture pinned, so a fixture the foreman breaks would cost the
     /// worker `suite` strikes.
     fn fixture_guard(&self, slug: &str, tip: &str, candidate: &str) -> Result<(), String> {
         let Some(e) = records::exported_at(&self.hub, candidate, Some(self.runner.exporter()))? else { return Ok(()) };
@@ -4351,7 +4351,7 @@ impl<S: Sessions> Player<S> {
 
         let clone_dir = paths::worker_clone(&self.director, slug);
         if clone_dir.exists() {
-            report.errors.push(format!("launch: task/{slug}: {} already exists — refusing to touch a leftover agent clone (spec §5)", clone_dir.display()));
+            report.errors.push(format!("launch: task/{slug}: {} already exists — refusing to touch a leftover foreman clone (spec §5)", clone_dir.display()));
             return Ok(());
         }
         if let Err(e) = self.create_worker_clone(slug, tip, &clone_dir) {
@@ -4460,7 +4460,7 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
-    /// `create_worker_clone`'s mechanics for any agent: a worktree of the
+    /// `create_worker_clone`'s mechanics for any foreman: a worktree of the
     /// shared workspace at `clone_dir`, on the local branch `branch`, started
     /// at the hub's `task/<slug>`; with `sparse`, a sparse checkout of those
     /// patterns from the start (non-cone, per worktree).
@@ -4551,21 +4551,21 @@ impl<S: Sessions> Player<S> {
     }
 
     /// Ends every session a finished task (accepted, retired, concluded) still
-    /// has, its worker's and its task agent's (spec §17), and removes both
+    /// has, its worker's and its foreman's (spec §17), and removes both
     /// worktrees.
     fn end_task_sessions(&mut self, slug: &str) {
         self.sessions.kill(slug);
         self.cleanup_worker_clone(slug);
-        if records::agent_launched(&self.hub, slug) {
-            self.sessions.kill(&state::agent_key(slug));
+        if records::foreman_launched(&self.hub, slug) {
+            self.sessions.kill(&state::foreman_key(slug));
             self.remove_worktree(
-                &paths::agent_clone(&self.director, slug),
-                &format!("agent/{slug}"),
+                &paths::foreman_clone(&self.director, slug),
+                &format!("foreman/{slug}"),
             );
         }
     }
 
-    /// `cleanup_worker_clone`'s mechanics for any agent's worktree and its
+    /// `cleanup_worker_clone`'s mechanics for any foreman's worktree and its
     /// local branch.
     fn remove_worktree(&self, clone_dir: &Path, branch: &str) {
         if !clone_dir.exists() {
@@ -4714,8 +4714,8 @@ impl<S: Sessions> Player<S> {
         records::record_relaunch(&self.hub, &task.tip, false)
     }
 
-    /// `[limits] max_relaunches`: `task`'s worker (or, with `agent`, its
-    /// task agent) may be relaunched that many times since its last
+    /// `[limits] max_relaunches`: `task`'s worker (or, with `foreman`, its
+    /// foreman) may be relaunched that many times since its last
     /// progress (`records::relaunch_count`, at the task tip). One more is
     /// refused and escalates the task instead (unless it already is), the
     /// ordinary way: an escalation record at the tip. Unlike any other
@@ -4724,18 +4724,18 @@ impl<S: Sessions> Player<S> {
     fn check_relaunch_limit(
         &self,
         task: &state::TaskState,
-        agent: bool,
+        foreman: bool,
         limit: u32,
     ) -> Result<(), String> {
-        let count = if agent {
-            task.agent.as_ref().map_or(0, |a| a.relaunches)
+        let count = if foreman {
+            task.foreman.as_ref().map_or(0, |a| a.relaunches)
         } else {
             task.relaunches
         };
         if count < limit {
             return Ok(());
         }
-        let who = if agent { "task agent" } else { "worker" };
+        let who = if foreman { "foreman" } else { "worker" };
         let slug = &task.slug;
         let outcome = if task.status == Status::Escalated {
             "the task is already escalated".to_string()
@@ -4743,17 +4743,17 @@ impl<S: Sessions> Player<S> {
             let cause = format!(
                 "relaunch limit ({limit}) reached: the {who} was relaunched {count} times since its last progress and died again"
             );
-            records::record_relaunch_escalation(&self.hub, slug, &task.tip, &cause, agent)?;
+            records::record_relaunch_escalation(&self.hub, slug, &task.tip, &cause, foreman)?;
             "the task is escalated to the operator instead".to_string()
         };
-        let flag = if agent { " --agent" } else { "" };
+        let flag = if foreman { " --foreman" } else { "" };
         Err(format!(
             "relaunch: task/{slug}'s {who} was already relaunched {count} times since its last progress ([limits] max_relaunches = {limit}) — not relaunched; {outcome} (once the operator has fixed what keeps killing it: dashboard relaunch {slug}{flag} --reset; or retire, then replan)"
         ))
     }
 
     /// `dashboard relaunch --reset`: clears `slug`'s relaunch-limit
-    /// escalation for its worker (or, with `agent`, its task agent), starts
+    /// escalation for its worker (or, with `foreman`, its foreman), starts
     /// that session's relaunch count over and relaunches it. The cap mostly
     /// catches the environment (a bad `agent_cmd`, an expired login, a
     /// dialog, a usage limit), which the operator can fix; every other
@@ -4761,9 +4761,9 @@ impl<S: Sessions> Player<S> {
     /// escalation cause is that session's relaunch limit, or while the
     /// session is alive. The escalation is kept as evidence
     /// (`records::clear_escalation`).
-    pub fn reset_relaunch(&mut self, slug: &str, agent: bool) -> Result<(), String> {
-        let (key, who) = if agent {
-            (state::agent_key(slug), "task agent")
+    pub fn reset_relaunch(&mut self, slug: &str, foreman: bool) -> Result<(), String> {
+        let (key, who) = if foreman {
+            (state::foreman_key(slug), "foreman")
         } else {
             (slug.to_string(), "session")
         };
@@ -4789,12 +4789,12 @@ impl<S: Sessions> Player<S> {
             .filter(|r| r.cause == cause)
             .and_then(|r| r.relaunch_session());
         match session {
-            Some(s) if s == agent => {}
+            Some(s) if s == foreman => {}
             Some(s) => {
-                let flag = if s { " --agent" } else { "" };
+                let flag = if s { " --foreman" } else { "" };
                 return Err(format!(
                     "relaunch --reset: task/{slug} is escalated for {cause}; that's the {}'s relaunch limit: dashboard relaunch {slug}{flag} --reset",
-                    if s { "task agent" } else { "worker" }
+                    if s { "foreman" } else { "worker" }
                 ));
             }
             None => {
@@ -4803,12 +4803,12 @@ impl<S: Sessions> Player<S> {
                 ));
             }
         }
-        records::clear_escalation(&self.hub, slug, agent)
+        records::clear_escalation(&self.hub, slug, foreman)
             .map_err(|e| format!("relaunch --reset: {e}"))?;
-        records::record_relaunch_reset(&self.hub, &task.tip, agent)
+        records::record_relaunch_reset(&self.hub, &task.tip, foreman)
             .map_err(|e| format!("relaunch --reset: escalation cleared, but {e}"))?;
-        let relaunched = if agent {
-            self.relaunch_agent(slug)
+        let relaunched = if foreman {
+            self.relaunch_foreman(slug)
         } else {
             self.relaunch(slug)
         };
@@ -5288,17 +5288,17 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
-    // ---- task agents (spec §17) ----
+    // ---- foremen (spec §17) ----
 
-    /// Every live task with a task agent: fetch its `agent/<slug>` and
-    /// validate what's new there as the task agent's post or send-back.
-    fn import_task_agents(&mut self, report: &mut TickReport) -> Result<(), String> {
+    /// Every live task with a foreman: fetch its `foreman/<slug>` and
+    /// validate what's new there as the foreman's post or send-back.
+    fn import_foremen(&mut self, report: &mut TickReport) -> Result<(), String> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
         let candidates: Vec<(String, String)> = hub_state
             .tasks
             .iter()
             .filter(|t| {
-                t.agent.is_some()
+                t.foreman.is_some()
                     && !matches!(
                         t.status,
                         Status::Accepted | Status::Retired | Status::Explored
@@ -5307,21 +5307,21 @@ impl<S: Sessions> Player<S> {
             .map(|t| (t.slug.clone(), t.tip.clone()))
             .collect();
         for (slug, hub_tip) in candidates {
-            let clone_dir = paths::agent_clone(&self.director, &slug);
+            let clone_dir = paths::foreman_clone(&self.director, &slug);
             if clone_dir.exists() {
-                self.import_task_agent(&slug, &hub_tip, &clone_dir, report)?;
+                self.import_foreman(&slug, &hub_tip, &clone_dir, report)?;
             }
         }
         Ok(())
     }
 
-    /// `import_worker`'s shape for a task agent's clone. One difference: the
+    /// `import_worker`'s shape for a foreman's clone. One difference: the
     /// hub's task branch can move under a commit the player hasn't imported
     /// yet (`main` merged into a ready task, a replan). That isn't the
-    /// agent's doing, so it's asked to rebase, once per commit, with no
+    /// foreman's doing, so it's asked to rebase, once per commit, with no
     /// strike. Rewriting a commit the player already imported from it is
     /// `history`, as for anyone.
-    fn import_task_agent(
+    fn import_foreman(
         &mut self,
         slug: &str,
         hub_tip: &str,
@@ -5329,14 +5329,14 @@ impl<S: Sessions> Player<S> {
         report: &mut TickReport,
     ) -> Result<(), String> {
         let clone_str = path_str(clone_dir)?;
-        let incoming_ref = format!("refs/incoming/agent/{slug}");
+        let incoming_ref = format!("refs/incoming/foreman/{slug}");
         if self
             .hub
             .run(&[
                 "fetch",
                 "--no-tags",
                 clone_str,
-                &format!("+refs/heads/agent/{slug}:{incoming_ref}"),
+                &format!("+refs/heads/foreman/{slug}:{incoming_ref}"),
             ])
             .is_err()
         {
@@ -5353,9 +5353,9 @@ impl<S: Sessions> Player<S> {
                 .hub
                 .run(&["merge-base", hub_tip, &incoming])
                 .unwrap_or_default();
-            // Only this task's own agent commits count, walked along the
+            // Only this task's own foreman commits count, walked along the
             // branch's first parents: a `main` merged in brings other tasks'
-            // task-agent commits with it, and those aren't this agent's.
+            // foreman commits with it, and those aren't this foreman's.
             let rewrote_imported = base.is_empty()
                 || self
                     .hub
@@ -5363,15 +5363,15 @@ impl<S: Sessions> Player<S> {
                     .iter()
                     .any(|c| {
                         records::import_note(&self.hub, c).is_some_and(|n| {
-                            n.actor == Actor::TaskAgent && n.slug.as_deref() == Some(slug)
+                            n.actor == Actor::Foreman && n.slug.as_deref() == Some(slug)
                         })
                     });
             if rewrote_imported {
                 let msg = format!(
-                    "history: agent/{slug} diverged from the hub: a commit the player imported from you was rewritten"
+                    "history: foreman/{slug} diverged from the hub: a commit the player imported from you was rewritten"
                 );
                 return self.reject_by(
-                    Actor::TaskAgent,
+                    Actor::Foreman,
                     slug,
                     &incoming,
                     Reason::History,
@@ -5379,12 +5379,12 @@ impl<S: Sessions> Player<S> {
                     report,
                 );
             }
-            if self.agent_rebase_told.get(slug) != Some(&incoming) {
+            if self.foreman_rebase_told.get(slug) != Some(&incoming) {
                 let prompts = self.prompts()?;
                 let sync = self.sync_text(&prompts, true, slug, TreeSync::Rebase);
-                let text = prompts.render("task-agent.rebase", &[("slug", slug), ("sync", &sync)]);
-                self.relay(&state::agent_key(slug), &text);
-                self.agent_rebase_told.insert(slug.to_string(), incoming);
+                let text = prompts.render("foreman.rebase", &[("slug", slug), ("sync", &sync)]);
+                self.relay(&state::foreman_key(slug), &text);
+                self.foreman_rebase_told.insert(slug.to_string(), incoming);
             }
             return Ok(());
         }
@@ -5395,10 +5395,10 @@ impl<S: Sessions> Player<S> {
             .any(|c| self.hub.parents(c).len() > 1)
         {
             let msg = format!(
-                "history: agent/{slug} contains a merge commit; only the player creates merges"
+                "history: foreman/{slug} contains a merge commit; only the player creates merges"
             );
             return self.reject_by(
-                Actor::TaskAgent,
+                Actor::Foreman,
                 slug,
                 &incoming,
                 Reason::History,
@@ -5406,15 +5406,15 @@ impl<S: Sessions> Player<S> {
                 report,
             );
         }
-        self.try_agent_commit(slug, hub_tip, &incoming, report)
+        self.try_foreman_commit(slug, hub_tip, &incoming, report)
     }
 
-    /// The newest commit a task agent made, validated as one cumulative
+    /// The newest commit a foreman made, validated as one cumulative
     /// change from the hub tip: its post while the task is staged, a
     /// send-back while it's tested. Either may touch only tests, the suite
     /// files and `tasks/<slug>/` (all but `task.toml`, the director's plan),
     /// and it never commits a marker (spec §17).
-    fn try_agent_commit(
+    fn try_foreman_commit(
         &mut self,
         slug: &str,
         tip: &str,
@@ -5433,10 +5433,10 @@ impl<S: Sessions> Player<S> {
 
         if self.hub.is_empty_commit(candidate) {
             let msg = format!(
-                "ownership: task/{slug}: a task agent never commits a marker; accept:/retire: are the director's, so recommend accept with `dashboard report accept` instead"
+                "ownership: task/{slug}: a foreman never commits a marker; accept:/retire: are the director's, so recommend accept with `dashboard report accept` instead"
             );
             return self.reject_by(
-                Actor::TaskAgent,
+                Actor::Foreman,
                 slug,
                 candidate,
                 Reason::Ownership,
@@ -5445,9 +5445,9 @@ impl<S: Sessions> Player<S> {
             );
         }
         let diffs = self.hub.diff_names(tip, candidate);
-        if let Err(msg) = self.agent_paths_ok(slug, tip, candidate, &diffs) {
+        if let Err(msg) = self.foreman_paths_ok(slug, tip, candidate, &diffs) {
             return self.reject_by(
-                Actor::TaskAgent,
+                Actor::Foreman,
                 slug,
                 candidate,
                 Reason::Ownership,
@@ -5463,7 +5463,7 @@ impl<S: Sessions> Player<S> {
             _ => Move::Post,
         };
         let verdict = fsm::decide(
-            Actor::TaskAgent,
+            Actor::Foreman,
             mv,
             self.fsm_ctx(&hub_state, slug).unwrap(),
         );
@@ -5478,7 +5478,7 @@ impl<S: Sessions> Player<S> {
                         "ownership: task/{slug} isn't posted yet and this commit adds no tasks/{slug}/prompt.md: your only commit now is the post"
                     );
                     return self.reject_by(
-                        Actor::TaskAgent,
+                        Actor::Foreman,
                         slug,
                         candidate,
                         Reason::Ownership,
@@ -5492,7 +5492,7 @@ impl<S: Sessions> Player<S> {
                     candidate,
                     status,
                     &hub_state,
-                    Actor::TaskAgent,
+                    Actor::Foreman,
                     report,
                 )?;
                 "post"
@@ -5504,7 +5504,7 @@ impl<S: Sessions> Player<S> {
                     candidate,
                     &diffs,
                     &hub_state,
-                    Actor::TaskAgent,
+                    Actor::Foreman,
                     report,
                 )?;
                 "send-back"
@@ -5516,7 +5516,7 @@ impl<S: Sessions> Player<S> {
                     candidate,
                     &diffs,
                     &hub_state,
-                    Actor::TaskAgent,
+                    Actor::Foreman,
                     report,
                 )?;
                 "contest reply"
@@ -5524,25 +5524,25 @@ impl<S: Sessions> Player<S> {
             (verdict, _) => {
                 let other = status;
                 if verdict == Verdict::Hold {
-                    // Not the agent's doing: the plan moved the task off
+                    // Not the foreman's doing: the plan moved the task off
                     // `staged`. Leave the commit unimported, tell it once.
-                    if self.agent_hold_told.get(slug) != Some(&candidate.to_string()) {
+                    if self.foreman_hold_told.get(slug) != Some(&candidate.to_string()) {
                         let text = self.prompts()?.render(
-                            "task-agent.hold",
+                            "foreman.hold",
                             &[("slug", slug), ("status", other.as_str())],
                         );
-                        self.relay(&state::agent_key(slug), &text);
-                        self.agent_hold_told
+                        self.relay(&state::foreman_key(slug), &text);
+                        self.foreman_hold_told
                             .insert(slug.to_string(), candidate.to_string());
                     }
                     return Ok(());
                 }
                 let msg = format!(
-                    "ownership: task/{slug} is {}: there is nothing for its task agent to commit now",
+                    "ownership: task/{slug} is {}: there is nothing for its foreman to commit now",
                     other.as_str()
                 );
                 return self.reject_by(
-                    Actor::TaskAgent,
+                    Actor::Foreman,
                     slug,
                     candidate,
                     Reason::Ownership,
@@ -5552,12 +5552,12 @@ impl<S: Sessions> Player<S> {
             }
         };
 
-        let key = state::agent_key(slug);
+        let key = state::foreman_key(slug);
         if report.imported.iter().any(|(_, sha, _)| sha == candidate) {
             let (template, name, verdict) = match step {
-                "post" => ("task-agent.imported-post", "post".to_string(), report::Verdict::Posted),
-                "send-back" => ("task-agent.imported-send-back", review_step, report::Verdict::SentBack),
-                _ => ("task-agent.imported-reply", contest_step, report::Verdict::Replied),
+                "post" => ("foreman.imported-post", "post".to_string(), report::Verdict::Posted),
+                "send-back" => ("foreman.imported-send-back", review_step, report::Verdict::SentBack),
+                _ => ("foreman.imported-reply", contest_step, report::Verdict::Replied),
             };
             if let Some(git_dir) = self.session_git_dir(&key) {
                 report::set_step(&git_dir, &report::Owed::imported(name, candidate, verdict))?;
@@ -5569,31 +5569,31 @@ impl<S: Sessions> Player<S> {
         } else if let Some((_, cause)) = report.escalated.iter().find(|(s, _)| s == slug) {
             let text = self
                 .prompts()?
-                .render("task-agent.escalated", &[("slug", slug), ("cause", cause)]);
+                .render("foreman.escalated", &[("slug", slug), ("cause", cause)]);
             self.relay(&key, &text);
         }
         Ok(())
     }
 
-    /// Where a task agent (or the director's send-back and contest reply)
+    /// Where a foreman (or the director's send-back and contest reply)
     /// may write on `slug`, read at `tip` so a commit can't widen it for
-    /// itself (`records::agent_scope_at`).
-    fn agent_scope(&self, slug: &str, tip: &str) -> Vec<String> {
-        records::agent_scope_at(&self.hub, slug, tip, Some(self.runner.exporter()))
+    /// itself (`records::foreman_scope_at`).
+    fn foreman_scope(&self, slug: &str, tip: &str) -> Vec<String> {
+        records::foreman_scope_at(&self.hub, slug, tip, Some(self.runner.exporter()))
     }
 
-    /// Where a task agent may write (`agent_scope`), plus new files under
+    /// Where a foreman may write (`foreman_scope`), plus new files under
     /// the `files` its candidate declares in `Tests/<slug>.lean` (a test
     /// inside a module's paths, declared and written in one post); never
     /// `task.toml`, the director's plan.
-    fn agent_paths_ok(
+    fn foreman_paths_ok(
         &self,
         slug: &str,
         tip: &str,
         candidate: &str,
         diffs: &[(char, String)],
     ) -> Result<(), String> {
-        let scope = self.agent_scope(slug, tip);
+        let scope = self.foreman_scope(slug, tip);
         let declared: Vec<String> = records::suite_at(&self.hub, candidate, Some(self.runner.exporter()))
             .map(|s| s.from_file(&config::tests_file(slug)).iter().flat_map(|c| c.files.iter().cloned()).collect())
             .unwrap_or_default();
@@ -5633,7 +5633,7 @@ impl<S: Sessions> Player<S> {
             let added = (*status == 'A' && path_under_test_paths(path, &declared)) || path_under_test_paths(path, &skeleton);
             if !added && !path_under_test_paths(path, &scope) {
                 return Err(format!(
-                    "ownership: task/{slug}: a task agent writes its task's tests, the prompt, reviews and the APIs inside its modules, never {path:?}: the code is the worker's"
+                    "ownership: task/{slug}: a foreman writes its task's tests, the prompt, reviews and the APIs inside its modules, never {path:?}: the code is the worker's"
                 ));
             }
         }
@@ -5647,110 +5647,110 @@ impl<S: Sessions> Player<S> {
         Ok(())
     }
 
-    /// Launches a task agent for every agent-managed task that is ready (to
+    /// Launches a foreman for every foreman-managed task that is ready (to
     /// post it) or tested (to review it) and has none yet; asks a running one
     /// to review each newly tested tip; and collects every report a task
-    /// agent left (spec §17).
-    fn run_task_agents(&mut self, report: &mut TickReport) -> Result<(), String> {
+    /// foreman left (spec §17).
+    fn run_foremen(&mut self, report: &mut TickReport) -> Result<(), String> {
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
         for task in &hub_state.tasks {
             let step = match task.status {
-                Status::Staged => Some(AgentStep::Post),
-                Status::Tested => Some(AgentStep::Review),
-                Status::Contested => Some(AgentStep::Contest),
+                Status::Staged => Some(ForemanStep::Post),
+                Status::Tested => Some(ForemanStep::Review),
+                Status::Contested => Some(ForemanStep::Contest),
                 _ => None,
             };
             if let Some(step) =
-                step.filter(|_| state::task_agent_managed(&hub_state.roadmap, &task.config))
+                step.filter(|_| state::foreman_managed(&hub_state.roadmap, &task.config))
             {
-                if task.agent.is_none() {
-                    self.launch_task_agent(task, step, &hub_state.roadmap, report)?;
-                } else if step != AgentStep::Post
-                    && records::agent_asked(&self.hub, &task.slug).as_deref()
+                if task.foreman.is_none() {
+                    self.launch_foreman(task, step, &hub_state.roadmap, report)?;
+                } else if step != ForemanStep::Post
+                    && records::foreman_asked(&self.hub, &task.slug).as_deref()
                         != Some(task.tip.as_str())
                 {
-                    records::set_agent_asked(&self.hub, &task.slug, &task.tip)?;
+                    records::set_foreman_asked(&self.hub, &task.slug, &task.tip)?;
                     if let (Some(git_dir), Some(name)) = (
-                        self.session_git_dir(&state::agent_key(&task.slug)),
-                        agent_step_name(task, step),
+                        self.session_git_dir(&state::foreman_key(&task.slug)),
+                        foreman_step_name(task, step),
                     ) {
                         report::set_step(&git_dir, &report::Owed::asked(name))?;
                     }
                     let text =
-                        self.agent_step_text(&self.prompts()?, task, step, &hub_state.roadmap);
-                    self.relay(&state::agent_key(&task.slug), &text);
+                        self.foreman_step_text(&self.prompts()?, task, step, &hub_state.roadmap);
+                    self.relay(&state::foreman_key(&task.slug), &text);
                 }
             }
             if !matches!(
                 task.status,
                 Status::Accepted | Status::Retired | Status::Explored
             ) {
-                self.collect_agent_report(&task.slug, &task.tip, report)?;
+                self.collect_foreman_report(&task.slug, &task.tip, report)?;
             }
         }
         Ok(())
     }
 
-    fn launch_task_agent(
+    fn launch_foreman(
         &mut self,
         task: &state::TaskState,
-        step: AgentStep,
+        step: ForemanStep,
         roadmap: &RoadmapConfig,
         report: &mut TickReport,
     ) -> Result<(), String> {
         let slug = &task.slug;
         // Recorded first, so a launch that fails below is never retried
-        // every tick (as for workers; `dashboard relaunch --agent`).
-        records::set_agent_launched(&self.hub, slug, &task.tip)?;
-        if step != AgentStep::Post {
-            records::set_agent_asked(&self.hub, slug, &task.tip)?;
+        // every tick (as for workers; `dashboard relaunch --foreman`).
+        records::set_foreman_launched(&self.hub, slug, &task.tip)?;
+        if step != ForemanStep::Post {
+            records::set_foreman_asked(&self.hub, slug, &task.tip)?;
         }
 
-        let dir = paths::agent_clone(&self.director, slug);
+        let dir = paths::foreman_clone(&self.director, slug);
         if dir.exists() {
-            report.errors.push(format!("task agent: task/{slug}: {} already exists — refusing to touch a leftover agent clone", dir.display()));
+            report.errors.push(format!("foreman: task/{slug}: {} already exists — refusing to touch a leftover foreman clone", dir.display()));
             return Ok(());
         }
-        if let Err(e) = self.add_worktree(&format!("agent/{slug}"), slug, &dir, None) {
-            report.errors.push(format!("task agent: task/{slug}: {e}"));
+        if let Err(e) = self.add_worktree(&format!("foreman/{slug}"), slug, &dir, None) {
+            report.errors.push(format!("foreman: task/{slug}: {e}"));
             return Ok(());
         }
         let prompt_file = match Self::git_dir(&dir) {
             Ok(d) => d.join("dashboard-prompt.md"),
             Err(e) => {
-                report.errors.push(format!("task agent: task/{slug}: {e}"));
+                report.errors.push(format!("foreman: task/{slug}: {e}"));
                 return Ok(());
             }
         };
-        if let Err(e) = self.write_agent_prompt(task, step, roadmap, &dir, &prompt_file, false) {
-            report.errors.push(format!("task agent: task/{slug}: {e}"));
+        if let Err(e) = self.write_foreman_prompt(task, step, roadmap, &dir, &prompt_file, false) {
+            report.errors.push(format!("foreman: task/{slug}: {e}"));
             return Ok(());
         }
         match self.launch_session(
-            &state::agent_key(slug),
+            &state::foreman_key(slug),
             &dir,
-            &roadmap.player.task_agent_cmd,
+            &roadmap.player.foreman_cmd,
             &prompt_file,
         ) {
-            Ok(()) => report.agents_launched.push(slug.clone()),
-            Err(e) => report.errors.push(format!("task agent: task/{slug}: {e}")),
+            Ok(()) => report.foremen_launched.push(slug.clone()),
+            Err(e) => report.errors.push(format!("foreman: task/{slug}: {e}")),
         }
         Ok(())
     }
 
-    /// The task agent's prompt: the player's preamble (its role and rules,
+    /// The foreman's prompt: the player's preamble (its role and rules,
     /// the task, the report format), then the step it starts on.
-    fn write_agent_prompt(
+    fn write_foreman_prompt(
         &self,
         task: &state::TaskState,
-        step: AgentStep,
+        step: ForemanStep,
         roadmap: &RoadmapConfig,
         dir: &Path,
         prompt_file: &Path,
         relaunched: bool,
     ) -> Result<(), String> {
         let prompts = self.prompts()?;
-        if let Some(name) = agent_step_name(task, step) {
+        if let Some(name) = foreman_step_name(task, step) {
             report::set_step(&Self::git_dir(dir)?, &report::Owed::asked(name))?;
         }
         let slug = task.slug.as_str();
@@ -5775,7 +5775,7 @@ impl<S: Sessions> Player<S> {
             task.config.brief.trim()
         };
         let preamble = prompts.render(
-            "task-agent.preamble",
+            "foreman.preamble",
             &[
                 ("slug", slug),
                 ("project", &self.project),
@@ -5785,48 +5785,48 @@ impl<S: Sessions> Player<S> {
             ],
         );
         let relaunched =
-            relaunched.then(|| prompts.render("task-agent.relaunched", &[("slug", slug)]));
+            relaunched.then(|| prompts.render("foreman.relaunched", &[("slug", slug)]));
         let preamble = if roadmap.player.runs == config::Runs::Queued {
-            Prompts::with_block(&preamble, &prompts.render("task-agent.queued", &[]))
+            Prompts::with_block(&preamble, &prompts.render("foreman.queued", &[]))
         } else {
             preamble
         };
-        let text = prompts.agent_launch(
+        let text = prompts.foreman_launch(
             &preamble,
             relaunched.as_deref(),
-            &self.agent_step_text(&prompts, task, step, roadmap),
+            &self.foreman_step_text(&prompts, task, step, roadmap),
         );
         std::fs::write(prompt_file, text).map_err(|e| format!("{}: {e}", prompt_file.display()))
     }
 
-    /// What the task agent is asked to do now: the post, a review round, a
+    /// What the foreman is asked to do now: the post, a review round, a
     /// contest reply, or nothing until the player pastes a step.
     /// Its post, review and contest steps start from the task branch's tip:
     /// the player brings a clean worktree there first (`sync_text`).
-    fn agent_step_text(
+    fn foreman_step_text(
         &self,
         prompts: &Prompts,
         task: &state::TaskState,
-        step: AgentStep,
+        step: ForemanStep,
         roadmap: &RoadmapConfig,
     ) -> String {
         let slug = task.slug.as_str();
         let sync = || self.sync_text(prompts, true, slug, TreeSync::Forward);
         match step {
-            AgentStep::Post => {
+            ForemanStep::Post => {
                 let check = if task.config.kind == TaskKind::FlakyTestFix {
-                    prompts.render("task-agent.post-check-flaky", &[])
+                    prompts.render("foreman.post-check-flaky", &[])
                 } else if task.config.kind == TaskKind::TestSpeedup {
-                    prompts.render("task-agent.post-check-speedup", &[])
+                    prompts.render("foreman.post-check-speedup", &[])
                 } else {
-                    prompts.render("task-agent.post-check-task", &[("slug", slug)])
+                    prompts.render("foreman.post-check-task", &[("slug", slug)])
                 };
                 prompts.render(
-                    "task-agent.post",
+                    "foreman.post",
                     &[("slug", slug), ("sync", &sync()), ("check", &check)],
                 )
             }
-            AgentStep::Review => {
+            ForemanStep::Review => {
                 let round = task.review_round + 1;
                 let max = roadmap.limits.max_review_rounds;
                 let base = self
@@ -5834,17 +5834,17 @@ impl<S: Sessions> Player<S> {
                     .rev_parse(&format!("refs/dashboard/pins/{slug}"))
                     .unwrap_or_else(|| format!("origin/task/{slug}~1"));
                 let cap = if round > max {
-                    prompts.render("task-agent.review-cap-over", &[("max", &max.to_string())])
+                    prompts.render("foreman.review-cap-over", &[("max", &max.to_string())])
                 } else if round == max {
-                    prompts.render("task-agent.review-cap-last", &[])
+                    prompts.render("foreman.review-cap-last", &[])
                 } else {
                     String::new()
                 };
                 let notes = records::speedup_notes(&self.hub, &task.tip)
-                    .map(|n| prompts.render("task-agent.review-notes", &[("notes", &n)]))
+                    .map(|n| prompts.render("foreman.review-notes", &[("notes", &n)]))
                     .unwrap_or_default();
                 prompts.render(
-                    "task-agent.review",
+                    "foreman.review",
                     &[
                         ("round", &round.to_string()),
                         ("slug", slug),
@@ -5856,7 +5856,7 @@ impl<S: Sessions> Player<S> {
                     ],
                 )
             }
-            AgentStep::Contest => {
+            ForemanStep::Contest => {
                 let n = task.contest_round + 1;
                 let reason = task.contest.clone().unwrap_or_default();
                 let remaining = roadmap
@@ -5865,7 +5865,7 @@ impl<S: Sessions> Player<S> {
                     .saturating_sub(n)
                     .to_string();
                 prompts.render(
-                    "task-agent.contest",
+                    "foreman.contest",
                     &[
                         ("n", &n.to_string()),
                         ("slug", slug),
@@ -5875,23 +5875,23 @@ impl<S: Sessions> Player<S> {
                     ],
                 )
             }
-            AgentStep::Wait => prompts.render(
-                "task-agent.wait",
+            ForemanStep::Wait => prompts.render(
+                "foreman.wait",
                 &[("slug", slug), ("status", task.status.as_str())],
             ),
         }
     }
 
-    /// Takes the report a task agent filed with `dashboard report`
+    /// Takes the report a foreman filed with `dashboard report`
     /// (`report::take`), noting it on the task tip (spec §17) and reporting
-    /// it; a report no pending step allows is dropped and the agent told.
-    fn collect_agent_report(
+    /// it; a report no pending step allows is dropped and the foreman told.
+    fn collect_foreman_report(
         &mut self,
         slug: &str,
         tip: &str,
         report: &mut TickReport,
     ) -> Result<(), String> {
-        let key = state::agent_key(slug);
+        let key = state::foreman_key(slug);
         let Some(git_dir) = self.session_git_dir(&key) else {
             return Ok(());
         };
@@ -5901,38 +5901,38 @@ impl<S: Sessions> Player<S> {
             Some(Err(message)) => {
                 let text = self
                     .prompts()?
-                    .render("task-agent.report-dropped", &[("message", &message)]);
+                    .render("foreman.report-dropped", &[("message", &message)]);
                 self.relay(&key, &text);
                 return Ok(());
             }
         };
         // Its stop after this is the wait for the director (`owes_work`).
         let _ = std::fs::write(git_dir.join(REPORTED_FILE), "");
-        let rec = records::record_agent_report(
+        let rec = records::record_foreman_report(
             &self.hub,
             tip,
-            records::AgentReport {
+            records::ForemanReport {
                 verdict: collected.verdict.as_str().to_string(),
                 text: collected.text,
                 at: 0,
             },
         )?;
-        report.agent_reports.push((slug.to_string(), rec));
+        report.foreman_reports.push((slug.to_string(), rec));
         Ok(())
     }
 
-    /// Restarts `slug`'s dead task agent (`dashboard relaunch --agent`) in its
+    /// Restarts `slug`'s dead foreman (`dashboard relaunch --foreman`) in its
     /// existing clone, with a fresh prompt for where the task is now.
-    pub fn relaunch_agent(&mut self, slug: &str) -> Result<(), String> {
-        if !records::agent_launched(&self.hub, slug) {
+    pub fn relaunch_foreman(&mut self, slug: &str) -> Result<(), String> {
+        if !records::foreman_launched(&self.hub, slug) {
             return Err(format!(
-                "relaunch: task/{slug} has no task agent — one is launched automatically once the task is ready"
+                "relaunch: task/{slug} has no foreman — one is launched automatically once the task is ready"
             ));
         }
-        let key = state::agent_key(slug);
+        let key = state::foreman_key(slug);
         if self.sessions.alive(&key) {
             return Err(format!(
-                "relaunch: task/{slug}'s task agent is already alive"
+                "relaunch: task/{slug}'s foreman is already alive"
             ));
         }
         let hub_state = state::derive(&self.hub, &|s| self.sessions.alive(s))?;
@@ -5946,59 +5946,59 @@ impl<S: Sessions> Player<S> {
             Status::Accepted | Status::Retired | Status::Explored
         ) {
             return Err(format!(
-                "relaunch: task/{slug} is {} — its task agent is done",
+                "relaunch: task/{slug} is {} — its foreman is done",
                 task.status.as_str()
             ));
         }
-        if !hub_state.roadmap.player.task_agents_enabled() {
+        if !hub_state.roadmap.player.foremen_enabled() {
             return Err(
-                "relaunch: task agents are off (`[player] task_agent_cmd` is empty)".to_string(),
+                "relaunch: foremen are off (`[player] foreman_cmd` is empty)".to_string(),
             );
         }
-        let dir = paths::agent_clone(&self.director, slug);
+        let dir = paths::foreman_clone(&self.director, slug);
         if !dir.exists() {
             return Err(format!(
-                "relaunch: task/{slug}'s task agent clone {} is missing",
+                "relaunch: task/{slug}'s foreman clone {} is missing",
                 dir.display()
             ));
         }
         let step = match task.status {
-            Status::Pending | Status::Ready | Status::Staged | Status::Orphaned => AgentStep::Post,
-            Status::Tested => AgentStep::Review,
-            Status::Contested => AgentStep::Contest,
-            _ => AgentStep::Wait,
+            Status::Pending | Status::Ready | Status::Staged | Status::Orphaned => ForemanStep::Post,
+            Status::Tested => ForemanStep::Review,
+            Status::Contested => ForemanStep::Contest,
+            _ => ForemanStep::Wait,
         };
         self.check_relaunch_limit(task, true, hub_state.roadmap.limits.max_relaunches)?;
         let prompt_file = Self::git_dir(&dir)?.join("dashboard-prompt.md");
-        self.write_agent_prompt(task, step, &hub_state.roadmap, &dir, &prompt_file, true)?;
-        if step != AgentStep::Post && step != AgentStep::Wait {
-            records::set_agent_asked(&self.hub, slug, &task.tip)?;
+        self.write_foreman_prompt(task, step, &hub_state.roadmap, &dir, &prompt_file, true)?;
+        if step != ForemanStep::Post && step != ForemanStep::Wait {
+            records::set_foreman_asked(&self.hub, slug, &task.tip)?;
         }
         self.launch_session(
             &key,
             &dir,
-            &hub_state.roadmap.player.task_agent_cmd,
+            &hub_state.roadmap.player.foreman_cmd,
             &prompt_file,
         )?;
         records::record_relaunch(&self.hub, &task.tip, true)
     }
 
-    /// Pastes the director's `question` into `slug`'s task agent session
+    /// Pastes the director's `question` into `slug`'s foreman session
     /// (`dashboard ask`); the answer comes back as its next report.
     pub fn ask(&mut self, slug: &str, question: &str) -> Result<(), String> {
-        if !records::agent_launched(&self.hub, slug) {
-            return Err(format!("ask: task/{slug} has no task agent"));
+        if !records::foreman_launched(&self.hub, slug) {
+            return Err(format!("ask: task/{slug} has no foreman"));
         }
-        let key = state::agent_key(slug);
+        let key = state::foreman_key(slug);
         if !self.sessions.alive(&key) {
             return Err(format!(
-                "ask: task/{slug}'s task agent is dead — `dashboard relaunch {slug} --agent` first"
+                "ask: task/{slug}'s foreman is dead — `dashboard relaunch {slug} --foreman` first"
             ));
         }
-        report::set_question(&Self::git_dir(&paths::agent_clone(&self.director, slug))?)?;
+        report::set_question(&Self::git_dir(&paths::foreman_clone(&self.director, slug))?)?;
         let text = self
             .prompts()?
-            .render("task-agent.question", &[("question", question)]);
+            .render("foreman.question", &[("question", question)]);
         self.relay(&key, &text);
         Ok(())
     }
@@ -6129,7 +6129,7 @@ struct PaneSeen {
 /// A stable (FNV-1a) hash of a captured screen, persisted across restarts,
 /// ignoring trailing whitespace and blank lines (tmux pads the capture to
 /// the pane's height). Anything else that moves counts as output: a
-/// working agent's spinner or timer, but also an idle TUI's clock, which
+/// working foreman's spinner or timer, but also an idle TUI's clock, which
 /// keeps such a session from ever looking stale.
 fn pane_hash(screen: &str) -> u64 {
     let mut lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
@@ -6222,8 +6222,8 @@ fn record_launch(home: &Home, key: &str) -> Result<(), String> {
 /// either not director-actionable or already covered by the transition that
 /// caused them (e.g. `in_revision` is the director's own send-back).
 ///
-/// With `managed` (spec §17), `ready` and `tested` belong to the task agent,
-/// so the director hears `agent_launched` and `agent_report` instead.
+/// With `managed` (spec §17), `ready` and `tested` belong to the foreman,
+/// so the director hears `foreman_launched` and `foreman_report` instead.
 fn status_event(task: &state::TaskState, managed: bool) -> Option<(EventKind, String)> {
     match task.status {
         Status::Tested | Status::Contested if managed => None,
@@ -6234,7 +6234,7 @@ fn status_event(task: &state::TaskState, managed: bool) -> Option<(EventKind, St
         Status::Tested => Some((EventKind::Tested, "finish accepted — tests passed, awaiting director review".to_string())),
         Status::Escalated => Some((EventKind::Escalated, task.escalation.clone().unwrap_or_default())),
         Status::Ready if task.spike.is_some() => Some((EventKind::Ready, format!("spike task/{} is planned: post its question when the operator agrees", task.slug))),
-        Status::Ready if managed => Some((EventKind::Ready, format!("task/{}'s dependencies are all accepted and merged in; it waits for a `stage:` marker (`dashboard stage {}`) before its task agent starts", task.slug, task.slug))),
+        Status::Ready if managed => Some((EventKind::Ready, format!("task/{}'s dependencies are all accepted and merged in; it waits for a `stage:` marker (`dashboard stage {}`) before its foreman starts", task.slug, task.slug))),
         Status::Ready => Some((EventKind::Ready, format!("task/{}'s dependencies are all accepted and merged in", task.slug))),
         Status::Accepted => Some((EventKind::Accepted, format!("task/{} accepted and merged into main", task.slug))),
         Status::Explored => {
@@ -6321,9 +6321,9 @@ enum TreeKind {
     Full,
 }
 
-/// What a task agent is asked to do (spec §17).
+/// What a foreman is asked to do (spec §17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentStep {
+enum ForemanStep {
     Post,
     Review,
     /// Reply to the worker's contest (spec §18).
@@ -6333,13 +6333,13 @@ enum AgentStep {
 }
 
 /// The name a report gives `step` of `task` (`report::Owed::step`): what
-/// the agent is asked now. `Wait` asks nothing.
-fn agent_step_name(task: &state::TaskState, step: AgentStep) -> Option<String> {
+/// the foreman is asked now. `Wait` asks nothing.
+fn foreman_step_name(task: &state::TaskState, step: ForemanStep) -> Option<String> {
     match step {
-        AgentStep::Post => Some("post".to_string()),
-        AgentStep::Review => Some(format!("review r{}", task.review_round + 1)),
-        AgentStep::Contest => Some(format!("contest c{}", task.contest_round + 1)),
-        AgentStep::Wait => None,
+        ForemanStep::Post => Some("post".to_string()),
+        ForemanStep::Review => Some(format!("review r{}", task.review_round + 1)),
+        ForemanStep::Contest => Some(format!("contest c{}", task.contest_round + 1)),
+        ForemanStep::Wait => None,
     }
 }
 

@@ -8,8 +8,8 @@
 #   -> `dashboard trim` -> accept -> plan+post beta (depends on alpha) -> block -> escalated
 #   -> retire -> a spike (answer, send back, conclude) -> two tasks in
 #   parallel, a conflicting accept, its resolution -> a worker that keeps
-#   dying: relaunch, the relaunch cap, --reset -> task agents on: a
-#   fake task agent posts and reviews a task in its own tmux session -> an
+#   dying: relaunch, the relaunch cap, --reset -> foremen on: a
+#   fake foreman posts and reviews a task in its own tmux session -> an
 #   `arch check` suite check whose module view links a build cache -> a
 #   task scoped to one module: its run set, `dashboard scope`, a landing
 #   run set grown by main's changes -> a director rejection on main
@@ -43,8 +43,8 @@ WORK=$(mktemp -d)
 DIR_REPO="$WORK/director"
 HOME_DIR="$WORK/home"
 FAKE_AGENT="$WORK/fake-agent.sh"
-FAKE_TASK_AGENT="$WORK/fake-task-agent.sh"
-TA_TEMPLATES="$WORK/ta-templates"
+FAKE_FOREMAN="$WORK/fake-foreman.sh"
+FOREMAN_TEMPLATES="$WORK/foreman-templates"
 # What the fake worker saw: <slug>.prompts (every launch prompt, as `$1`
 # arrived through tmux) and <slug>.pastes (everything pasted into its
 # session). A <slug>.die file makes the worker crash at startup.
@@ -254,35 +254,35 @@ FAKE_AGENT_EOF
 }
 
 # --------------------------------------------------------------------------
-# The fake task agent (spec §17): stands in for a real task agent session.
+# The fake foreman (spec §17): stands in for a real foreman session.
 # Launched with "Step: post" in its prompt, it copies the post the scenario
-# prepared for its slug ($TA_TEMPLATES/<slug>/) into its worktree, commits it
-# on agent/<slug> and, once the player has imported it, reports it with
+# prepared for its slug ($FOREMAN_TEMPLATES/<slug>/) into its worktree, commits it
+# on foreman/<slug> and, once the player has imported it, reports it with
 # `dashboard report` (verdict implied). Then it watches the hub: once the
 # worker's work (src/<slug>.txt, or <slug>/<slug>.txt) is on task/<slug>, it
 # reports `accept`.
 # --------------------------------------------------------------------------
 
-write_fake_task_agent() {
-  cat >"$FAKE_TASK_AGENT" <<'FAKE_TASK_AGENT_EOF'
+write_fake_foreman() {
+  cat >"$FAKE_FOREMAN" <<'FAKE_FOREMAN_EOF'
 #!/bin/sh
-# Fake task agent driver (written by scripts/e2e.sh). $1 is the prompt.
+# Fake foreman driver (written by scripts/e2e.sh). $1 is the prompt.
 set -eu
 TEMPLATES=__TEMPLATES__
 BIN=__BIN__
 HOME_DIR=__HOME__
 
-git config user.name "E2E Fake Task Agent" || true
-git config user.email "fake-task-agent@example.com" || true
+git config user.name "E2E Fake Foreman" || true
+git config user.email "fake-foreman@example.com" || true
 git config commit.gpgsign false || true
 
 branch=$(git rev-parse --abbrev-ref HEAD)
-slug=${branch#agent/}
+slug=${branch#foreman/}
 # Retries until the player waits for this report (an import lands a tick
 # after the commit, a review once the worker's work is tested).
 report() {
   rend=$(($(date +%s) + 60))
-  until "$BIN" --home "$HOME_DIR" report "$@" --why "fake task agent." --check "$slug.txt exists" >/dev/null 2>&1; do
+  until "$BIN" --home "$HOME_DIR" report "$@" --why "fake foreman." --check "$slug.txt exists" >/dev/null 2>&1; do
     [ "$(date +%s)" -lt "$rend" ] || return 1
     sleep 0.5
   done
@@ -311,9 +311,9 @@ while [ "$(date +%s)" -lt "$end" ]; do
   fi
   sleep 0.5
 done
-FAKE_TASK_AGENT_EOF
-  sed -i "s|__TEMPLATES__|$TA_TEMPLATES|; s|__BIN__|$BIN|; s|__HOME__|$HOME_DIR|" "$FAKE_TASK_AGENT"
-  chmod +x "$FAKE_TASK_AGENT"
+FAKE_FOREMAN_EOF
+  sed -i "s|__TEMPLATES__|$FOREMAN_TEMPLATES|; s|__BIN__|$BIN|; s|__HOME__|$HOME_DIR|" "$FAKE_FOREMAN"
+  chmod +x "$FAKE_FOREMAN"
 }
 
 # --------------------------------------------------------------------------
@@ -331,7 +331,7 @@ task_tests() {
 
 mkdir -p "$AGENT_LOGS"
 write_fake_agent
-write_fake_task_agent
+write_fake_foreman
 
 mkdir -p "$DIR_REPO"
 git -C "$DIR_REPO" init -q -b main
@@ -349,7 +349,7 @@ title = "Phase One"
 [player]
 agent_cmd = "$FAKE_AGENT"
 runs = "parallel"
-task_agent_cmd = ""
+foreman_cmd = ""
 EOF
 
 # The Lean package every project has: the starter of `dashboard arch gen`,
@@ -769,58 +769,58 @@ hub_ref_exists refs/dashboard/escalated/eta && { echo "e2e: eta's escalation ref
 wait_until "task/eta accepted" task_status_is eta accepted
 
 # --------------------------------------------------------------------------
-# 7e. Task agents (spec §17): a roadmap commit on main turns them on; the
-#     player launches a fake task agent for the newly planned epsilon in
-#     its own tmux session; it posts (imported as the task agent's), the
-#     worker finishes, the task agent reports accept, the director accepts
-#     on it, and the task agent's session ends with the task.
+# 7e. Foremen (spec §17): a roadmap commit on main turns them on; the
+#     player launches a fake foreman for the newly planned epsilon in
+#     its own tmux session; it posts (imported as the foreman's), the
+#     worker finishes, the foreman reports accept, the director accepts
+#     on it, and the foreman's session ends with the task.
 # --------------------------------------------------------------------------
 
-log "step 7e: a task agent posts and reviews epsilon"
+log "step 7e: a foreman posts and reviews epsilon"
 git -C "$DIR_REPO" checkout -q main
 git -C "$DIR_REPO" fetch -q hub
 git -C "$DIR_REPO" merge -q --ff-only hub/main
-sed -i "s|^task_agent_cmd = \"\"|task_agent_cmd = \"$FAKE_TASK_AGENT\"|" "$DIR_REPO/roadmap.toml"
-git -C "$DIR_REPO" commit -q -am "roadmap: turn task agents on"
-hub_has_task_agents() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:roadmap.toml | grep -qF "$FAKE_TASK_AGENT"; }
-wait_until "roadmap with task agents on main" hub_has_task_agents
+sed -i "s|^foreman_cmd = \"\"|foreman_cmd = \"$FAKE_FOREMAN\"|" "$DIR_REPO/roadmap.toml"
+git -C "$DIR_REPO" commit -q -am "roadmap: turn foremen on"
+hub_has_foremen() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:roadmap.toml | grep -qF "$FAKE_FOREMAN"; }
+wait_until "roadmap with foremen on main" hub_has_foremen
 
-mkdir -p "$TA_TEMPLATES/epsilon/tasks/epsilon"
-echo "Create src/epsilon.txt. Tests you add must be pure." >"$TA_TEMPLATES/epsilon/tasks/epsilon/prompt.md"
-printf '#!/bin/sh\nmkdir -p src\necho ok > src/epsilon.txt\n' >"$TA_TEMPLATES/epsilon/tasks/epsilon/agent.sh"
-task_tests "$TA_TEMPLATES/epsilon/architecture/Tests/epsilon.lean" epsilon-check "test -f src/epsilon.txt"
+mkdir -p "$FOREMAN_TEMPLATES/epsilon/tasks/epsilon"
+echo "Create src/epsilon.txt. Tests you add must be pure." >"$FOREMAN_TEMPLATES/epsilon/tasks/epsilon/prompt.md"
+printf '#!/bin/sh\nmkdir -p src\necho ok > src/epsilon.txt\n' >"$FOREMAN_TEMPLATES/epsilon/tasks/epsilon/agent.sh"
+task_tests "$FOREMAN_TEMPLATES/epsilon/architecture/Tests/epsilon.lean" epsilon-check "test -f src/epsilon.txt"
 
 git -C "$DIR_REPO" checkout -q -b task/epsilon main
 mkdir -p "$DIR_REPO/tasks/epsilon"
-printf 'title = "epsilon"\nphase = "p1"\nmodules = ["app"]\nbrief = "a fake task agent posts this"\n' >"$DIR_REPO/tasks/epsilon/task.toml"
+printf 'title = "epsilon"\nphase = "p1"\nmodules = ["app"]\nbrief = "a fake foreman posts this"\n' >"$DIR_REPO/tasks/epsilon/task.toml"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: epsilon"
 
 # A ready task never starts on its own: it waits for the director's `stage:`.
 wait_until "epsilon is ready" task_status_is epsilon ready
 tick; tick
-session_gone epsilon_agent || { echo "e2e: a ready task's task agent started without a stage:" >&2; exit 1; }
-(cd "$DIR_REPO" && dash stage epsilon --why "start its task agent") >/dev/null
+session_gone epsilon_foreman || { echo "e2e: a ready task's foreman started without a stage:" >&2; exit 1; }
+(cd "$DIR_REPO" && dash stage epsilon --why "start its foreman") >/dev/null
 wait_until "epsilon is staged" task_status_is epsilon staged
-wait_until "epsilon's task agent session exists" session_alive epsilon_agent
+wait_until "epsilon's foreman session exists" session_alive epsilon_foreman
 wait_until "epsilon's worker session exists" session_alive epsilon
 post_sha=$(git --git-dir "$HOME_DIR/hub.git" log --format=%H --grep='^post: epsilon' refs/heads/task/epsilon)
-assert_contains "$(git --git-dir "$HOME_DIR/hub.git" notes --ref refs/notes/dashboard-imports show "$post_sha")" '"actor":"task_agent"' "epsilon's post import note"
+assert_contains "$(git --git-dir "$HOME_DIR/hub.git" notes --ref refs/notes/dashboard-imports show "$post_sha")" '"actor":"foreman"' "epsilon's post import note"
 
-agent_recommends_accept() { dash_status | grep -qF "reported: accept"; }
-wait_until "epsilon's task agent recommends accept" agent_recommends_accept
-assert_contains "$(dash_status)" "task agent: dash-${PROJECT}-epsilon_agent (alive)" "dashboard status"
+foreman_recommends_accept() { dash_status | grep -qF "reported: accept"; }
+wait_until "epsilon's foreman recommends accept" foreman_recommends_accept
+assert_contains "$(dash_status)" "foreman: dash-${PROJECT}-epsilon_foreman (alive)" "dashboard status"
 wait_out=$(dash wait --timeout 5)
-assert_contains "$wait_out" "agent_launched" "dashboard wait output"
+assert_contains "$wait_out" "foreman_launched" "dashboard wait output"
 assert_contains "$wait_out" "verdict: accept" "dashboard wait output"
 ask_out=$(dash ask epsilon "why that check?")
-assert_contains "$ask_out" "asked task/epsilon's task agent" "dashboard ask output"
+assert_contains "$ask_out" "asked task/epsilon's foreman" "dashboard ask output"
 
-# The accept's body defaults to the task agent's accept report's why.
+# The accept's body defaults to the foreman's accept report's why.
 (cd "$DIR_REPO" && dash accept epsilon) >/dev/null
 wait_until "task/epsilon accepted" task_status_is epsilon accepted
-assert_contains "$(hub_main_body)" "fake task agent." "epsilon's merge commit (the accept's why)"
-wait_until "epsilon's task agent session ended" session_gone epsilon_agent
+assert_contains "$(hub_main_body)" "fake foreman." "epsilon's merge commit (the accept's why)"
+wait_until "epsilon's foreman session ended" session_gone epsilon_foreman
 
 # --------------------------------------------------------------------------
 # 7f. Module views link build caches: the director commits an
@@ -865,10 +865,10 @@ hub_has_arch() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:architec
 wait_until "Architecture.lean with zeta on main" hub_has_arch
 
 arch_cmd="mkdir -p cache && echo ok > cache/built && $BIN arch check --root ."
-mkdir -p "$TA_TEMPLATES/zeta/tasks/zeta"
-echo "Create zeta/lib.rs and zeta/zeta.txt." >"$TA_TEMPLATES/zeta/tasks/zeta/prompt.md"
-printf '#!/bin/sh\nmkdir -p zeta\necho "pub fn z() {}" > zeta/lib.rs\necho ok > zeta/zeta.txt\n' >"$TA_TEMPLATES/zeta/tasks/zeta/agent.sh"
-task_tests "$TA_TEMPLATES/zeta/architecture/Tests/zeta.lean" zeta-arch "$arch_cmd" "[zeta, app]" '  files = ["architecture"]
+mkdir -p "$FOREMAN_TEMPLATES/zeta/tasks/zeta"
+echo "Create zeta/lib.rs and zeta/zeta.txt." >"$FOREMAN_TEMPLATES/zeta/tasks/zeta/prompt.md"
+printf '#!/bin/sh\nmkdir -p zeta\necho "pub fn z() {}" > zeta/lib.rs\necho ok > zeta/zeta.txt\n' >"$FOREMAN_TEMPLATES/zeta/tasks/zeta/agent.sh"
+task_tests "$FOREMAN_TEMPLATES/zeta/architecture/Tests/zeta.lean" zeta-arch "$arch_cmd" "[zeta, app]" '  files = ["architecture"]
 '
 
 git -C "$DIR_REPO" checkout -q -b task/zeta main
@@ -877,7 +877,7 @@ printf 'title = "zeta"\nphase = "p1"\nmodules = ["zeta", "app"]\nbrief = "a modu
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: zeta"
 wait_until "zeta is ready" task_status_is zeta ready
-(cd "$DIR_REPO" && dash stage zeta --why "start its task agent") >/dev/null
+(cd "$DIR_REPO" && dash stage zeta --why "start its foreman") >/dev/null
 wait_until "zeta's worker session exists" session_alive zeta
 wait_until "task/zeta tested" task_status_is zeta tested
 
@@ -941,14 +941,14 @@ git -C "$DIR_REPO" commit -q -m "architecture: modules a and b"
 hub_has_ab() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:architecture/Tests.lean 2>/dev/null | grep -q b_only; }
 wait_until "modules a and b on main" hub_has_ab
 
-mkdir -p "$TA_TEMPLATES/a/tasks/a"
-echo "Create a/a.txt. Tests you add must be pure." >"$TA_TEMPLATES/a/tasks/a/prompt.md"
-mkdir -p "$TA_TEMPLATES/a/conf"
-echo on >"$TA_TEMPLATES/a/conf/a.flag"
+mkdir -p "$FOREMAN_TEMPLATES/a/tasks/a"
+echo "Create a/a.txt. Tests you add must be pure." >"$FOREMAN_TEMPLATES/a/tasks/a/prompt.md"
+mkdir -p "$FOREMAN_TEMPLATES/a/conf"
+echo on >"$FOREMAN_TEMPLATES/a/conf/a.flag"
 # Runs once: records what the tree holds, builds `a`, then declares a_own
 # before `dashboard test` opens its file; the fake worker's `git add -A`
 # commits all three.
-cat >"$TA_TEMPLATES/a/tasks/a/agent.sh" <<'EOF'
+cat >"$FOREMAN_TEMPLATES/a/tasks/a/agent.sh" <<'EOF'
 #!/bin/sh
 L=__LOGS__
 [ -e "$L/a.done" ] && exit 0
@@ -961,8 +961,8 @@ echo 'test -f a/a.txt' > stories/a_own.sh
 "__BIN__" test --home "__HOME__" >"$L/a.test" 2>&1 || true
 touch "$L/a.done"
 EOF
-sed -i "s|__LOGS__|$AGENT_LOGS|; s|__BIN__|$BIN|; s|__HOME__|$HOME_DIR|" "$TA_TEMPLATES/a/tasks/a/agent.sh"
-task_tests "$TA_TEMPLATES/a/architecture/Tests/a.lean" a-check "test -f a/a.txt" "[a]"
+sed -i "s|__LOGS__|$AGENT_LOGS|; s|__BIN__|$BIN|; s|__HOME__|$HOME_DIR|" "$FOREMAN_TEMPLATES/a/tasks/a/agent.sh"
+task_tests "$FOREMAN_TEMPLATES/a/architecture/Tests/a.lean" a-check "test -f a/a.txt" "[a]"
 
 git -C "$DIR_REPO" checkout -q -b task/a main
 mkdir -p "$DIR_REPO/tasks/a"
@@ -970,7 +970,7 @@ printf 'title = "a"\nphase = "p1"\nmodules = ["a"]\nbrief = "scoped to module a"
 git -C "$DIR_REPO" add -A
 git -C "$DIR_REPO" commit -q -m "plan: a"
 wait_until "a is ready" task_status_is a ready
-(cd "$DIR_REPO" && dash stage a --why "start its task agent") >/dev/null
+(cd "$DIR_REPO" && dash stage a --why "start its foreman") >/dev/null
 wait_until "a's worker session exists" session_alive a
 
 scope_out=$(cd "$DIR_REPO/.dashboard/workers/a" && dash scope)
@@ -989,7 +989,7 @@ assert_contains "$(cat "$AGENT_LOGS/a.tree")" "partial" "a's worker tree"
 assert_contains "$(cat "$AGENT_LOGS/a.build")" "built-a" "dashboard build a"
 assert_contains "$(cat "$AGENT_LOGS/a.test")" "opened: stories/a_own.sh" "dashboard test"
 git --git-dir "$HOME_DIR/hub.git" cat-file -e "$a_tip:stories/a_own.sh" || { echo "e2e: stories/a_own.sh missing on task/a" >&2; exit 1; }
-[ -e "$DIR_REPO/.dashboard/agents/a/b/README.md" ] || { echo "e2e: a's task agent tree should be full" >&2; exit 1; }
+[ -e "$DIR_REPO/.dashboard/foremen/a/b/README.md" ] || { echo "e2e: a's foreman tree should be full" >&2; exit 1; }
 
 # main moves under b: the landing run set gains b's checks.
 git -C "$DIR_REPO" checkout -q main
@@ -1000,7 +1000,7 @@ git -C "$DIR_REPO" commit -q -am "docs: b"
 hub_has_b_docs() { git --git-dir "$HOME_DIR/hub.git" show refs/heads/main:b/README.md | grep -q revised; }
 wait_until "b's docs on main" hub_has_b_docs
 git -C "$DIR_REPO" checkout -q task/a
-(cd "$DIR_REPO" && dash accept a --why "the task agent recommends it") >/dev/null
+(cd "$DIR_REPO" && dash accept a --why "the foreman recommends it") >/dev/null
 a_merge_failed() { [ "$(event_count merge_failed a)" -ge 1 ]; }
 wait_until "a's landing fails on b_only" a_merge_failed
 assert_contains "$(dash wait --all | grep -A20 -E '^#[0-9]+ merge_failed +a( |$)')" "b_only" "a's merge_failed event"

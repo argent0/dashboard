@@ -1,9 +1,9 @@
-// Integration tests for task agents (spec.md §17): the player launches one
-// per agent-managed task once it's ready, imports its post and send-backs
-// from its own clone (`paths::agent_clone`, branch `agent/<slug>`) under the
-// rules a task agent works by, asks it to review every tested tip, and turns
-// the report it leaves into a note and an `agent_report` event. Every test
-// drives `Player::tick` with `NullSessions` and plays the task agent and the
+// Integration tests for foremen (spec.md §17): the player launches one
+// per foreman-managed task once it's ready, imports its post and send-backs
+// from its own clone (`paths::foreman_clone`, branch `foreman/<slug>`) under the
+// rules a foreman works by, asks it to review every tested tip, and turns
+// the report it leaves into a note and an `foreman_report` event. Every test
+// drives `Player::tick` with `NullSessions` and plays the foreman and the
 // worker by committing in the clones the player itself created.
 
 mod common;
@@ -28,16 +28,16 @@ const PLAN: &str = "title = \"s\"\nphase = \"p1\"\nmodules = [\"app\"]\nbrief = 
 // Fixture helpers
 // --------------------------------------------------------------------------
 
-/// A director repo whose roadmap turns task agents on (`task_agent_cmd`),
+/// A director repo whose roadmap turns foremen on (`foreman_cmd`),
 /// with the worker's `agent_cmd` left at its default.
-fn repo_with_task_agents() -> DirectorRepo {
+fn repo_with_foremen() -> DirectorRepo {
     let repo = director_repo();
     write_file(
         repo.path(),
         "roadmap.toml",
-        "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"fake-task-agent\"\n",
+        "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\nforeman_cmd = \"fake-foreman\"\n",
     );
-    commit(repo.path(), "turn task agents on");
+    commit(repo.path(), "turn foremen on");
     repo
 }
 
@@ -73,30 +73,30 @@ fn task(hub: &Git, slug: &str) -> state::TaskState {
 
 fn ensure_identity(dir: &Path) {
     let git = Git::new(dir);
-    git.run(&["config", "user.name", "Test Agent"])
+    git.run(&["config", "user.name", "Test Foreman"])
         .expect("set user.name");
-    git.run(&["config", "user.email", "agent@example.com"])
+    git.run(&["config", "user.email", "foreman@example.com"])
         .expect("set user.email");
     git.run(&["config", "commit.gpgsign", "false"])
         .expect("disable gpgsign");
 }
 
-fn agent_dir(repo: &DirectorRepo) -> PathBuf {
-    paths::agent_clone(&repo.director_path(), "s")
+fn foreman_dir(repo: &DirectorRepo) -> PathBuf {
+    paths::foreman_clone(&repo.director_path(), "s")
 }
 
-fn agent_sent(player: &Player<NullSessions>) -> Vec<String> {
+fn foreman_sent(player: &Player<NullSessions>) -> Vec<String> {
     player
         .sessions()
         .sent
         .iter()
-        .filter(|(k, _)| k == "s_agent")
+        .filter(|(k, _)| k == "s_foreman")
         .map(|(_, m)| m.clone())
         .collect()
 }
 
 /// Plans `s` as the director, stages it and ticks: the task is ready at once
-/// (no dependencies) but only the `stage:` launches its task agent.
+/// (no dependencies) but only the `stage:` launches its foreman.
 fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>) -> TickReport {
     director_commit_on_branch(repo.path(), "task/s", "tasks/s/task.toml", PLAN, "plan: s");
     commit_empty(repo.path(), "stage: go");
@@ -105,9 +105,9 @@ fn plan(repo: &DirectorRepo, player: &mut Player<NullSessions>) -> TickReport {
     report
 }
 
-/// Commits `files` in the task agent's clone, on `agent/s`.
-fn agent_commit(repo: &DirectorRepo, files: &[(&str, &str)], msg: &str) -> String {
-    let dir = agent_dir(repo);
+/// Commits `files` in the foreman's clone, on `foreman/s`.
+fn foreman_commit(repo: &DirectorRepo, files: &[(&str, &str)], msg: &str) -> String {
+    let dir = foreman_dir(repo);
     ensure_identity(&dir);
     for (rel, content) in files {
         write_file(&dir, rel, content);
@@ -115,10 +115,10 @@ fn agent_commit(repo: &DirectorRepo, files: &[(&str, &str)], msg: &str) -> Strin
     commit(&dir, msg)
 }
 
-/// The task agent's post: the prompt and the task check in its suite
+/// The foreman's post: the prompt and the task check in its suite
 /// fragment.
-fn agent_post(repo: &DirectorRepo) -> String {
-    agent_commit(
+fn foreman_post(repo: &DirectorRepo) -> String {
+    foreman_commit(
         repo,
         &[
             (
@@ -134,11 +134,11 @@ fn agent_post(repo: &DirectorRepo) -> String {
     )
 }
 
-/// plan -> the task agent's post -> the worker's passing finish: `s` is
-/// tested and its task agent has been asked to review it.
+/// plan -> the foreman's post -> the worker's passing finish: `s` is
+/// tested and its foreman has been asked to review it.
 fn plan_post_finish(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
     plan(repo, player);
-    agent_post(repo);
+    foreman_post(repo);
     let report = player.tick().expect("post tick should succeed");
     assert_eq!(report.launched, vec!["s".to_string()], "{report}");
     let dir = paths::worker_clone(&repo.director_path(), "s");
@@ -155,20 +155,20 @@ fn plan_post_finish(repo: &DirectorRepo, player: &mut Player<NullSessions>) {
     );
 }
 
-/// The task agent's worktree git directory, where `dashboard report`
+/// The foreman's worktree git directory, where `dashboard report`
 /// files its report.
-fn agent_git_dir(repo: &DirectorRepo) -> PathBuf {
-    let out = Git::new(agent_dir(repo))
+fn foreman_git_dir(repo: &DirectorRepo) -> PathBuf {
+    let out = Git::new(foreman_dir(repo))
         .run(&["rev-parse", "--absolute-git-dir"])
         .expect("git dir");
     PathBuf::from(out)
 }
 
 /// `dashboard report <verdict> --why <why>` (and `--suite` on accept), as
-/// the task agent runs it from its worktree.
+/// the foreman runs it from its worktree.
 fn file_report(repo: &DirectorRepo, verdict: Option<&str>, why: &str) -> Result<report::Filed, String> {
     report::submit(
-        &agent_git_dir(repo),
+        &foreman_git_dir(repo),
         &report::Draft {
             verdict: verdict.map(String::from),
             why: why.to_string(),
@@ -184,32 +184,32 @@ fn file_report(repo: &DirectorRepo, verdict: Option<&str>, why: &str) -> Result<
 // --------------------------------------------------------------------------
 
 #[test]
-fn a_ready_task_launches_its_task_agent_with_the_post_step() {
-    let repo = repo_with_task_agents();
+fn a_ready_task_launches_its_foreman_with_the_post_step() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
 
     let report = plan(&repo, &mut player);
-    assert_eq!(report.agents_launched, vec!["s".to_string()], "{report}");
+    assert_eq!(report.foremen_launched, vec!["s".to_string()], "{report}");
     let call = player
         .sessions()
         .launched
         .iter()
-        .find(|c| c.slug == "s_agent")
-        .expect("a launch for the task agent")
+        .find(|c| c.slug == "s_foreman")
+        .expect("a launch for the foreman")
         .clone();
-    assert_eq!(call.agent_cmd, "fake-task-agent");
-    assert_eq!(call.clone_dir, agent_dir(&repo));
+    assert_eq!(call.agent_cmd, "fake-foreman");
+    assert_eq!(call.clone_dir, foreman_dir(&repo));
     assert_eq!(
         Git::new(&call.clone_dir)
             .run(&["branch", "--show-current"])
             .unwrap(),
-        "agent/s"
+        "foreman/s"
     );
 
     let prompt = std::fs::read_to_string(&call.prompt_file).expect("prompt file");
     for needle in [
-        "task agent for task `s`",
+        "foreman for task `s`",
         "Never write a throwaway implementation",
         "must be pure",
         "mind the widget cache",
@@ -225,25 +225,25 @@ fn a_ready_task_launches_its_task_agent_with_the_post_step() {
 
     // A second tick launches nothing more.
     let report = player.tick().expect("tick");
-    assert!(report.agents_launched.is_empty(), "{report}");
+    assert!(report.foremen_launched.is_empty(), "{report}");
 
     let kinds: Vec<EventKind> = events::read_all(&home).iter().map(|e| e.kind).collect();
-    assert!(kinds.contains(&EventKind::AgentLaunched), "{kinds:?}");
+    assert!(kinds.contains(&EventKind::ForemanLaunched), "{kinds:?}");
     assert!(
         !kinds.contains(&EventKind::Ready),
-        "a task agent's ready task needs nothing from the director: {kinds:?}"
+        "a foreman's ready task needs nothing from the director: {kinds:?}"
     );
 }
 
 #[test]
-fn spikes_and_disabled_task_agents_launch_none() {
-    let repo = director_repo(); // task_agent_cmd = ""
+fn spikes_and_disabled_foremen_launch_none() {
+    let repo = director_repo(); // foreman_cmd = ""
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     let report = plan(&repo, &mut player);
-    assert!(report.agents_launched.is_empty(), "{report}");
+    assert!(report.foremen_launched.is_empty(), "{report}");
 
-    let repo = repo_with_task_agents();
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     director_commit_on_branch(
@@ -255,62 +255,62 @@ fn spikes_and_disabled_task_agents_launch_none() {
     );
     let report = player.tick().expect("tick");
     assert!(
-        report.agents_launched.is_empty(),
+        report.foremen_launched.is_empty(),
         "a spike's question is the director's: {report}"
     );
 }
 
 // --------------------------------------------------------------------------
-// The task agent's post
+// The foreman's post
 // --------------------------------------------------------------------------
 
 #[test]
-fn the_task_agents_post_is_imported_and_launches_the_worker() {
-    let repo = repo_with_task_agents();
+fn the_foremans_post_is_imported_and_launches_the_worker() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
     plan(&repo, &mut player);
 
-    let sha = agent_post(&repo);
+    let sha = foreman_post(&repo);
     let report = player.tick().expect("post tick");
     assert_eq!(report.imported.len(), 1, "{report}");
     assert_eq!(report.imported[0].2, Transition::Post);
     let note = records::import_note(&hub, &sha).expect("import note");
-    assert_eq!(note.actor, Actor::TaskAgent);
+    assert_eq!(note.actor, Actor::Foreman);
     assert_eq!(report.launched, vec!["s".to_string()], "{report}");
     assert!(
-        agent_sent(&player)
+        foreman_sent(&player)
             .iter()
             .any(|m| m.contains("imported your post")),
         "{:?}",
-        agent_sent(&player)
+        foreman_sent(&player)
     );
 }
 
 #[test]
-fn the_task_agents_tree_is_full_beside_a_sparse_worker() {
-    let repo = repo_with_task_agents();
+fn the_foremans_tree_is_full_beside_a_sparse_worker() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     plan(&repo, &mut player);
-    agent_post(&repo);
+    foreman_post(&repo);
     let report = player.tick().expect("post tick");
     assert_eq!(report.launched, vec!["s".to_string()], "{report}");
     let worker = paths::worker_clone(&repo.director_path(), "s");
-    let agent = agent_dir(&repo);
+    let foreman = foreman_dir(&repo);
     for f in ["roadmap.toml", "prompts.kdl"] {
-        assert!(agent.join(f).exists(), "{f} in the task agent's tree");
+        assert!(foreman.join(f).exists(), "{f} in the foreman's tree");
         assert!(!worker.join(f).exists(), "{f} absent from the worker's tree");
     }
-    assert!(agent.join("src").exists() && worker.join("src").exists());
-    assert!(!Git::new(&agent).is_sparse());
+    assert!(foreman.join("src").exists() && worker.join("src").exists());
+    assert!(!Git::new(&foreman).is_sparse());
     assert!(Git::new(&worker).is_sparse());
 }
 
 #[test]
-fn a_director_post_is_ownership_when_task_agents_are_on() {
-    let repo = repo_with_task_agents();
+fn a_director_post_is_ownership_when_foremen_are_on() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     plan(&repo, &mut player);
@@ -328,32 +328,32 @@ fn a_director_post_is_ownership_when_task_agents_are_on() {
     assert_eq!(report.rejected[0].reason, Reason::Ownership);
     assert_eq!(report.rejected[0].actor, Actor::Director);
     assert!(
-        report.rejected[0].message.contains("task agent"),
+        report.rejected[0].message.contains("foreman"),
         "{}",
         report.rejected[0].message
     );
 }
 
 fn repo_with_lock_files() -> DirectorRepo {
-    let repo = repo_with_task_agents();
+    let repo = repo_with_foremen();
     write_file(
         repo.path(),
         "roadmap.toml",
-        "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"fake-task-agent\"\nlock_files = [\"Cargo.lock\"]\n",
+        "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\nforeman_cmd = \"fake-foreman\"\nlock_files = [\"Cargo.lock\"]\n",
     );
     commit(repo.path(), "name the lock file");
     repo
 }
 
 #[test]
-fn a_task_agent_may_commit_a_lock_file_only_when_the_roadmap_names_it() {
+fn a_foreman_may_commit_a_lock_file_only_when_the_roadmap_names_it() {
     // Named: the post with its lock entry is not an ownership rejection.
     let repo = repo_with_lock_files();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     plan(&repo, &mut player);
-    agent_post(&repo);
-    agent_commit(&repo, &[("Cargo.lock", "# locked\n")], "lock the test dep");
+    foreman_post(&repo);
+    foreman_commit(&repo, &[("Cargo.lock", "# locked\n")], "lock the test dep");
     let report = player.tick().expect("tick");
     assert!(
         !report
@@ -364,12 +364,12 @@ fn a_task_agent_may_commit_a_lock_file_only_when_the_roadmap_names_it() {
     );
 
     // Not named: the same commit is ownership.
-    let repo = repo_with_task_agents();
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     plan(&repo, &mut player);
-    agent_post(&repo);
-    agent_commit(&repo, &[("Cargo.lock", "# locked\n")], "lock the test dep");
+    foreman_post(&repo);
+    foreman_commit(&repo, &[("Cargo.lock", "# locked\n")], "lock the test dep");
     let report = player.tick().expect("tick");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Ownership);
@@ -377,8 +377,8 @@ fn a_task_agent_may_commit_a_lock_file_only_when_the_roadmap_names_it() {
 }
 
 #[test]
-fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
-    let repo = repo_with_task_agents();
+fn a_foreman_never_writes_product_code_or_the_plan_or_a_marker() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
@@ -386,8 +386,8 @@ fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
     let tip = hub.rev_parse("refs/heads/task/s").unwrap();
 
     // Product code next to the post.
-    agent_post(&repo);
-    agent_commit(
+    foreman_post(&repo);
+    foreman_commit(
         &repo,
         &[("src/feature.rs", "fn main() {}\n")],
         "a throwaway implementation",
@@ -395,25 +395,25 @@ fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
     let report = player.tick().expect("tick");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Ownership);
-    assert_eq!(report.rejected[0].actor, Actor::TaskAgent);
+    assert_eq!(report.rejected[0].actor, Actor::Foreman);
     assert!(
         report.rejected[0].message.contains("src/feature.rs"),
         "{}",
         report.rejected[0].message
     );
     assert!(
-        agent_sent(&player)
+        foreman_sent(&player)
             .iter()
             .any(|m| m.contains("rejected your commit")),
-        "rejections are relayed to the task agent"
+        "rejections are relayed to the foreman"
     );
 
     // The plan: depends_on, phase and the rest are the director's.
-    let dir = agent_dir(&repo);
+    let dir = foreman_dir(&repo);
     Git::new(&dir)
         .run(&["reset", "-q", "--hard", &tip])
         .unwrap();
-    agent_commit(
+    foreman_commit(
         &repo,
         &[
             ("tasks/s/prompt.md", "p\n"),
@@ -459,7 +459,7 @@ fn a_task_agent_never_writes_product_code_or_the_plan_or_a_marker() {
 }
 
 /// The post with its check's `files` declared and written beside it.
-fn agent_post_with_files(repo: &DirectorRepo, files: &str, written: &[(&str, &str)]) {
+fn foreman_post_with_files(repo: &DirectorRepo, files: &str, written: &[(&str, &str)]) {
     let check = format!("[[check]]\nname = \"s-check\"\ncmd = \"test -f src/feature.txt\"\nfiles = {files}\n");
     let (suite, tests) = (task_suite_lean(&check), tests_file("s"));
     let mut all = vec![
@@ -467,27 +467,27 @@ fn agent_post_with_files(repo: &DirectorRepo, files: &str, written: &[(&str, &st
         (&*tests, &*suite),
     ];
     all.extend_from_slice(written);
-    agent_commit(repo, &all, "post: s");
+    foreman_commit(repo, &all, "post: s");
 }
 
 #[test]
-fn a_task_agent_adds_its_declared_test_files_inside_a_module() {
+fn a_foreman_adds_its_declared_test_files_inside_a_module() {
     // A new file under the post's own declared `files`, inside `app`'s `src/`.
-    let repo = repo_with_task_agents();
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     plan(&repo, &mut player);
-    agent_post_with_files(&repo, "[\"src/tests/\"]", &[("src/tests/s.rs", "#[test] fn s() {}\n")]);
+    foreman_post_with_files(&repo, "[\"src/tests/\"]", &[("src/tests/s.rs", "#[test] fn s() {}\n")]);
     let report = player.tick().expect("tick");
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(report.imported[0].2, Transition::Post, "{report}");
 
     // Declaring an existing file of the module keeps it the worker's.
-    let repo = repo_with_task_agents();
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     plan(&repo, &mut player);
-    agent_post_with_files(&repo, "[\"src/\"]", &[("src/.keep", "mine\n")]);
+    foreman_post_with_files(&repo, "[\"src/\"]", &[("src/.keep", "mine\n")]);
     let report = player.tick().expect("tick");
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Ownership);
@@ -495,33 +495,33 @@ fn a_task_agent_adds_its_declared_test_files_inside_a_module() {
 }
 
 #[test]
-fn a_hub_move_under_the_agents_commit_is_rebased_by_the_player_without_a_strike() {
-    hub_move_under_the_agents_commit(false);
+fn a_hub_move_under_the_foremans_commit_is_rebased_by_the_player_without_a_strike() {
+    hub_move_under_the_foremans_commit(false);
 }
 
 #[test]
-fn a_hub_move_under_a_dirty_agent_tree_asks_for_a_rebase_without_a_strike() {
-    hub_move_under_the_agents_commit(true);
+fn a_hub_move_under_a_dirty_foreman_tree_asks_for_a_rebase_without_a_strike() {
+    hub_move_under_the_foremans_commit(true);
 }
 
-/// Main moves under the staged task's agent before it posts: a clean
+/// Main moves under the staged task's foreman before it posts: a clean
 /// worktree is rebased by the player and the post imported; a `dirty` one
 /// is asked to rebase, once per commit.
-fn hub_move_under_the_agents_commit(dirty: bool) {
-    let repo = repo_with_task_agents();
+fn hub_move_under_the_foremans_commit(dirty: bool) {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
     plan(&repo, &mut player);
 
     // Main moves and the player merges it into the staged branch; the task
-    // agent, still on the old tip, then posts (a replan is refused once the
-    // agent exists, so the hub moves by a merge).
+    // foreman, still on the old tip, then posts (a replan is refused once the
+    // foreman exists, so the hub moves by a merge).
     director_commit_on_branch(
         repo.path(),
         "main",
         "roadmap.toml",
-        "title = \"Retitled\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"fake-task-agent\"\n",
+        "title = \"Retitled\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\nforeman_cmd = \"fake-foreman\"\n",
         "retitle",
     );
     push_main_to_hub(repo.path());
@@ -529,24 +529,24 @@ fn hub_move_under_the_agents_commit(dirty: bool) {
     assert!(report.rejected.is_empty(), "{report}");
     assert_eq!(report.imported.len(), 1, "only the merge: {report}");
     assert_eq!(report.imported[0].2, Transition::MergeUnblock);
-    let post = agent_post(&repo);
+    let post = foreman_post(&repo);
     if dirty {
-        write_file(&agent_dir(&repo), "scratch.txt", "mine\n");
+        write_file(&foreman_dir(&repo), "scratch.txt", "mine\n");
     }
     let report = player.tick().expect("tick");
     assert!(report.rejected.is_empty(), "{report}");
     assert!(report.imported.is_empty(), "{report}");
     if !dirty {
-        let agent = Git::new(agent_dir(&repo));
-        let head = agent.rev_parse("HEAD").unwrap();
+        let foreman = Git::new(foreman_dir(&repo));
+        let head = foreman.rev_parse("HEAD").unwrap();
         assert_ne!(head, post, "rebased");
         assert_eq!(
-            agent.run(&["rev-parse", "HEAD~1"]).ok(),
+            foreman.run(&["rev-parse", "HEAD~1"]).ok(),
             hub.rev_parse("refs/heads/task/s")
         );
-        let told = agent_sent(&player).pop().unwrap();
+        let told = foreman_sent(&player).pop().unwrap();
         assert!(
-            told.contains(&format!("The player rebased your commit onto it: agent/s is at {}", &head[..12])),
+            told.contains(&format!("The player rebased your commit onto it: foreman/s is at {}", &head[..12])),
             "{told}"
         );
         let report = player.tick().expect("tick");
@@ -558,8 +558,8 @@ fn hub_move_under_the_agents_commit(dirty: bool) {
         assert!(task(&hub, "s").strikes.is_empty());
         return;
     }
-    assert_eq!(Git::new(agent_dir(&repo)).rev_parse("HEAD"), Some(post), "untouched");
-    let asked: Vec<String> = agent_sent(&player)
+    assert_eq!(Git::new(foreman_dir(&repo)).rev_parse("HEAD"), Some(post), "untouched");
+    let asked: Vec<String> = foreman_sent(&player)
         .into_iter()
         .filter(|m| m.contains("git rebase origin/task/s"))
         .collect();
@@ -568,21 +568,21 @@ fn hub_move_under_the_agents_commit(dirty: bool) {
     // Said once, not every tick.
     player.tick().expect("tick");
     assert_eq!(
-        agent_sent(&player)
+        foreman_sent(&player)
             .iter()
             .filter(|m| m.contains("git rebase origin/task/s"))
             .count(),
         1
     );
 
-    // The agent rebases its post onto the merge.
-    let dir = agent_dir(&repo);
+    // The foreman rebases its post onto the merge.
+    let dir = foreman_dir(&repo);
     std::fs::remove_file(dir.join("scratch.txt")).unwrap();
     Git::new(&dir).run(&["fetch", "-q", "origin"]).unwrap();
     Git::new(&dir)
         .run(&["reset", "-q", "--hard", "origin/task/s"])
         .unwrap();
-    agent_commit(
+    foreman_commit(
         &repo,
         &[
             ("tasks/s/prompt.md", "make src/feature.txt\n"),
@@ -607,21 +607,21 @@ fn hub_move_under_the_agents_commit(dirty: bool) {
 // --------------------------------------------------------------------------
 
 #[test]
-fn a_tested_task_is_handed_to_its_task_agent_for_review_once() {
-    let repo = repo_with_task_agents();
+fn a_tested_task_is_handed_to_its_foreman_for_review_once() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     plan_post_finish(&repo, &mut player);
 
-    let reviews: Vec<String> = agent_sent(&player)
+    let reviews: Vec<String> = foreman_sent(&player)
         .into_iter()
         .filter(|m| m.starts_with("Step: review round 1"))
         .collect();
     assert_eq!(reviews.len(), 1, "{reviews:?}");
     assert!(reviews[0].contains("reviews/r1.md"), "{}", reviews[0]);
-    // The player brought the agent's clean worktree to the worker's work.
+    // The player brought the foreman's clean worktree to the worker's work.
     let tip = Git::new(home.hub()).rev_parse("refs/heads/task/s").unwrap();
-    assert_eq!(Git::new(agent_dir(&repo)).rev_parse("HEAD"), Some(tip.clone()));
+    assert_eq!(Git::new(foreman_dir(&repo)).rev_parse("HEAD"), Some(tip.clone()));
     assert!(
         reviews[0].contains(&format!("Your branch is already at {}, the tip of task/s.", &tip[..12])),
         "{}",
@@ -629,7 +629,7 @@ fn a_tested_task_is_handed_to_its_task_agent_for_review_once() {
     );
     player.tick().expect("tick");
     assert_eq!(
-        agent_sent(&player)
+        foreman_sent(&player)
             .iter()
             .filter(|m| m.starts_with("Step: review round 1"))
             .count(),
@@ -640,24 +640,24 @@ fn a_tested_task_is_handed_to_its_task_agent_for_review_once() {
     let kinds: Vec<EventKind> = events::read_all(&home).iter().map(|e| e.kind).collect();
     assert!(
         !kinds.contains(&EventKind::Tested),
-        "the review is the task agent's: {kinds:?}"
+        "the review is the foreman's: {kinds:?}"
     );
 }
 
 #[test]
-fn the_task_agents_send_back_is_imported_and_relayed_to_the_worker() {
-    let repo = repo_with_task_agents();
+fn the_foremans_send_back_is_imported_and_relayed_to_the_worker() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
     plan_post_finish(&repo, &mut player);
 
-    let dir = agent_dir(&repo);
+    let dir = foreman_dir(&repo);
     Git::new(&dir).run(&["fetch", "-q", "origin"]).unwrap();
     Git::new(&dir)
         .run(&["merge", "-q", "--ff-only", "origin/task/s"])
         .unwrap();
-    let sha = agent_commit(
+    let sha = foreman_commit(
         &repo,
         &[
             ("tasks/s/reviews/r1.md", "also src/feature2.txt\n"),
@@ -673,7 +673,7 @@ fn the_task_agents_send_back_is_imported_and_relayed_to_the_worker() {
     assert_eq!(report.imported[0].2, Transition::SendBack);
     assert_eq!(
         records::import_note(&hub, &sha).unwrap().actor,
-        Actor::TaskAgent
+        Actor::Foreman
     );
     assert_eq!(task(&hub, "s").status, Status::InRevision);
     assert!(
@@ -688,7 +688,7 @@ fn the_task_agents_send_back_is_imported_and_relayed_to_the_worker() {
     // The import is the verdict: the report adds the why.
     file_report(&repo, None, "feature2 is missing.").expect("implied sent-back");
     let report = player.tick().expect("tick");
-    let text = &report.agent_reports[0].1.text;
+    let text = &report.foreman_reports[0].1.text;
     assert!(
         text.contains(&format!("step: review r1\ncommit: {sha}\n")) && text.contains("verdict: sent-back"),
         "{text}"
@@ -696,8 +696,8 @@ fn the_task_agents_send_back_is_imported_and_relayed_to_the_worker() {
 }
 
 #[test]
-fn a_report_becomes_a_note_and_an_agent_report_event() {
-    let repo = repo_with_task_agents();
+fn a_report_becomes_a_note_and_an_foreman_report_event() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
@@ -714,9 +714,9 @@ fn a_report_becomes_a_note_and_an_agent_report_event() {
     }
     file_report(&repo, Some("accept"), "it does it.").expect("accept");
     let report = player.tick().expect("tick");
-    assert_eq!(report.agent_reports.len(), 1, "{report}");
-    assert_eq!(report.agent_reports[0].1.verdict, "accept");
-    let text = &report.agent_reports[0].1.text;
+    assert_eq!(report.foreman_reports.len(), 1, "{report}");
+    assert_eq!(report.foreman_reports[0].1.verdict, "accept");
+    let text = &report.foreman_reports[0].1.text;
     assert!(
         text.starts_with("slug: s\nstep: review r1\ncommit: none\ncheck: src/feature.txt exists\nverdict: accept\nwhy: it does it.\nsuite: s-check: keep\nconcerns: none"),
         "{text}"
@@ -726,16 +726,16 @@ fn a_report_becomes_a_note_and_an_agent_report_event() {
 
     let t = task(&hub, "s");
     assert_eq!(
-        t.agent.and_then(|a| a.report).map(|r| r.verdict).as_deref(),
+        t.foreman.and_then(|a| a.report).map(|r| r.verdict).as_deref(),
         Some("accept")
     );
     let ev = events::read_all(&home)
         .into_iter()
-        .find(|e| e.kind == EventKind::AgentReport)
-        .expect("an agent_report event");
+        .find(|e| e.kind == EventKind::ForemanReport)
+        .expect("a foreman_report event");
     assert!(ev.message.contains("verdict: accept"), "{}", ev.message);
 
-    // The director accepts on it; the task agent's session ends with the task.
+    // The director accepts on it; the foreman's session ends with the task.
     director_pull_task_branch(repo.path(), "s");
     commit_empty(repo.path(), "accept: s");
     let report = player.tick().expect("tick");
@@ -746,10 +746,10 @@ fn a_report_becomes_a_note_and_an_agent_report_event() {
             .any(|(_, _, t)| *t == Transition::MergeAccept),
         "{report}"
     );
-    assert!(player.sessions().killed.contains(&"s_agent".to_string()));
+    assert!(player.sessions().killed.contains(&"s_foreman".to_string()));
     assert!(
-        !agent_dir(&repo).exists(),
-        "the task agent's worktree is removed"
+        !foreman_dir(&repo).exists(),
+        "the foreman's worktree is removed"
     );
 }
 
@@ -758,15 +758,15 @@ fn a_report_becomes_a_note_and_an_agent_report_event() {
 // --------------------------------------------------------------------------
 
 #[test]
-fn ask_relaunch_and_death_of_a_task_agent() {
-    let repo = repo_with_task_agents();
+fn ask_relaunch_and_death_of_a_foreman() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     plan(&repo, &mut player);
 
     player.ask("s", "why that check?").expect("ask");
     assert!(
-        agent_sent(&player)
+        foreman_sent(&player)
             .iter()
             .any(|m| m.contains("Question from the director: why that check?"))
     );
@@ -774,17 +774,17 @@ fn ask_relaunch_and_death_of_a_task_agent() {
     assert!(err.contains("follows from your commit"), "{err}");
     assert_eq!(file_report(&repo, Some("answer"), "it guards the cache.").unwrap().step, "question");
     let report = player.tick().expect("tick");
-    assert_eq!(report.agent_reports[0].1.verdict, "answer");
+    assert_eq!(report.foreman_reports[0].1.verdict, "answer");
     assert!(
-        player.relaunch_agent("s").is_err(),
+        player.relaunch_foreman("s").is_err(),
         "alive: nothing to relaunch"
     );
 
-    player.sessions_mut().alive.remove("s_agent");
+    player.sessions_mut().alive.remove("s_foreman");
     player.tick().expect("tick");
     let died = events::read_all(&home)
         .into_iter()
-        .filter(|e| e.kind == EventKind::AgentDied)
+        .filter(|e| e.kind == EventKind::ForemanDied)
         .count();
     assert_eq!(died, 1);
     assert!(
@@ -792,12 +792,12 @@ fn ask_relaunch_and_death_of_a_task_agent() {
         "dead: ask must say so"
     );
 
-    player.relaunch_agent("s").expect("relaunch");
+    player.relaunch_foreman("s").expect("relaunch");
     let call = player
         .sessions()
         .launched
         .iter()
-        .rfind(|c| c.slug == "s_agent")
+        .rfind(|c| c.slug == "s_foreman")
         .unwrap()
         .clone();
     let prompt = std::fs::read_to_string(&call.prompt_file).unwrap();
@@ -805,41 +805,41 @@ fn ask_relaunch_and_death_of_a_task_agent() {
         prompt.contains("You were relaunched") && prompt.contains("Step: post"),
         "{prompt}"
     );
-    assert!(player.sessions().alive("s_agent"));
+    assert!(player.sessions().alive("s_foreman"));
 }
 
 #[test]
-fn worker_and_task_agent_relaunches_are_capped_apart() {
-    let repo = repo_with_task_agents();
+fn worker_and_foreman_relaunches_are_capped_apart() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
     plan(&repo, &mut player);
-    agent_post(&repo);
+    foreman_post(&repo);
     let report = player.tick().expect("post tick");
     assert_eq!(report.launched, vec!["s".to_string()], "{report}");
     let counts = || {
         let t = task(&hub, "s");
-        (t.relaunches, t.agent.map(|a| a.relaunches).unwrap_or(99))
+        (t.relaunches, t.foreman.map(|a| a.relaunches).unwrap_or(99))
     };
 
     for n in 1..=2 {
-        player.sessions_mut().alive.remove("s_agent");
+        player.sessions_mut().alive.remove("s_foreman");
         open_player(&home)
-            .relaunch_agent("s")
-            .expect("relaunch --agent");
+            .relaunch_foreman("s")
+            .expect("relaunch --foreman");
         assert_eq!(counts(), (0, n));
     }
-    // The worker's own count is untouched by its task agent's.
+    // The worker's own count is untouched by its foreman's.
     player.sessions_mut().alive.remove("s");
     player.relaunch("s").expect("worker relaunch");
     assert_eq!(counts(), (1, 2));
 
     let err = player
-        .relaunch_agent("s")
-        .expect_err("a third task agent relaunch");
+        .relaunch_foreman("s")
+        .expect_err("a third foreman relaunch");
     assert!(
-        err.contains("task agent") && err.contains("max_relaunches"),
+        err.contains("foreman") && err.contains("max_relaunches"),
         "{err}"
     );
     let t = task(&hub, "s");
@@ -847,7 +847,7 @@ fn worker_and_task_agent_relaunches_are_capped_apart() {
     assert!(
         t.escalation
             .as_deref()
-            .is_some_and(|c| c.contains("relaunch limit (2) reached: the task agent")),
+            .is_some_and(|c| c.contains("relaunch limit (2) reached: the foreman")),
         "{:?}",
         t.escalation
     );
@@ -860,7 +860,7 @@ fn worker_and_task_agent_relaunches_are_capped_apart() {
         events::read_all(&home)
     );
     // Already escalated, another try is refused without a new escalation.
-    let err = player.relaunch_agent("s").expect_err("still capped");
+    let err = player.relaunch_foreman("s").expect_err("still capped");
     assert!(err.contains("already escalated"), "{err}");
 
     // `--reset` must name the session that hit its limit.
@@ -869,19 +869,19 @@ fn worker_and_task_agent_relaunches_are_capped_apart() {
         .reset_relaunch("s", false)
         .expect_err("not the worker's");
     assert!(
-        err.contains("dashboard relaunch s --agent --reset"),
+        err.contains("dashboard relaunch s --foreman --reset"),
         "{err}"
     );
     let launched = player.sessions().launched.len();
-    player.reset_relaunch("s", true).expect("reset --agent");
+    player.reset_relaunch("s", true).expect("reset --foreman");
     assert_eq!(player.sessions().launched.len(), launched + 1);
-    assert!(player.sessions().alive("s_agent"));
+    assert!(player.sessions().alive("s_foreman"));
     let t = task(&hub, "s");
     assert_ne!(t.status, Status::Escalated);
-    assert_eq!(counts(), (1, 1), "only the task agent's count starts over");
+    assert_eq!(counts(), (1, 1), "only the foreman's count starts over");
     let cleared = records::cleared_escalations(&hub, "s");
     assert_eq!(cleared.len(), 1, "{cleared:?}");
-    assert_eq!(cleared[0].session, "agent");
+    assert_eq!(cleared[0].session, "foreman");
     player.tick().expect("tick");
     assert!(
         events::read_all(&home)
@@ -893,46 +893,46 @@ fn worker_and_task_agent_relaunches_are_capped_apart() {
 }
 
 #[test]
-fn a_collected_report_starts_the_task_agents_relaunch_count_over() {
-    let repo = repo_with_task_agents();
+fn a_collected_report_starts_the_foremen_relaunch_count_over() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
     plan_post_finish(&repo, &mut player);
-    let agent_relaunches = || task(&hub, "s").agent.map(|a| a.relaunches).unwrap();
+    let foreman_relaunches = || task(&hub, "s").foreman.map(|a| a.relaunches).unwrap();
 
     for _ in 0..2 {
-        player.sessions_mut().alive.remove("s_agent");
-        player.relaunch_agent("s").expect("relaunch --agent");
+        player.sessions_mut().alive.remove("s_foreman");
+        player.relaunch_foreman("s").expect("relaunch --foreman");
     }
-    assert_eq!(agent_relaunches(), 2);
+    assert_eq!(foreman_relaunches(), 2);
 
     file_report(&repo, Some("unsure"), "hm.").expect("unsure");
     let report = player.tick().expect("tick");
-    assert_eq!(report.agent_reports.len(), 1, "{report}");
-    assert_eq!(agent_relaunches(), 0, "a report is progress");
+    assert_eq!(report.foreman_reports.len(), 1, "{report}");
+    assert_eq!(foreman_relaunches(), 0, "a report is progress");
 
-    player.sessions_mut().alive.remove("s_agent");
-    player.relaunch_agent("s").expect("relaunch after progress");
-    assert_eq!(agent_relaunches(), 1);
+    player.sessions_mut().alive.remove("s_foreman");
+    player.relaunch_foreman("s").expect("relaunch after progress");
+    assert_eq!(foreman_relaunches(), 1);
     assert_eq!(task(&hub, "s").status, Status::Tested);
 }
 
 #[test]
-fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
-    let repo = repo_with_task_agents();
+fn a_foreman_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     let idle = || {
         events::read_all(&home)
             .into_iter()
-            .filter(|e| e.kind == EventKind::AgentIdle)
+            .filter(|e| e.kind == EventKind::ForemanIdle)
             .collect::<Vec<_>>()
     };
     plan(&repo, &mut player);
-    let marker = player::stop_marker(&agent_dir(&repo)).expect("stop marker path");
+    let marker = player::stop_marker(&foreman_dir(&repo)).expect("stop marker path");
     assert!(
-        agent_dir(&repo)
+        foreman_dir(&repo)
             .join(".claude/settings.local.json")
             .exists()
     );
@@ -950,7 +950,7 @@ fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
     drop(player);
     let mut player = open_player(&home);
     // Its session outlived the player.
-    player.sessions_mut().alive.insert("s_agent".to_string());
+    player.sessions_mut().alive.insert("s_foreman".to_string());
     player.tick().expect("tick after a restart");
     assert_eq!(idle().len(), 1);
 
@@ -958,7 +958,7 @@ fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
     file_report(&repo, Some("unsure"), "which widget?").expect("unsure on the post");
     std::fs::write(&marker, "stop 101 2\n").unwrap();
     let report = player.tick().expect("tick");
-    assert_eq!(report.agent_reports.len(), 1, "{report}");
+    assert_eq!(report.foreman_reports.len(), 1, "{report}");
     player.tick().expect("tick");
     assert_eq!(idle().len(), 1, "a report answers it");
 
@@ -970,7 +970,7 @@ fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
     assert_eq!(idle().len(), 2);
 
     // Its post imported, the task waits on the worker: no longer owed.
-    agent_post(&repo);
+    foreman_post(&repo);
     player.tick().expect("post tick");
     std::fs::write(&marker, "stop 103 4\n").unwrap();
     player.tick().expect("tick");
@@ -978,19 +978,19 @@ fn a_task_agent_stopped_while_it_owes_work_is_reported_idle_once_per_stop() {
 }
 
 #[test]
-fn a_task_agent_whose_screen_goes_stale_while_it_owes_work_is_reported_idle() {
-    let repo = repo_with_task_agents();
+fn a_foreman_whose_screen_goes_stale_while_it_owes_work_is_reported_idle() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     let idle = || {
         events::read_all(&home)
             .into_iter()
-            .filter(|e| e.kind == EventKind::AgentIdle)
+            .filter(|e| e.kind == EventKind::ForemanIdle)
             .collect::<Vec<_>>()
     };
     plan(&repo, &mut player);
     player.sessions_mut().panes.insert(
-        "s_agent".to_string(),
+        "s_foreman".to_string(),
         "Do you trust this folder? [y/n]".to_string(),
     );
 
@@ -1010,7 +1010,7 @@ fn a_task_agent_whose_screen_goes_stale_while_it_owes_work_is_reported_idle() {
     );
 
     // Its post imported, the task waits on the worker: no longer owed.
-    agent_post(&repo);
+    foreman_post(&repo);
     player.tick().expect("post tick");
     player.set_clock(10_000);
     player.tick().expect("tick");
@@ -1018,27 +1018,27 @@ fn a_task_agent_whose_screen_goes_stale_while_it_owes_work_is_reported_idle() {
 }
 
 #[test]
-fn a_task_agent_dead_before_any_tick_saw_it_is_reported_once_per_launch() {
-    let repo = repo_with_task_agents();
+fn a_foreman_dead_before_any_tick_saw_it_is_reported_once_per_launch() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     let died = || {
         events::read_all(&home)
             .into_iter()
-            .filter(|e| e.kind == EventKind::AgentDied)
+            .filter(|e| e.kind == EventKind::ForemanDied)
             .count()
     };
 
     // Past the first run, which stays silent about whatever it finds.
     player.tick().expect("first tick");
-    // `task_agent_cmd` crashes at startup: dead by the end of the tick that
+    // `foreman_cmd` crashes at startup: dead by the end of the tick that
     // launched it.
     player
         .sessions_mut()
         .stillborn
-        .insert("s_agent".to_string());
+        .insert("s_foreman".to_string());
     plan(&repo, &mut player);
-    assert!(task(&Git::new(home.hub()), "s").agent.is_some());
+    assert!(task(&Git::new(home.hub()), "s").foreman.is_some());
     assert_eq!(died(), 1);
     player.tick().expect("tick");
     assert_eq!(died(), 1, "the same death isn't reported again");
@@ -1047,8 +1047,8 @@ fn a_task_agent_dead_before_any_tick_saw_it_is_reported_once_per_launch() {
     player.tick().expect("tick after a restart");
     assert_eq!(died(), 1, "nor after a player restart");
 
-    // `dashboard relaunch --agent`, from its own process, dies again.
-    open_player(&home).relaunch_agent("s").expect("relaunch");
+    // `dashboard relaunch --foreman`, from its own process, dies again.
+    open_player(&home).relaunch_foreman("s").expect("relaunch");
     player.tick().expect("tick after the relaunch");
     assert_eq!(died(), 2, "a relaunch that dies is a new death");
     player.tick().expect("tick");
@@ -1059,10 +1059,10 @@ fn a_task_agent_dead_before_any_tick_saw_it_is_reported_once_per_launch() {
 // Contests (spec §18)
 // --------------------------------------------------------------------------
 
-/// plan -> the task agent's post -> the worker contests the task check.
+/// plan -> the foreman's post -> the worker contests the task check.
 fn plan_post_contest(repo: &DirectorRepo, player: &mut Player<NullSessions>) -> TickReport {
     plan(repo, player);
-    agent_post(repo);
+    foreman_post(repo);
     player.tick().expect("post tick");
     let dir = paths::worker_clone(&repo.director_path(), "s");
     ensure_identity(&dir);
@@ -1081,8 +1081,8 @@ fn plan_post_contest(repo: &DirectorRepo, player: &mut Player<NullSessions>) -> 
 }
 
 #[test]
-fn a_contest_goes_to_the_task_agent_and_its_reply_back_to_the_worker() {
-    let repo = repo_with_task_agents();
+fn a_contest_goes_to_the_foreman_and_its_reply_back_to_the_worker() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
@@ -1100,25 +1100,25 @@ fn a_contest_goes_to_the_task_agent_and_its_reply_back_to_the_worker() {
         "{:?}",
         t.contest
     );
-    let asked: Vec<String> = agent_sent(&player)
+    let asked: Vec<String> = foreman_sent(&player)
         .into_iter()
         .filter(|m| m.starts_with("Step: contest c1"))
         .collect();
-    assert_eq!(asked.len(), 1, "{:?}", agent_sent(&player));
+    assert_eq!(asked.len(), 1, "{:?}", foreman_sent(&player));
     assert!(asked[0].contains("pure test"), "{}", asked[0]);
     assert!(
         !events::read_all(&home)
             .iter()
             .any(|e| e.kind == EventKind::Contested),
-        "the task agent's to answer"
+        "the foreman's to answer"
     );
 
-    let dir = agent_dir(&repo);
+    let dir = foreman_dir(&repo);
     Git::new(&dir).run(&["fetch", "-q", "origin"]).unwrap();
     Git::new(&dir)
         .run(&["merge", "-q", "--ff-only", "origin/task/s"])
         .unwrap();
-    let sha = agent_commit(
+    let sha = foreman_commit(
         &repo,
         &[(
             "tasks/s/contests/c1.md",
@@ -1134,7 +1134,7 @@ fn a_contest_goes_to_the_task_agent_and_its_reply_back_to_the_worker() {
     );
     assert_eq!(
         records::import_note(&hub, &sha).unwrap().actor,
-        Actor::TaskAgent
+        Actor::Foreman
     );
     let t = task(&hub, "s");
     assert_eq!(t.status, Status::InRevision);
@@ -1153,17 +1153,17 @@ fn a_contest_goes_to_the_task_agent_and_its_reply_back_to_the_worker() {
         && m.contains("created by the build")));
     assert_eq!(file_report(&repo, None, "fair point.").unwrap().verdict, report::Verdict::Replied);
     let report = player.tick().expect("tick");
-    assert!(report.agent_reports[0].1.text.contains("step: contest c1\n"), "{report}");
+    assert!(report.foreman_reports[0].1.text.contains("step: contest c1\n"), "{report}");
 }
 
 #[test]
-fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalates() {
-    let repo = director_repo(); // task agents off
+fn without_foremen_the_director_replies_and_a_contest_past_the_limit_escalates() {
+    let repo = director_repo(); // foremen off
     write_file(
         repo.path(),
         "roadmap.toml",
         &format!(
-            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\n\n[limits]\nmax_contest_rounds = 1\n{NO_TASK_AGENTS}"
+            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\n\n[limits]\nmax_contest_rounds = 1\n{NO_FOREMEN}"
         ),
     );
     commit(repo.path(), "one contest only");
@@ -1241,14 +1241,14 @@ fn without_task_agents_the_director_replies_and_a_contest_past_the_limit_escalat
 }
 
 #[test]
-fn another_tasks_agent_commits_merged_in_from_main_still_take_a_rebase() {
-    let repo = repo_with_task_agents();
+fn another_tasks_foreman_commits_merged_in_from_main_still_take_a_rebase() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
     plan_post_finish(&repo, &mut player);
 
-    // `t` is planned and its task agent launched while `s` is still tested.
+    // `t` is planned and its foreman launched while `s` is still tested.
     director_commit_on_branch(
         repo.path(),
         "task/t",
@@ -1259,11 +1259,11 @@ fn another_tasks_agent_commits_merged_in_from_main_still_take_a_rebase() {
     commit_empty(repo.path(), "stage: go");
     let report = player.tick().expect("plan tick");
     assert!(report.rejected.is_empty(), "{report}");
-    let t_dir = paths::agent_clone(&repo.director_path(), "t");
-    assert!(t_dir.exists(), "t's task agent clone: {report}");
+    let t_dir = paths::foreman_clone(&repo.director_path(), "t");
+    assert!(t_dir.exists(), "t's foreman clone: {report}");
 
-    // Accepting `s` lands its task agent's post on main, and the player
-    // merges main into the not-yet-posted task/t under t's agent.
+    // Accepting `s` lands its foreman's post on main, and the player
+    // merges main into the not-yet-posted task/t under t's foreman.
     director_pull_task_branch(repo.path(), "s");
     commit_empty(repo.path(), "accept: s");
     let report = player.tick().expect("accept tick");
@@ -1278,7 +1278,7 @@ fn another_tasks_agent_commits_merged_in_from_main_still_take_a_rebase() {
         "main merged into task/t"
     );
 
-    // t's agent posts on the tip it was launched at: the hub moved under
+    // t's foreman posts on the tip it was launched at: the hub moved under
     // it, which asks for a rebase, not a `history` rejection.
     ensure_identity(&t_dir);
     write_file(&t_dir, "tasks/t/prompt.md", "make t.txt\n");
@@ -1300,9 +1300,9 @@ fn another_tasks_agent_commits_merged_in_from_main_still_take_a_rebase() {
             .sessions()
             .sent
             .iter()
-            .any(|(k, m)| k == "t_agent"
-                && m.contains("The player rebased your commit onto it: agent/t is at")),
-        "t's agent's post is rebased"
+            .any(|(k, m)| k == "t_foreman"
+                && m.contains("The player rebased your commit onto it: foreman/t is at")),
+        "t's foreman's post is rebased"
     );
     assert!(task(&hub, "t").strikes.is_empty());
 }
@@ -1330,8 +1330,8 @@ fn a_lock_file_under_test_paths_is_refused_at_init() {
 // --------------------------------------------------------------------------
 
 #[test]
-fn a_director_send_back_is_ownership_when_task_agents_are_on() {
-    let repo = repo_with_task_agents();
+fn a_director_send_back_is_ownership_when_foremen_are_on() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
@@ -1353,8 +1353,8 @@ fn a_director_send_back_is_ownership_when_task_agents_are_on() {
 }
 
 #[test]
-fn a_director_contest_reply_is_ownership_when_task_agents_are_on() {
-    let repo = repo_with_task_agents();
+fn a_director_contest_reply_is_ownership_when_foremen_are_on() {
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
@@ -1376,7 +1376,7 @@ fn a_director_contest_reply_is_ownership_when_task_agents_are_on() {
 
 #[test]
 fn a_director_replan_after_posting_is_ownership() {
-    let repo = repo_with_task_agents();
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let mut player = open_player(&home);
     plan_post_finish(&repo, &mut player);
@@ -1395,7 +1395,7 @@ fn a_director_replan_after_posting_is_ownership() {
 
 #[test]
 fn a_worker_commit_outside_its_statuses_is_ignored_not_struck() {
-    let repo = repo_with_task_agents();
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
 
@@ -1415,7 +1415,7 @@ fn a_worker_commit_outside_its_statuses_is_ignored_not_struck() {
 
 #[test]
 fn a_worker_push_while_contested_is_ignored_not_struck() {
-    let repo = repo_with_task_agents();
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
@@ -1438,11 +1438,11 @@ const AB_SUITE: &str = "import Architecture\nimport Architect.Tests\nopen Dashbo
 check unit where\n  cmd = \"true\"\n  covers = all\n\n\
 check story where\n  cmd = \"sh stories/b.sh\"\n  covers = [b]\n  files = [\"stories/b.sh\"]\n";
 
-/// A task-agent repo on the `a`/`b` architecture with `s` planned on
-/// `modules` and staged; the task agent then commits its post plus
+/// A foreman repo on the `a`/`b` architecture with `s` planned on
+/// `modules` and staged; the foreman then commits its post plus
 /// `extra` (path, content). Returns the post tick's report.
 fn post_with(modules: &str, extra: &[(&str, &str)]) -> TickReport {
-    let repo = repo_with_task_agents();
+    let repo = repo_with_foremen();
     write_lean_arch(repo.path(), &format!("{LEAN_AB_MANIFEST}{APP_ROOT}"), &[("ab", LEAN_AB_IDL)], &[("Tests", AB_SUITE)]);
     for (f, t) in [("a/lib.rs", ""), ("b/lib.rs", ""), ("api/ab.rs", "pub enum Ab { X }\n"), ("stories/b.sh", "true\n")] {
         write_file(repo.path(), f, t);
@@ -1461,12 +1461,12 @@ fn post_with(modules: &str, extra: &[(&str, &str)]) -> TickReport {
     ];
     files.extend(extra.iter().map(|(p, t)| (p.to_string(), t.to_string())));
     let refs: Vec<(&str, &str)> = files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
-    agent_commit(&repo, &refs, "post: s");
+    foreman_commit(&repo, &refs, "post: s");
     player.tick().expect("post tick")
 }
 
 #[test]
-fn a_task_agent_writes_apis_and_test_files_inside_its_scope() {
+fn a_foreman_writes_apis_and_test_files_inside_its_scope() {
     let ownership = |r: &TickReport| r.rejected.iter().any(|x| x.reason == Reason::Ownership);
     // Its own Tests file (in every post) is its to write.
     let r = post_with("[\"a\"]", &[]);
@@ -1501,7 +1501,7 @@ fn marker(repo: &DirectorRepo, home: &Home, m: marker::Marker, why: Option<&str>
 
 #[test]
 fn the_director_stages_and_accepts_with_commands_and_an_ill_timed_marker_is_refused() {
-    let repo = repo_with_task_agents();
+    let repo = repo_with_foremen();
     let (_home_dir, home) = init_hub(&repo);
     let hub = Git::new(home.hub());
     let mut player = open_player(&home);
@@ -1528,14 +1528,14 @@ fn the_director_stages_and_accepts_with_commands_and_an_ill_timed_marker_is_refu
     assert_eq!(repo.git().rev_parse("HEAD").as_deref(), Some(out.commit.as_str()), "the checked-out branch moves");
     let report = player.tick().expect("stage tick");
     assert!(report.imported.iter().any(|(_, c, t)| *t == Transition::Stage && *c == out.commit), "{report}");
-    assert!(report.agents_launched.contains(&"s".to_string()), "{report}");
+    assert!(report.foremen_launched.contains(&"s".to_string()), "{report}");
     let err = marker(&repo, &home, marker::Marker::Stage, None).expect_err("staged twice");
     assert!(err.contains("stage: task/s is staged — only a ready task can be staged"), "{err}");
-    let err = marker(&repo, &home, marker::Marker::Unstage, None).expect_err("agent running");
-    assert!(err.contains("task agent is already running"), "{err}");
+    let err = marker(&repo, &home, marker::Marker::Unstage, None).expect_err("foreman running");
+    assert!(err.contains("foreman is already running"), "{err}");
 
-    // Post, finish, the task agent's accept report: the accept takes its why.
-    agent_post(&repo);
+    // Post, finish, the foreman's accept report: the accept takes its why.
+    foreman_post(&repo);
     player.tick().expect("post tick");
     let dir = paths::worker_clone(&repo.director_path(), "s");
     ensure_identity(&dir);

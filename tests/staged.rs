@@ -1,8 +1,8 @@
 // Integration tests for `staged`: a `ready` task never starts on its own; a
-// director's `stage:` marker releases it (status `staged`, its task agent is
+// director's `stage:` marker releases it (status `staged`, its foreman is
 // launched). The status survives `main` moving under the branch (the
 // player's `merge_unblock` merge becomes the tip). `unstage:`
-// puts it back while no task agent exists yet.
+// puts it back while no foreman exists yet.
 
 mod common;
 
@@ -17,12 +17,12 @@ use dashboard::state::{self, Status};
 use tempfile::TempDir;
 
 const PLAN: &str = "title = \"s\"\nphase = \"p1\"\nmodules = [\"app\"]\n";
-const ROADMAP: &str = "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"fake-task-agent\"\n";
+const ROADMAP: &str = "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\ngoal = \"ship the widget\"\n\n[player]\nruns = \"parallel\"\nforeman_cmd = \"fake-foreman\"\n";
 
 fn setup() -> (DirectorRepo, TempDir, Home, Player<NullSessions>) {
     let repo = director_repo();
     write_file(repo.path(), "roadmap.toml", ROADMAP);
-    commit(repo.path(), "turn task agents on");
+    commit(repo.path(), "turn foremen on");
     let home_dir = temp_home();
     let report = init::init(
         repo.path(),
@@ -90,7 +90,7 @@ fn a_ready_task_never_starts_until_staged() {
     assert_eq!(status(&hub, "s"), Status::Ready);
     for _ in 0..3 {
         let report = tick(&mut player);
-        assert!(report.agents_launched.is_empty(), "{report}");
+        assert!(report.foremen_launched.is_empty(), "{report}");
     }
     assert!(player.sessions().launched.is_empty());
     let kinds: Vec<_> = dashboard::events::read_all(&home).iter().map(|e| e.kind).collect();
@@ -98,7 +98,7 @@ fn a_ready_task_never_starts_until_staged() {
 
     let report = stage(&repo, &mut player);
     assert_eq!(status(&hub, "s"), Status::Staged);
-    assert_eq!(report.agents_launched, vec!["s".to_string()], "{report}");
+    assert_eq!(report.foremen_launched, vec!["s".to_string()], "{report}");
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn stage_and_unstage_are_refused_outside_their_status() {
 }
 
 #[test]
-fn staging_twice_or_unstaging_after_the_agent_launched_is_refused() {
+fn staging_twice_or_unstaging_after_the_foreman_launched_is_refused() {
     let (repo, _h, home, mut player) = setup();
     let hub = Git::new(home.hub());
     plan_only(&repo, &mut player);
@@ -160,8 +160,8 @@ fn staging_twice_or_unstaging_after_the_agent_launched_is_refused() {
 }
 
 #[test]
-fn unstage_puts_a_task_back_while_no_agent_exists() {
-    let repo = director_repo(); // task agents off: staging launches nothing
+fn unstage_puts_a_task_back_while_no_foreman_exists() {
+    let repo = director_repo(); // foremen off: staging launches nothing
     let home_dir = temp_home();
     let report = init::init(repo.path(), Some("proj"), Some(home_dir.path().join("home")))
         .expect("init");
@@ -213,25 +213,25 @@ fn staging_a_pending_task_and_a_spike_is_refused() {
 }
 
 #[test]
-fn a_task_agents_stage_is_ownership() {
+fn a_foremans_stage_is_ownership() {
     let (repo, _h, home, mut player) = setup();
     let hub = Git::new(home.hub());
     plan_only(&repo, &mut player);
     stage(&repo, &mut player);
-    let dir = dashboard::paths::agent_clone(&repo.director_path(), "s");
+    let dir = dashboard::paths::foreman_clone(&repo.director_path(), "s");
     let git = Git::new(&dir);
-    git.run(&["config", "user.name", "Test Agent"]).unwrap();
-    git.run(&["config", "user.email", "agent@example.com"]).unwrap();
+    git.run(&["config", "user.name", "Test Foreman"]).unwrap();
+    git.run(&["config", "user.email", "foreman@example.com"]).unwrap();
     git.run(&["config", "commit.gpgsign", "false"]).unwrap();
     commit_empty(&dir, "stage: sneaky");
     let report = tick(&mut player);
     assert_eq!(report.rejected.len(), 1, "{report}");
     assert_eq!(report.rejected[0].reason, Reason::Ownership);
-    assert_eq!(report.rejected[0].actor, Actor::TaskAgent);
+    assert_eq!(report.rejected[0].actor, Actor::Foreman);
     assert_eq!(status(&hub, "s"), Status::Staged);
 }
 
-// The old race: a dependent task used to get its agent in the accept's own
+// The old race: a dependent task used to get its foreman in the accept's own
 // tick. Now it becomes `ready` and waits for the director's `stage:`.
 #[test]
 fn a_dependent_task_waits_ready_after_its_dependency_is_accepted() {
@@ -243,7 +243,7 @@ fn a_dependent_task_waits_ready_after_its_dependency_is_accepted() {
     tick(&mut player);
     stage(&repo, &mut player);
 
-    let adir = dashboard::paths::agent_clone(&repo.director_path(), "s");
+    let adir = dashboard::paths::foreman_clone(&repo.director_path(), "s");
     let g = Git::new(&adir);
     g.run(&["config", "user.name", "a"]).unwrap();
     g.run(&["config", "user.email", "a@x"]).unwrap();
@@ -269,7 +269,7 @@ fn a_dependent_task_waits_ready_after_its_dependency_is_accepted() {
     let r = tick(&mut player);
     assert_eq!(status(&hub, "s"), Status::Accepted, "{r}");
     assert_eq!(status(&hub, "t"), Status::Ready, "{r}");
-    assert!(!r.agents_launched.contains(&"t".to_string()), "{r}");
+    assert!(!r.foremen_launched.contains(&"t".to_string()), "{r}");
     tick(&mut player);
     assert_eq!(status(&hub, "t"), Status::Ready);
 
@@ -278,20 +278,20 @@ fn a_dependent_task_waits_ready_after_its_dependency_is_accepted() {
     let r = tick(&mut player);
     assert!(r.rejected.is_empty(), "{r}");
     assert_eq!(status(&hub, "t"), Status::Staged);
-    assert!(r.agents_launched.contains(&"t".to_string()), "{r}");
+    assert!(r.foremen_launched.contains(&"t".to_string()), "{r}");
 }
 
-// Once the task agent exists its prompt is written; a replan could only
+// Once the foreman exists its prompt is written; a replan could only
 // desync it (and used to send the task back to `pending` under it).
 #[test]
-fn a_replan_is_refused_once_the_task_agent_exists() {
+fn a_replan_is_refused_once_the_foreman_exists() {
     let (repo, _h, home, mut player) = setup();
     let hub = Git::new(home.hub());
     director_commit_on_branch(repo.path(), "task/b", "tasks/b/task.toml", PLAN, "plan: b");
     plan_only(&repo, &mut player);
     stage(&repo, &mut player);
     director_pull_task_branch(repo.path(), "s");
-    assert!(records::agent_launched(&hub, "s"));
+    assert!(records::foreman_launched(&hub, "s"));
 
     director_commit_on_branch(
         repo.path(),

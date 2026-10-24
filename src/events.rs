@@ -37,7 +37,7 @@ pub enum EventKind {
     Conflict,
     /// An accept whose merge with `main` failed the suite: back to the worker.
     MergeFailed,
-    /// A worker contested a test and task agents are off: the director replies.
+    /// A worker contested a test and foremen are off: the director replies.
     Contested,
     /// `main`'s suite has impure checks under the current sandbox (spec §20).
     MainImpure,
@@ -63,15 +63,15 @@ pub enum EventKind {
     /// A live worker ended its turn while it still owes a finish (or hit an
     /// API error): only the director or operator can get it going again.
     SessionIdle,
-    /// A task agent was launched to post (or review) a task (spec §17).
-    AgentLaunched,
-    /// A task agent's report: its verdict on a post, review or question.
-    AgentReport,
-    /// A task agent's session died before its task finished.
-    AgentDied,
-    /// A live task agent ended its turn while it still owes a post, review
+    /// A foreman was launched to post (or review) a task (spec §17).
+    ForemanLaunched,
+    /// A foreman's report: its verdict on a post, review or question.
+    ForemanReport,
+    /// A foreman's session died before its task finished.
+    ForemanDied,
+    /// A live foreman ended its turn while it still owes a post, review
     /// or contest reply, without a report (or hit an API error).
-    AgentIdle,
+    ForemanIdle,
     PlayerError,
 }
 
@@ -97,10 +97,10 @@ impl EventKind {
             EventKind::Retired => "retired",
             EventKind::SessionDied => "session_died",
             EventKind::SessionIdle => "session_idle",
-            EventKind::AgentLaunched => "agent_launched",
-            EventKind::AgentReport => "agent_report",
-            EventKind::AgentDied => "agent_died",
-            EventKind::AgentIdle => "agent_idle",
+            EventKind::ForemanLaunched => "foreman_launched",
+            EventKind::ForemanReport => "foreman_report",
+            EventKind::ForemanDied => "foreman_died",
+            EventKind::ForemanIdle => "foreman_idle",
             EventKind::PlayerError => "player_error",
         }
     }
@@ -145,8 +145,8 @@ impl Event {
                 "review it: git fetch hub && git log hub/task/{slug}, then send back, or `dashboard accept {slug} --why \"...\"` (a spike: `dashboard conclude {slug} --why \"...\"`)"
             )),
             EventKind::Escalated if self.message.starts_with("relaunch limit (") => {
-                let flag = if self.message.contains("the task agent was relaunched") {
-                    " --agent"
+                let flag = if self.message.contains("the foreman was relaunched") {
+                    " --foreman"
                 } else {
                     ""
                 };
@@ -184,7 +184,7 @@ impl Event {
             ),
             EventKind::SuiteSlow => None, // informational
             EventKind::Ready => Some(format!(
-                "with task agents on, start it with `dashboard stage {slug}`; else post it: git fetch hub && git merge (or checkout) hub/task/{slug}"
+                "with foremen on, start it with `dashboard stage {slug}`; else post it: git fetch hub && git merge (or checkout) hub/task/{slug}"
             )),
             EventKind::DirectorRejected => {
                 Some("fetch hub and fix with a new commit / reset".to_string())
@@ -197,18 +197,18 @@ impl Event {
             EventKind::SessionDied => Some(format!(
                 "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug}; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug}{RELAUNCH_CAP}"
             )),
-            EventKind::AgentLaunched => None, // informational: the task agent posts or reviews it
-            EventKind::AgentReport => Some(format!(
+            EventKind::ForemanLaunched => None, // informational: the foreman posts or reviews it
+            EventKind::ForemanReport => Some(format!(
                 "accept: drop the checks its suite line marks drop with `dashboard trim {slug} <check>…`, then `dashboard accept {slug}` (its why becomes the body); unsure: `dashboard ask {slug} \"...\"` or take it to the operator; posted, sent-back, replied, answer: nothing to do"
             )),
-            EventKind::AgentDied => Some(format!(
-                "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug} --agent; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug} --agent{RELAUNCH_CAP}"
+            EventKind::ForemanDied => Some(format!(
+                "diagnose from the exit status and last screen before relaunching: a usage/rate limit or API error: wait for the reset, then dashboard relaunch {slug} --foreman; auth failure, command not found, a trust/permission dialog or a crash at startup: take it to the operator (a relaunch dies the same way); a one-off crash mid-work: dashboard relaunch {slug} --foreman{RELAUNCH_CAP}"
             )),
             EventKind::SessionIdle => Some(format!(
-                "diagnose from the last screen, don't just relaunch: a usage/rate limit or API error: wait for the reset, then the operator nudges it or you kill and relaunch it; a question or confusion: nothing you commit reaches a worker mid-work, so pass it to its task agent (dashboard ask {slug} \"...\") if the brief or tests are wrong, and to the operator to answer in the session; a dialog or auth failure: the operator; an unexplained hang: tmux kill-session -t <that session>, then dashboard relaunch {slug}{RELAUNCH_CAP}"
+                "diagnose from the last screen, don't just relaunch: a usage/rate limit or API error: wait for the reset, then the operator nudges it or you kill and relaunch it; a question or confusion: nothing you commit reaches a worker mid-work, so pass it to its foreman (dashboard ask {slug} \"...\") if the brief or tests are wrong, and to the operator to answer in the session; a dialog or auth failure: the operator; an unexplained hang: tmux kill-session -t <that session>, then dashboard relaunch {slug}{RELAUNCH_CAP}"
             )),
-            EventKind::AgentIdle => Some(format!(
-                "diagnose from the last screen, don't just relaunch: a usage/rate limit or API error: wait for the reset, then nudge it (dashboard ask {slug} \"...\"); a question or confusion: answer it with dashboard ask {slug} \"...\"; a dialog or auth failure: the operator; an unexplained hang: tmux kill-session -t <that session>, then dashboard relaunch {slug} --agent{RELAUNCH_CAP}"
+            EventKind::ForemanIdle => Some(format!(
+                "diagnose from the last screen, don't just relaunch: a usage/rate limit or API error: wait for the reset, then nudge it (dashboard ask {slug} \"...\"); a question or confusion: answer it with dashboard ask {slug} \"...\"; a dialog or auth failure: the operator; an unexplained hang: tmux kill-session -t <that session>, then dashboard relaunch {slug} --foreman{RELAUNCH_CAP}"
             )),
             EventKind::PlayerError => None, // the message is the whole story
         }
@@ -420,9 +420,9 @@ mod tests {
     fn session_health_hints_diagnose_first_and_never_say_tmux_attach() {
         for kind in [
             EventKind::SessionDied,
-            EventKind::AgentDied,
+            EventKind::ForemanDied,
             EventKind::SessionIdle,
-            EventKind::AgentIdle,
+            EventKind::ForemanIdle,
         ] {
             let e = Event {
                 seq: 1,
@@ -452,9 +452,9 @@ mod tests {
             slug: Some("s".to_string()),
             message: message.to_string(),
         };
-        let hint = escalated("relaunch limit (2) reached: the task agent was relaunched 2 times since its last progress and died again").hint().unwrap();
+        let hint = escalated("relaunch limit (2) reached: the foreman was relaunched 2 times since its last progress and died again").hint().unwrap();
         assert!(
-            hint.contains("dashboard relaunch s --agent --reset"),
+            hint.contains("dashboard relaunch s --foreman --reset"),
             "{hint}"
         );
         let hint = escalated("relaunch limit (2) reached: the worker was relaunched 2 times since its last progress and died again").hint().unwrap();

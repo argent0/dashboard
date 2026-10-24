@@ -1,8 +1,8 @@
-// The task agent's report (spec §17). The player notes in the agent's
+// The foreman's report (spec §17). The player notes in the foreman's
 // worktree git dir which step waits for a report (`Owed`): the step it
-// pasted (post, review, contest), the commit it imported from the agent
+// pasted (post, review, contest), the commit it imported from the foreman
 // (posted, sent-back, replied) or the director's question.
-// `dashboard report` checks the agent's verdict against it and writes the
+// `dashboard report` checks the foreman's verdict against it and writes the
 // report there atomically; the player collects it, fills in slug, step and
 // commit from its own note, and turns it into a note and an event.
 
@@ -16,7 +16,7 @@ const QUESTION_FILE: &str = "dashboard-question.json";
 /// The report, written by `dashboard report`, consumed by the player.
 const REPORT_FILE: &str = "dashboard-report.json";
 
-/// A task agent's verdict on its step.
+/// A foreman's verdict on its step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Verdict {
@@ -54,13 +54,13 @@ impl Verdict {
     }
 }
 
-/// A step waiting for the task agent's report: what the player asked or
+/// A step waiting for the foreman's report: what the player asked or
 /// imported, and the verdicts that close it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Owed {
     /// `post`, `review r<N>`, `contest c<N>` or `question`.
     pub step: String,
-    /// The agent's commit the player imported for this step.
+    /// The foreman's commit the player imported for this step.
     pub commit: Option<String>,
     pub verdicts: Vec<Verdict>,
 }
@@ -82,7 +82,7 @@ impl Owed {
         }
     }
 
-    /// The agent's imported commit: its verdict follows from the import.
+    /// The foreman's imported commit: its verdict follows from the import.
     pub fn imported(step: String, commit: &str, verdict: Verdict) -> Owed {
         Owed {
             step,
@@ -105,7 +105,7 @@ impl Owed {
     }
 }
 
-/// What the task agent hands `dashboard report`.
+/// What the foreman hands `dashboard report`.
 #[derive(Debug, Clone, Default)]
 pub struct Draft {
     /// Left out after an import: the import's verdict.
@@ -232,7 +232,7 @@ fn check(pending: &[Owed], draft: &Draft) -> Result<Filed, String> {
 }
 
 /// `dashboard report`: checks `draft` against what waits in `git_dir` (a
-/// task agent's worktree git dir) and writes the report atomically for
+/// foreman's worktree git dir) and writes the report atomically for
 /// the player to collect.
 pub fn submit(git_dir: &Path, draft: &Draft) -> Result<Filed, String> {
     let filed = check(&pending(git_dir), draft)?;

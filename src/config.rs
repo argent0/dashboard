@@ -23,7 +23,7 @@ pub struct RoadmapConfig {
 }
 
 /// `[budget]`: how long the project suite may take. Like `[sandbox]` it lives
-/// in `roadmap.toml`, so a task agent editing the suite can't loosen it. Every
+/// in `roadmap.toml`, so a foreman editing the suite can't loosen it. Every
 /// field is seconds; 0 (the default) turns that limit off.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(default)]
@@ -50,7 +50,7 @@ impl BudgetConfig {
 }
 
 /// `[sandbox]`: the jail every check runs in (`src/sandbox.rs`). It's in
-/// `roadmap.toml`, not the Lean suite, because task agents may edit the
+/// `roadmap.toml`, not the Lean suite, because foremen may edit the
 /// suite but must never be able to loosen the jail it runs in.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -134,7 +134,7 @@ pub struct Limits {
     /// (spec §18); one more escalates.
     pub max_contest_rounds: u32,
     /// How many times `dashboard relaunch` may restart a task's worker, and
-    /// separately its task agent, since that session last made progress;
+    /// separately its foreman, since that session last made progress;
     /// one more escalates.
     pub max_relaunches: u32,
     pub strikes: StrikeLimits,
@@ -218,15 +218,15 @@ impl StrikeLimits {
 pub struct PlayerConfig {
     /// Launches a task's implementing worker (spec §9's launch row).
     pub agent_cmd: String,
-    /// Launches a task's task agent, the director's delegate that posts and
-    /// reviews it (spec §17). Empty turns task agents off: the director
+    /// Launches a task's foreman, the director's delegate that posts and
+    /// reviews it (spec §17). Empty turns foremen off: the director
     /// posts and sends back itself.
-    pub task_agent_cmd: String,
+    pub foreman_cmd: String,
     /// Seconds a live session that owes work may show the same screen
     /// before it's reported idle (its tmux pane unchanged: hung, or sitting
     /// on a dialog), whatever the agent. 0 turns this off.
     pub idle_after: u64,
-    /// Lock files (`Cargo.lock`, …) a task agent may commit with a post,
+    /// Lock files (`Cargo.lock`, …) a foreman may commit with a post,
     /// send-back or contest reply, because a test-only dependency's check
     /// rewrites them. Read from main's tip, so an agent can't widen it. The
     /// impurity check still proves a committed lock is the one the build
@@ -262,7 +262,7 @@ impl Default for PlayerConfig {
     fn default() -> Self {
         Self {
             agent_cmd: "claude --dangerously-skip-permissions".to_string(),
-            task_agent_cmd: "claude --dangerously-skip-permissions".to_string(),
+            foreman_cmd: "claude --dangerously-skip-permissions".to_string(),
             idle_after: 900,
             lock_files: Vec::new(),
             lock_regen: BTreeMap::new(),
@@ -272,8 +272,8 @@ impl Default for PlayerConfig {
 }
 
 impl PlayerConfig {
-    pub fn task_agents_enabled(&self) -> bool {
-        !self.task_agent_cmd.trim().is_empty()
+    pub fn foremen_enabled(&self) -> bool {
+        !self.foreman_cmd.trim().is_empty()
     }
 }
 
@@ -531,7 +531,7 @@ impl Check {
 /// The director's suite file: checks and the `suite where` block.
 pub const TESTS_LEAN: &str = "architecture/Tests.lean";
 
-/// `architecture/Tests/<slug>.lean`: the task agent's (or director's) post.
+/// `architecture/Tests/<slug>.lean`: the foreman's (or director's) post.
 pub fn tests_file(slug: &str) -> String {
     format!("{ARCH_DIR}/Tests/{slug}.lean")
 }
@@ -678,7 +678,7 @@ pub struct TaskConfig {
     /// scope and its run set. Required for `kind = "task"`.
     pub modules: Vec<String>,
     pub check: Option<Check>,
-    /// The director's context for the task agent (spec §17): pasted into
+    /// The director's context for the foreman (spec §17): pasted into
     /// its prompt verbatim.
     pub brief: String,
     /// flaky-test-fix only: the files unpinned for this task.
@@ -996,7 +996,7 @@ pub(crate) fn check_lock_files(lock_files: &[String], test_paths: &[String]) -> 
         .find(|f| path_under_test_paths(f, test_paths))
     {
         Some(f) => Err(format!(
-            "[player] lock_files: {f:?} is under test_paths or a fixture, so it is pinned against the worker; a lock file is the task agent's and the worker's both"
+            "[player] lock_files: {f:?} is under test_paths or a fixture, so it is pinned against the worker; a lock file is the foreman's and the worker's both"
         )),
         None => Ok(()),
     }
@@ -1047,7 +1047,7 @@ pub struct ArchConfig {
 
 /// A `fixture` block: test setup (a stand-in, scenario ids, helpers) under
 /// `paths`, which lie under no node. A view holds it when one of the view's
-/// nodes is among `users`; a task agent writes it when one of the task's
+/// nodes is among `users`; a foreman writes it when one of the task's
 /// modules is; workers read it, pinned.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -1147,7 +1147,7 @@ pub fn is_arch_path(path: &str) -> bool {
 }
 
 /// Whether `path` is an API's Lean IDL (`architecture/Apis/<name>.lean`): the
-/// one part of the package a task agent may write.
+/// one part of the package a foreman may write.
 pub fn is_arch_api_file(path: &str) -> bool {
     path.strip_prefix("architecture/Apis/").is_some_and(|rest| !rest.contains('/') && rest.ends_with(".lean"))
 }

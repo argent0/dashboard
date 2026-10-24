@@ -41,7 +41,7 @@ const TEMPLATES: &[(&str, &[&str])] = &[
     ("spike.finish-accepted", &["answer"]),
     ("spike.next-round", &["round", "slug", "findings", "claims"]),
     (
-        "task-agent.preamble",
+        "foreman.preamble",
         &[
             "slug",
             "project",
@@ -50,37 +50,37 @@ const TEMPLATES: &[(&str, &[&str])] = &[
             "brief",
         ],
     ),
-    ("task-agent.relaunched", &["slug"]),
-    ("task-agent.queued", &[]),
-    ("task-agent.synced", &["slug", "tip"]),
-    ("task-agent.sync-forward", &["slug"]),
-    ("task-agent.rebased", &["slug", "tip"]),
-    ("task-agent.sync-rebase", &["slug"]),
-    ("task-agent.post", &["slug", "sync", "check"]),
-    ("task-agent.post-check-task", &["slug"]),
-    ("task-agent.post-check-flaky", &[]),
-    ("task-agent.post-check-speedup", &[]),
+    ("foreman.relaunched", &["slug"]),
+    ("foreman.queued", &[]),
+    ("foreman.synced", &["slug", "tip"]),
+    ("foreman.sync-forward", &["slug"]),
+    ("foreman.rebased", &["slug", "tip"]),
+    ("foreman.sync-rebase", &["slug"]),
+    ("foreman.post", &["slug", "sync", "check"]),
+    ("foreman.post-check-task", &["slug"]),
+    ("foreman.post-check-flaky", &[]),
+    ("foreman.post-check-speedup", &[]),
     (
-        "task-agent.review",
+        "foreman.review",
         &["round", "slug", "tip", "base", "sync", "cap", "notes"],
     ),
-    ("task-agent.review-notes", &["notes"]),
-    ("task-agent.review-cap-last", &[]),
-    ("task-agent.review-cap-over", &["max"]),
-    ("task-agent.contest", &["n", "slug", "sync", "reason", "remaining"]),
-    ("task-agent.wait", &["slug", "status"]),
-    ("task-agent.rejected", &["message", "recovery"]),
-    ("task-agent.recovery-history", &["slug"]),
-    ("task-agent.recovery-reset", &["slug", "tip"]),
-    ("task-agent.recovery-other", &["slug"]),
-    ("task-agent.rebase", &["slug", "sync"]),
-    ("task-agent.hold", &["slug", "status"]),
-    ("task-agent.imported-post", &["commit"]),
-    ("task-agent.imported-send-back", &["commit"]),
-    ("task-agent.imported-reply", &["commit"]),
-    ("task-agent.escalated", &["slug", "cause"]),
-    ("task-agent.question", &["question"]),
-    ("task-agent.report-dropped", &["message"]),
+    ("foreman.review-notes", &["notes"]),
+    ("foreman.review-cap-last", &[]),
+    ("foreman.review-cap-over", &["max"]),
+    ("foreman.contest", &["n", "slug", "sync", "reason", "remaining"]),
+    ("foreman.wait", &["slug", "status"]),
+    ("foreman.rejected", &["message", "recovery"]),
+    ("foreman.recovery-history", &["slug"]),
+    ("foreman.recovery-reset", &["slug", "tip"]),
+    ("foreman.recovery-other", &["slug"]),
+    ("foreman.rebase", &["slug", "sync"]),
+    ("foreman.hold", &["slug", "status"]),
+    ("foreman.imported-post", &["commit"]),
+    ("foreman.imported-send-back", &["commit"]),
+    ("foreman.imported-reply", &["commit"]),
+    ("foreman.escalated", &["slug", "cause"]),
+    ("foreman.question", &["question"]),
+    ("foreman.report-dropped", &["message"]),
 ];
 
 /// What the player joins templates with when one prompt is made of several
@@ -257,9 +257,9 @@ impl Prompts {
         format!("{preamble}{RULE}{prompt}{JOIN}{question}")
     }
 
-    /// A task agent's prompt file: preamble (plus the relaunch note), then
+    /// A foreman's prompt file: preamble (plus the relaunch note), then
     /// the step.
-    pub fn agent_launch(&self, preamble: &str, relaunched: Option<&str>, step: &str) -> String {
+    pub fn foreman_launch(&self, preamble: &str, relaunched: Option<&str>, step: &str) -> String {
         match relaunched {
             Some(r) => format!("{preamble}{JOIN}{r}{RULE}{step}"),
             None => format!("{preamble}{RULE}{step}"),
@@ -289,23 +289,23 @@ impl Prompts {
         let rebase = |sec: &str| {
             max(&[&format!("{sec}.rebased"), &format!("{sec}.sync-rebase")])
         };
-        let step = forward("task-agent")
+        let step = forward("foreman")
             + [
-            s("task-agent.post")
+            s("foreman.post")
                 + max(&[
-                    "task-agent.post-check-task",
-                    "task-agent.post-check-flaky",
-                    "task-agent.post-check-speedup",
+                    "foreman.post-check-task",
+                    "foreman.post-check-flaky",
+                    "foreman.post-check-speedup",
                 ]),
-            s("task-agent.review")
-                + max(&["task-agent.review-cap-last", "task-agent.review-cap-over"])
-                + s("task-agent.review-notes"),
-            s("task-agent.contest"),
+            s("foreman.review")
+                + max(&["foreman.review-cap-last", "foreman.review-cap-over"])
+                + s("foreman.review-notes"),
+            s("foreman.contest"),
         ]
         .into_iter()
         .max()
         .unwrap_or(0);
-        let step = step.max(s("task-agent.wait"));
+        let step = step.max(s("foreman.wait"));
         sizes.extend([
             (
                 "worker prompt".to_string(),
@@ -325,16 +325,16 @@ impl Prompts {
                 s("spike.next-round") + JOIN.len() + s("spike.question"),
             ),
             (
-                "task agent prompt".to_string(),
-                s("task-agent.preamble")
+                "foreman prompt".to_string(),
+                s("foreman.preamble")
                     + JOIN.len()
-                    + s("task-agent.relaunched")
+                    + s("foreman.relaunched")
                     + JOIN.len()
-                    + s("task-agent.queued")
+                    + s("foreman.queued")
                     + RULE.len()
                     + step,
             ),
-            ("task agent step".to_string(), step),
+            ("foreman step".to_string(), step),
             (
                 "worker sync message".to_string(),
                 forward("worker")
@@ -345,8 +345,8 @@ impl Prompts {
                 s("worker.released") + rebase("worker"),
             ),
             (
-                "task agent rebase".to_string(),
-                s("task-agent.rebase") + rebase("task-agent"),
+                "foreman rebase".to_string(),
+                s("foreman.rebase") + rebase("foreman"),
             ),
             (
                 "worker rejection".to_string(),
@@ -358,12 +358,12 @@ impl Prompts {
                     ]),
             ),
             (
-                "task agent rejection".to_string(),
-                s("task-agent.rejected")
+                "foreman rejection".to_string(),
+                s("foreman.rejected")
                     + max(&[
-                        "task-agent.recovery-history",
-                        "task-agent.recovery-reset",
-                        "task-agent.recovery-other",
+                        "foreman.recovery-history",
+                        "foreman.recovery-reset",
+                        "foreman.recovery-other",
                     ]),
             ),
         ]);
@@ -523,7 +523,7 @@ mod tests {
         assert!(err.contains("max-bytes is required"), "{err}");
         let err = Prompts::parse(&replace("max-bytes 6208", "max-bytes 500")).unwrap_err();
         assert!(
-            err.contains("over max-bytes 500") && err.contains("task agent prompt"),
+            err.contains("over max-bytes 500") && err.contains("foreman prompt"),
             "{err}"
         );
     }
@@ -556,7 +556,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("worker.launch is 1577 bytes, over its max-bytes 1000"),
+            err.contains("worker.launch is 1574 bytes, over its max-bytes 1000"),
             "{err}"
         );
         let err = Prompts::parse(&replace(
@@ -589,8 +589,8 @@ mod tests {
         let messages = ["worker.review", "worker.contest-reply", "worker.merge-failed"];
         let largest = messages.iter().map(|k| size(k)).max().unwrap();
         assert_eq!(size("worker sync message"), synced + largest);
-        let rebased = size("task-agent.rebased").max(size("task-agent.sync-rebase"));
-        assert_eq!(size("task agent rebase"), size("task-agent.rebase") + rebased);
+        let rebased = size("foreman.rebased").max(size("foreman.sync-rebase"));
+        assert_eq!(size("foreman rebase"), size("foreman.rebase") + rebased);
         // Each variant fills the message's {sync}.
         let sync = p.render("worker.synced", &[("slug", "s"), ("tip", "abc")]);
         let filled = p.render(

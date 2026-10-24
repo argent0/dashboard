@@ -39,9 +39,9 @@ impl DirectorRepo {
 }
 
 /// Appended to every fixture `roadmap.toml`: these tests drive the
-/// director's own posts and send-backs, so task agents (spec §17) are off
+/// director's own posts and send-backs, so foremen (spec §17) are off
 /// unless a test turns them on.
-pub const NO_TASK_AGENTS: &str = "\n[player]\nruns = \"parallel\"\ntask_agent_cmd = \"\"\n";
+pub const NO_FOREMEN: &str = "\n[player]\nruns = \"parallel\"\nforeman_cmd = \"\"\n";
 
 pub fn director_repo() -> DirectorRepo {
     let dir = TempDir::new().expect("tempdir");
@@ -51,7 +51,7 @@ pub fn director_repo() -> DirectorRepo {
         dir.path(),
         "roadmap.toml",
         &format!(
-            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_TASK_AGENTS}"
+            "title = \"Test Project\"\n\n[[phases]]\nid = \"p1\"\ntitle = \"Phase One\"\n{NO_FOREMEN}"
         ),
     );
     write_starter(dir.path(), &suite_lean("[[check]]\nname = \"unit\"\ncmd = \"true\"\n"));
