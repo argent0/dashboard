@@ -42,13 +42,19 @@ def Pred.toJson : Pred → Json
   | .or p q => Json.mkObj [("or", Json.arr #[p.toJson, q.toJson])]
   | .not p => Json.mkObj [("not", p.toJson)]
 
+def Adapter.toJson : Adapter → Json
+  | .display => "display"
+  | .store => "store"
+
+def adapters (as : List Adapter) : Json := Json.arr (as.toArray.map Adapter.toJson)
+
 def TypeDecl.toJson (t : TypeDecl) : Json :=
   let kind : List (String × Json) := match t.kind with
-    | .prim p => [("kind", Json.mkObj [("repr", p.repr)]), ("max_len", Lean.toJson p.maxLen)]
-    | .refTo a ty => [("kind", Json.mkObj [("ref", Json.arr #[a, ty])]), ("max_len", Lean.toJson (0 : Nat))]
+    | .prim p as => [("kind", Json.mkObj [("repr", p.repr), ("adapters", adapters as)]), ("max_len", Lean.toJson p.maxLen)]
+    | .refTo a ty as => [("kind", Json.mkObj [("ref", Json.arr #[a, ty]), ("adapters", adapters as)]), ("max_len", Lean.toJson (0 : Nat))]
     | .tuple ps => [("kind", Json.mkObj [("tuple", Json.arr (ps.toArray.map Prim.toJson))]), ("max_len", Lean.toJson (0 : Nat))]
   let pred := match t.pred with | some p => p.toJson | none => Json.null
-  Json.mkObj ([("name", Json.str t.name), ("display", Json.bool t.display), ("store", Json.bool t.store), ("pred", pred)] ++ kind)
+  Json.mkObj ([("name", Json.str t.name), ("pred", pred)] ++ kind)
 
 def Token.toJson (t : Token) : Json :=
   let kind : Json := match t.kind with

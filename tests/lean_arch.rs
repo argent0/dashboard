@@ -117,7 +117,7 @@ fn fns_sums_elements_and_containers_export_with_their_measures() {
     assert_eq!((idl.fn_count(), idl.inputs(), idl.constructors(), idl.slots()), (3, 3, 4, 3));
     assert_eq!(idl.sums.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Written", "Rows"]);
     assert_eq!(idl.fns[2].returns, "Rows");
-    assert!(idl.type_decl("Id").unwrap().store && idl.type_decl("Id").unwrap().display);
+    assert!(idl.type_decl("Id").unwrap().stores() && idl.type_decl("Id").unwrap().shows());
     assert_eq!(idl.elements[0].variants[0].fields[2].max_len, 16);
     assert_eq!(idl.container_refs(), [("foldable-db", "Seq")]);
     let (_, errs) = sync_bindings(d.path(), &loaded, true);
@@ -209,6 +209,7 @@ fn refinements_and_tokens_are_elaborated_exported_budgeted_and_linted() {
         ("where v.1 < v.2", "where v.3 < 1", "v.3: the product has 2 components"),
         ("where v.1 < v.2", "where v < 1", "a product is compared by component"),
         ("i64 × i64 where v.1 < v.2", "i64 × i64 × i64 × i64 × i64 where v.1 < v.2", "two to four components"),
+        ("i64 × i64 where v.1 < v.2", "i64 × i64 store where v.1 < v.2", "display and store are for scalar types, not a product"),
     ] {
         write_lean_arch(r, PROOFS_MANIFEST, &[("nutrition-db", &PROOFS_IDL.replace(from, to)), ("nutrition-web", PROOFS_WEB)], &[]);
         let e = arch::load(r).unwrap_err();

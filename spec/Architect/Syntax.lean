@@ -288,6 +288,13 @@ def ctorTerm (c : Lean.Ident) (args : Array Lean.Ident) : Lean.MacroM (Lean.TSyn
 def classTerm (cls : Lean.Ident) : Lean.TSyntax `term :=
   asTerm (Lean.mkIdent (`Dashboard.Class ++ cls.getId))
 
+/-- The adapters a `display` and a `store` keyword ask for, in that order. -/
+def adapterTerms (d s : Option Lean.Syntax) : Lean.MacroM (Lean.TSyntax `term) := do
+  let mut as := #[]
+  if d.isSome then as := as.push (← `(Dashboard.Adapter.display))
+  if s.isSome then as := as.push (← `(Dashboard.Adapter.store))
+  listTerm as
+
 def addItem (acc : IdlAcc) : Lean.TSyntax `idlItem → Lean.MacroM IdlAcc
   | `(idlItem| type $n:ident : $[$ps:idlPrim]×* $[display%$d]? $[store%$s]? $[where $w:idlPred]?) => do
     let mut pts := #[]
@@ -297,16 +304,18 @@ def addItem (acc : IdlAcc) : Lean.TSyntax `idlItem → Lean.MacroM IdlAcc
       pts := pts.push pt
       tys := tys.push ty
     if pts.size > 4 then Lean.Macro.throwErrorAt n "a product has two to four components"
-    let kind ← if pts.size == 1 then `(Dashboard.TypeKind.prim $(pts[0]!)) else `(Dashboard.TypeKind.tuple $(← listTerm pts))
+    let adapters ← adapterTerms d s
+    if pts.size > 1 then
+      if let some x := d.orElse fun _ => s then
+        Lean.Macro.throwErrorAt x "display and store are for scalar types, not a product"
+    let kind ← if pts.size == 1 then `(Dashboard.TypeKind.prim $(pts[0]!) $adapters) else `(Dashboard.TypeKind.tuple $(← listTerm pts))
     let ty ← tys.pop.foldrM (fun a acc => `($a × $acc)) tys.back!
-    let d ← if d.isSome then `(true) else `(false)
-    let s ← if s.isSome then `(true) else `(false)
     let (pred, ty) ← match w with
       | some w =>
         let (e, prop) ← predTerms (ps.map primIsText).toList w
         pure (← `(some $e), ← `({ v : $ty // $prop }))
       | none => pure (← `(none), ty)
-    let decl ← `(Dashboard.TypeDecl.mk $(strLit n) $kind $d $s $pred)
+    let decl ← `(Dashboard.TypeDecl.mk $(strLit n) $kind $pred)
     let cmd ← `(abbrev $n : Type := $ty)
     pure { acc with cmds := acc.cmds.push cmd, types := acc.types.push decl }
   | `(idlItem| token $n:ident : $p:idlPrim $k:idlTokenKind $[store%$s]?) => do
@@ -327,9 +336,7 @@ def addItem (acc : IdlAcc) : Lean.TSyntax `idlItem → Lean.MacroM IdlAcc
   | `(idlItem| type $n:ident : ref $r:ident $[display%$d]? $[store%$s]?) => do
     let (a, t) ← splitRef r
     -- `display` and `store` forward the wrapped type's.
-    let d ← if d.isSome then `(true) else `(false)
-    let s ← if s.isSome then `(true) else `(false)
-    let decl ← `(Dashboard.TypeDecl.mk $(strLit n) (Dashboard.TypeKind.refTo $(Lean.Syntax.mkStrLit a) $(Lean.Syntax.mkStrLit t)) $d $s none)
+    let decl ← `(Dashboard.TypeDecl.mk $(strLit n) (Dashboard.TypeKind.refTo $(Lean.Syntax.mkStrLit a) $(Lean.Syntax.mkStrLit t) $(← adapterTerms d s)) none)
     let cmd ← `(abbrev $n : Type := $r)
     pure { acc with cmds := acc.cmds.push cmd, types := acc.types.push decl }
   | `(idlItem| element $n:ident $[| $vs:ident $[: $[$fs:idlPrim]→*]?]*) => do

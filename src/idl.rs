@@ -46,14 +46,72 @@ pub enum Repr {
     Bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Code generated beside a scalar T so a module uses it without reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+pub enum Adapter {
+    /// Its text form: `Display` in Rust, `toString` in TypeScript and Kotlin.
+    Display,
+    /// A forwarding adapter (`ToSql` in Rust): the callee stores the T.
+    Store,
+}
+
+/// A scalar kind carries its adapters; a product has none. In JSON:
+/// `{"repr": "i64", "adapters": ["store"]}`, `{"ref": [api, type],
+/// "adapters": […]}`, `{"tuple": [field, …]}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawKind", into = "RawKind")]
 pub enum Kind {
-    Repr(Repr),
-    /// `(api, type)` of another API.
-    Ref(String, String),
+    Repr(Repr, Vec<Adapter>),
+    /// `(api, type)` of another API; the adapters forward the wrapped type's.
+    Ref(String, String, Vec<Adapter>),
     /// A product of two to four prims (`i64 × i64`): a tuple in the binding.
     Tuple(Vec<Field>),
+}
+
+impl Kind {
+    pub fn adapters(&self) -> &[Adapter] {
+        match self {
+            Kind::Repr(_, a) | Kind::Ref(_, _, a) => a,
+            Kind::Tuple(_) => &[],
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct RawKind {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repr: Option<Repr>,
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    reference: Option<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tuple: Option<Vec<Field>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adapters: Option<Vec<Adapter>>,
+}
+
+impl TryFrom<RawKind> for Kind {
+    type Error = String;
+    fn try_from(k: RawKind) -> Result<Kind, String> {
+        match (k.repr, k.reference, k.tuple) {
+            (Some(r), None, None) => Ok(Kind::Repr(r, k.adapters.unwrap_or_default())),
+            (None, Some((a, t)), None) => Ok(Kind::Ref(a, t, k.adapters.unwrap_or_default())),
+            (None, None, Some(fs)) if k.adapters.is_none() => Ok(Kind::Tuple(fs)),
+            (None, None, Some(_)) => Err("adapters are for scalar types, not a product".to_string()),
+            _ => Err("a kind is exactly one of repr, ref and tuple".to_string()),
+        }
+    }
+}
+
+impl From<Kind> for RawKind {
+    fn from(k: Kind) -> RawKind {
+        let none = RawKind { repr: None, reference: None, tuple: None, adapters: None };
+        match k {
+            Kind::Repr(r, a) => RawKind { repr: Some(r), adapters: Some(a), ..none },
+            Kind::Ref(x, t, a) => RawKind { reference: Some((x, t)), adapters: Some(a), ..none },
+            Kind::Tuple(fs) => RawKind { tuple: Some(fs), ..none },
+        }
+    }
 }
 
 /// A comparison of a `where` refinement.
@@ -153,20 +211,26 @@ impl Default for Token {
 pub struct TypeDecl {
     pub name: String,
     pub kind: Kind,
-    pub display: bool,
     /// The most characters (string) or bytes a value may hold; 0: no bound
     /// was declared (the check requires one).
     pub max_len: u64,
-    /// The callee stores this T without reading it: a forwarding adapter
-    /// (`ToSql` in Rust) is generated.
-    pub store: bool,
     /// The `where` refinement, beside the `max_len` bound.
     pub pred: Option<Pred>,
 }
 
 impl Default for TypeDecl {
     fn default() -> Self {
-        TypeDecl { name: String::new(), kind: Kind::Repr(Repr::String), display: false, max_len: 0, store: false, pred: None }
+        TypeDecl { name: String::new(), kind: Kind::Repr(Repr::String, Vec::new()), max_len: 0, pred: None }
+    }
+}
+
+impl TypeDecl {
+    pub fn shows(&self) -> bool {
+        self.kind.adapters().contains(&Adapter::Display)
+    }
+
+    pub fn stores(&self) -> bool {
+        self.kind.adapters().contains(&Adapter::Store)
     }
 }
 
@@ -313,9 +377,6 @@ impl Idl {
             if let Kind::Tuple(fs) = &t.kind {
                 if !(2..=4).contains(&fs.len()) {
                     errs.push(format!("type {}: a product has two to four components", t.name));
-                }
-                if t.display || t.store {
-                    errs.push(format!("type {}: display and store are for scalar types, not a product", t.name));
                 }
             }
             if let Some(p) = &t.pred {
@@ -567,7 +628,7 @@ impl Idl {
     /// The raw components of a type: one for a scalar, each of a product.
     fn components(&self, t: &TypeDecl) -> Vec<Field> {
         match &t.kind {
-            Kind::Repr(r) => vec![Field { repr: *r, max_len: t.max_len }],
+            Kind::Repr(r, _) => vec![Field { repr: *r, max_len: t.max_len }],
             Kind::Tuple(fs) => fs.clone(),
             Kind::Ref(..) => Vec::new(),
         }
@@ -606,7 +667,7 @@ impl Idl {
         };
         for t in &self.types {
             match &t.kind {
-                Kind::Repr(r) => see(*r, t.max_len),
+                Kind::Repr(r, _) => see(*r, t.max_len),
                 Kind::Tuple(fs) => fs.iter().for_each(|f| see(f.repr, f.max_len)),
                 Kind::Ref(..) => {}
             }
@@ -625,7 +686,7 @@ impl Idl {
     pub fn unbounded(&self) -> Vec<String> {
         let mut out = Vec::new();
         for t in &self.types {
-            if matches!(t.kind, Kind::Repr(Repr::String | Repr::Bytes)) && t.max_len == 0 {
+            if matches!(t.kind, Kind::Repr(Repr::String | Repr::Bytes, _)) && t.max_len == 0 {
                 out.push(format!("type {}: a string or bytes type needs a max_len (a tunnel otherwise)", t.name));
             }
             if let Kind::Tuple(fs) = &t.kind {
@@ -739,7 +800,7 @@ impl Idl {
         self.types
             .iter()
             .filter_map(|t| match &t.kind {
-                Kind::Ref(a, ty) => Some((a.as_str(), ty.as_str())),
+                Kind::Ref(a, ty, _) => Some((a.as_str(), ty.as_str())),
                 _ => None,
             })
             .collect()
@@ -803,8 +864,8 @@ impl Idl {
         }
         for t in &self.types {
             let inner = match &t.kind {
-                Kind::Repr(r) => rust_repr(*r).to_string(),
-                Kind::Ref(a, ty) => format!("super::{}::{ty}", a.replace('-', "_")),
+                Kind::Repr(r, _) => rust_repr(*r).to_string(),
+                Kind::Ref(a, ty, _) => format!("super::{}::{ty}", a.replace('-', "_")),
                 Kind::Tuple(fs) => format!("({})", fs.iter().map(|f| rust_repr(f.repr)).collect::<Vec<_>>().join(", ")),
             };
             o.push_str(&format!("pub struct {}({inner});\n", t.name));
@@ -826,12 +887,12 @@ impl Idl {
             }
             if wire {
                 match &t.kind {
-                    Kind::Ref(a, ty) => o.push_str(&format!(
+                    Kind::Ref(a, ty, _) => o.push_str(&format!(
                         "    pub fn to_value(&self) -> Value {{ self.0.to_value() }}\n    \
                          pub fn from_value(v: &Value) -> Result<Self, String> {{ Ok(Self(super::{}::{ty}::from_value(v)?)) }}\n",
                         a.replace('-', "_")
                     )),
-                    Kind::Repr(r) => {
+                    Kind::Repr(r, _) => {
                         o.push_str(&format!("    pub fn to_value(&self) -> Value {{ {} }}\n", rust_raw_encode(*r, "self.0")));
                         let dec = rust_raw_decode(*r, "v");
                         o.push_str(&format!(
@@ -858,9 +919,9 @@ impl Idl {
             }
             o.push_str("}\n");
             // A ref forwards the wrapped type's `Display`.
-            if t.display {
+            if t.shows() {
                 let body = match t.kind {
-                    Kind::Repr(Repr::Bytes) => "for b in &self.0 { write!(f, \"{b:02x}\")?; } Ok(())",
+                    Kind::Repr(Repr::Bytes, _) => "for b in &self.0 { write!(f, \"{b:02x}\")?; } Ok(())",
                     _ => "write!(f, \"{}\", self.0)",
                 };
                 o.push_str(&format!(
@@ -868,12 +929,12 @@ impl Idl {
                     t.name
                 ));
             }
-            if t.store {
+            if t.stores() {
                 // A forwarding adapter: the callee stores the T without reading it.
                 let out = match &t.kind {
-                    Kind::Repr(Repr::String) => "Ok(rusqlite::types::ToSqlOutput::from(self.0.as_str()))".to_string(),
-                    Kind::Repr(Repr::Bytes) => "Ok(rusqlite::types::ToSqlOutput::from(self.0.as_slice()))".to_string(),
-                    Kind::Repr(_) | Kind::Tuple(_) => "Ok(rusqlite::types::ToSqlOutput::from(self.0))".to_string(),
+                    Kind::Repr(Repr::String, _) => "Ok(rusqlite::types::ToSqlOutput::from(self.0.as_str()))".to_string(),
+                    Kind::Repr(Repr::Bytes, _) => "Ok(rusqlite::types::ToSqlOutput::from(self.0.as_slice()))".to_string(),
+                    Kind::Repr(..) | Kind::Tuple(_) => "Ok(rusqlite::types::ToSqlOutput::from(self.0))".to_string(),
                     Kind::Ref(..) => "self.0.to_sql()".to_string(),
                 };
                 o.push_str(&format!(
@@ -1258,8 +1319,8 @@ impl Idl {
         }
         for t in &self.types {
             let inner = match &t.kind {
-                Kind::Repr(r) => ts_repr(*r).to_string(),
-                Kind::Ref(a, ty) => format!("{}.{ty}", a.replace('-', "_")),
+                Kind::Repr(r, _) => ts_repr(*r).to_string(),
+                Kind::Ref(a, ty, _) => format!("{}.{ty}", a.replace('-', "_")),
                 Kind::Tuple(fs) => format!("[{}]", fs.iter().map(|f| ts_repr(f.repr)).collect::<Vec<_>>().join(", ")),
             };
             let guard: String = self
@@ -1271,20 +1332,20 @@ impl Idl {
                 "export class {} {{\n  readonly #v: {inner};\n  constructor(v: {inner}) {{{guard} this.#v = v; }}\n",
                 t.name
             ));
-            if t.display {
+            if t.shows() {
                 let body = match t.kind {
-                    Kind::Repr(Repr::Bytes) => "Array.from(this.#v, (b) => b.toString(16).padStart(2, \"0\")).join(\"\")",
+                    Kind::Repr(Repr::Bytes, _) => "Array.from(this.#v, (b) => b.toString(16).padStart(2, \"0\")).join(\"\")",
                     _ => "String(this.#v)",
                 };
                 o.push_str(&format!("  toString(): string {{ return {body}; }}\n"));
             }
             if wire {
                 let (enc, dec) = match &t.kind {
-                    Kind::Repr(r) => (
+                    Kind::Repr(r, _) => (
                         ts_raw_encode(*r, "this.#v"),
                         format!("return new this({});", ts_raw_decode(*r, 0, "v", &t.name)),
                     ),
-                    Kind::Ref(a, ty) => (
+                    Kind::Ref(a, ty, _) => (
                         "this.#v.toValue()".to_string(),
                         format!("return new this({}.{ty}.fromValue(v));", a.replace('-', "_")),
                     ),
@@ -1693,15 +1754,15 @@ impl Idl {
                 continue;
             }
             let (inner, enc, dec) = match &t.kind {
-                Kind::Repr(r) => (kotlin_repr(*r).to_string(), kotlin_raw_encode(*r, "v"), kotlin_raw_decode(*r, "x")),
-                Kind::Ref(a, ty) => (format!("{}.{ty}", kotlin_pkg(a)), "v.toValue()".to_string(), format!("{}.{ty}.fromValue(x)", kotlin_pkg(a))),
+                Kind::Repr(r, _) => (kotlin_repr(*r).to_string(), kotlin_raw_encode(*r, "v"), kotlin_raw_decode(*r, "x")),
+                Kind::Ref(a, ty, _) => (format!("{}.{ty}", kotlin_pkg(a)), "v.toValue()".to_string(), format!("{}.{ty}.fromValue(x)", kotlin_pkg(a))),
                 Kind::Tuple(_) => unreachable!(),
             };
             o.push_str(&format!("class {}(private val v: {inner}) {{\n{guard}", t.name));
-            if t.display {
+            if t.shows() {
                 let body = match t.kind {
-                    Kind::Repr(Repr::Bytes) => "v.joinToString(\"\") { \"%02x\".format(it) }",
-                    Kind::Repr(Repr::String) => "v",
+                    Kind::Repr(Repr::Bytes, _) => "v.joinToString(\"\") { \"%02x\".format(it) }",
+                    Kind::Repr(Repr::String, _) => "v",
                     _ => "v.toString()",
                 };
                 o.push_str(&format!("    override fun toString(): String = {body}\n"));
@@ -2434,14 +2495,14 @@ mod tests {
     use super::*;
 
     const AB: &str = r#"{"api":"ab",
-        "types":[{"name":"UserId","kind":{"repr":"string"},"display":true},{"name":"Payload","kind":{"repr":"bytes"}}],
+        "types":[{"name":"UserId","kind":{"repr":"string","adapters":["display"]}},{"name":"Payload","kind":{"repr":"bytes"}}],
         "ctors":[{"name":"Created","args":["UserId","Payload"]},{"name":"Deleted","args":["UserId"]},{"name":"Tick"}]}"#;
 
     #[test]
     fn parses_and_measures() {
         let idl = idl_from_json(AB).unwrap();
         assert_eq!((idl.constructors(), idl.slots()), (3, 3));
-        assert!(idl.type_decl("UserId").unwrap().display);
+        assert!(idl.type_decl("UserId").unwrap().shows());
     }
 
     #[test]
@@ -2548,7 +2609,7 @@ mod tests {
     fn fns_and_sums_generate_traits_dispatch_and_clients() {
         let idl: Idl = serde_json::from_str(
             r#"{"api":"nutrition-db","types":[{"name":"Name","kind":{"repr":"string"},"max_len":64},
-                {"name":"Id","kind":{"repr":"i64"},"display":true,"store":true}],
+                {"name":"Id","kind":{"repr":"i64","adapters":["display","store"]}}],
                 "sums":[{"name":"Written","ctors":[{"name":"Written","args":["Id"]},{"name":"Tick"}]}],
                 "fns":[{"name":"insertProduct","inputs":["Name","Name"],"returns":"Written"}]}"#,
         )
@@ -2589,7 +2650,7 @@ mod tests {
         {"name":"Day","kind":{"repr":"string"},"max_len":10,"pred":{"cmp":["=","len",{"num":"10"}]}},
         {"name":"Span","kind":{"tuple":[{"repr":"i64"},{"repr":"i64"}]},"pred":{"cmp":["<",{"field":1},{"field":2}]}},
         {"name":"Unit","kind":{"repr":"string"},"max_len":8,"pred":{"or":[{"mem":["v",[{"str":"g"},{"str":"ml"}]]},{"not":{"cmp":["≠","len",{"num":"0"}]}}]}},
-        {"name":"Id","kind":{"repr":"i64"},"display":true,"store":true}],
+        {"name":"Id","kind":{"repr":"i64","adapters":["display","store"]}}],
         "tokens":[{"name":"ProductRef","repr":"i64","kind":"permanent","store":true},
         {"name":"EventTypeRef","repr":"i64","kind":{"versioned":"Retired"},"store":true},
         {"name":"Funds","repr":"i64","kind":{"linear":"Spent"}}],
@@ -2633,7 +2694,10 @@ mod tests {
         assert!(bad(r#"{"name":"Spent"}"#, r#"{"name":"Used"}"#).contains("fn apply: takes Funds (linear)"));
         assert!(bad(r#"{"field":2}"#, r#"{"field":3}"#).contains("v.3: the product has 2 components"));
         assert!(bad(r#"{"cmp":["=","len",{"num":"10"}]}"#, r#"{"cmp":["=","v",{"num":"10"}]}}, {"name":"Bad","kind":{"repr":"i64"},"pred":{"cmp":["=","len",{"num":"1"}]}"#).contains("`.length` is for a string"));
-        assert!(bad(r#""tuple":[{"repr":"i64"},{"repr":"i64"}]},"#, r#""tuple":[{"repr":"i64"},{"repr":"i64"}]},"display":true,"#).contains("display and store are for scalar"));
+        let product = PROOFS.replace(r#""tuple":[{"repr":"i64"},{"repr":"i64"}]}"#, r#""tuple":[{"repr":"i64"},{"repr":"i64"}],"adapters":["display"]}"#);
+        assert_ne!(product, PROOFS);
+        let err = serde_json::from_str::<Idl>(&product).unwrap_err().to_string();
+        assert!(err.contains("adapters are for scalar types, not a product"), "{err}");
         assert!(bad(r#"{"name":"apply","inputs":["Funds"],"returns":"Written"}"#, r#"{"name":"apply","inputs":[],"returns":"Written"}"#).contains("token Funds: declared but never used"));
     }
 

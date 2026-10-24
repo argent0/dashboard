@@ -154,17 +154,24 @@ inductive Pred
   | not (p : Pred)
   deriving Repr, DecidableEq, Inhabited
 
+/-- Code generated beside a scalar `T` so a module uses it without reading
+it: `display` its text form, `store` a forwarding `ToSql`. -/
+inductive Adapter
+  | display
+  | store
+  deriving Repr, DecidableEq, Inhabited
+
+/-- A scalar kind carries its adapters; a product has none. A ref forwards
+the wrapped type's adapters, which it declares. -/
 inductive TypeKind
-  | prim (p : Prim)
-  | refTo (owner ty : String)
+  | prim (p : Prim) (adapters : List Adapter := [])
+  | refTo (owner ty : String) (adapters : List Adapter := [])
   | tuple (ps : List Prim)  -- a product of two to four prims, `i64 × i64`
   deriving Repr, DecidableEq, Inhabited
 
 structure TypeDecl where
   name : String
   kind : TypeKind
-  display : Bool := false
-  store : Bool := false
   pred : Option Pred := none
   deriving Repr, DecidableEq, Inhabited
 

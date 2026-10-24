@@ -320,12 +320,12 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
                     // `display` and `store` on a ref forward the wrapped
                     // type's, so the wrapped type declares them too.
                     let (shows, stores) = match (t.type_decl(ty), t.token(ty)) {
-                        (Some(d), _) => (d.display, d.store),
+                        (Some(d), _) => (d.shows(), d.stores()),
                         (None, Some(k)) => (false, k.store),
                         _ => (false, false),
                     };
-                    for x in idl.types.iter().filter(|x| matches!(&x.kind, crate::idl::Kind::Ref(a, y) if a == target && y == ty)) {
-                        for (flag, set, has) in [("display", x.display, shows), ("store", x.store, stores)] {
+                    for x in idl.types.iter().filter(|x| matches!(&x.kind, crate::idl::Kind::Ref(a, y, _) if a == target && y == ty)) {
+                        for (flag, set, has) in [("display", x.shows(), shows), ("store", x.stores(), stores)] {
                             if set && !has {
                                 errs.push(format!("{who}: type {}: {flag} forwards {target}.{ty}'s, which declares no {flag}", x.name));
                             }
@@ -336,7 +336,7 @@ pub fn bindings(root: &Path, loaded: &Loaded) -> (Vec<ApiBindings>, Vec<String>)
                     if let Some(k) = t.token(ty)
                         && let Some(c) = k.kind.failure()
                     {
-                        let local = idl.types.iter().find(|x| matches!(&x.kind, crate::idl::Kind::Ref(a, y) if a == target && y == ty)).map(|x| x.name.as_str()).unwrap_or(ty);
+                        let local = idl.types.iter().find(|x| matches!(&x.kind, crate::idl::Kind::Ref(a, y, _) if a == target && y == ty)).map(|x| x.name.as_str()).unwrap_or(ty);
                         for f in idl.fns_missing(local, c) {
                             errs.push(format!(
                                 "{who}: fn {}: takes {local} ({target}.{ty}, {}), so {} must have a `{c}` constructor",
