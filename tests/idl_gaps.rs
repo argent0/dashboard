@@ -53,7 +53,7 @@ test("a nested sum round-trips on the wire", () => {
 "#;
 
 fn idl() -> Idl {
-    Idl::from_export(serde_json::from_str(IDL).unwrap()).unwrap()
+    serde_json::from_str(IDL).unwrap()
 }
 
 #[test]
@@ -90,17 +90,8 @@ fn kotlin_has_value_level_sum_codecs() {
 
 #[test]
 fn the_default_sum_takes_a_named_one() {
-    let idl = Idl::from_export(serde_json::from_str(r#"{"api":"b","sums":[{"name":"Reason","ctors":[{"name":"Missing"}]}],"ctors":[{"name":"Why","args":["Reason"]}]}"#).unwrap()).unwrap();
+    let idl: Idl = serde_json::from_str(r#"{"api":"b","sums":[{"name":"Reason","ctors":[{"name":"Missing"}]}],"ctors":[{"name":"Why","args":["Reason"]}]}"#).unwrap();
     assert!(idl.rust(false, &[]).contains("    Why(Reason),"));
-}
-
-#[test]
-fn a_sum_never_contains_itself() {
-    let bad = |sums: &str| Idl::from_export(serde_json::from_str(&format!(r#"{{"api":"a","sums":{sums},"fns":[{{"name":"f","inputs":[],"returns":"A"}}]}}"#)).unwrap()).unwrap_err();
-    let e = bad(r#"[{"name":"A","ctors":[{"name":"X","args":["A"]}]}]"#);
-    assert!(e.contains("sum A: constructor X: sum A must be declared before A"), "{e}");
-    let e = bad(r#"[{"name":"A","ctors":[{"name":"X","args":["B"]}]},{"name":"B","ctors":[{"name":"Y"}]}]"#);
-    assert!(e.contains("sum A: constructor X: sum B must be declared before A"), "{e}");
 }
 
 
@@ -123,7 +114,7 @@ test("a one-variant element round-trips", () => {
 
 #[test]
 fn a_one_variant_element_type_checks_in_typescript() {
-    let idl = Idl::from_export(serde_json::from_str(ONE_VARIANT).unwrap()).unwrap();
+    let idl: Idl = serde_json::from_str(ONE_VARIANT).unwrap();
     let d = tempfile::tempdir().unwrap();
     let ts = idl.typescript(true, &BTreeMap::new(), &BTreeMap::new());
     assert!(!ts.contains("const never: never = e"), "{ts}");

@@ -66,7 +66,7 @@ fn idls() -> Vec<Value> {
 fn loaded(manifest: Value) -> Loaded {
     let mut l = Loaded { cfg: arch_config_from_json(manifest).unwrap(), ..Default::default() };
     for v in idls() {
-        let idl = Idl::from_export(serde_json::from_value(v).unwrap()).unwrap();
+        let idl: Idl = serde_json::from_value(v).unwrap();
         l.api_dirs.insert(idl.api.clone(), PathBuf::from(format!("engine/api/{}", idl.api)));
         l.idls.insert(idl.api.clone(), idl);
     }
@@ -276,15 +276,12 @@ fn the_consumer_cannot_reach_into_the_container_and_must_be_total() {
 }
 
 #[test]
-fn element_budgets_and_bad_impls() {
+fn element_budgets_show_as_headroom() {
     let d = fixture();
     let mut m = manifest();
     m["api"][4]["max_elements"] = json!(1);
     m["api"][4]["max_fields"] = json!(2);
     let scratch = tempfile::tempdir().unwrap();
     let rep = check(d.path(), &loaded(m), &Sandbox::off(), scratch.path());
-    let all = rep.problems.join("\n");
-    assert!(all.contains("api db-nutrition: element variants 2 exceeds budget 1"), "{all}");
-    assert!(all.contains("element fields 4 exceeds budget 2"), "{all}");
     assert!(rep.headroom.iter().any(|h| h.contains("element variants 2/1, fields 4/2")), "{:?}", rep.headroom);
 }

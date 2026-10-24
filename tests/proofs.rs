@@ -72,7 +72,7 @@ fn rustc(dir: &Path, test: bool) -> (bool, String) {
 
 #[test]
 fn refined_types_refuse_and_linear_tokens_move() {
-    let idl = Idl::from_export(serde_json::from_str(IDL).unwrap()).unwrap();
+    let idl: Idl = serde_json::from_str(IDL).unwrap();
     let d = tempfile::tempdir().unwrap();
     // The IDL's api is `ledger`: its trait is `Ledger`, which the impl type here is named after too.
     std::fs::write(d.path().join("binding.rs"), idl.rust(false, &[]).replace("pub trait Ledger ", "pub trait LedgerApi ").replace("dyn Ledger", "dyn LedgerApi").replace("::Ledger for $name", "::LedgerApi for $name")).unwrap();

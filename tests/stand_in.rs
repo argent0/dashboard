@@ -44,7 +44,7 @@ fn run(dir: &Path, bin: &str) -> (bool, String) {
 
 #[test]
 fn a_fixture_scripts_the_stand_in_in_both_crates() {
-    let idl = Idl::from_export(serde_json::from_str(IDL).unwrap()).unwrap();
+    let idl: Idl = serde_json::from_str(IDL).unwrap();
     let d = tempfile::tempdir().unwrap();
     let p = d.path();
     std::fs::write(p.join("binding.rs"), idl.rust(false, &[])).unwrap();

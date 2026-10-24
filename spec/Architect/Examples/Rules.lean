@@ -123,6 +123,19 @@ def row : Element := { name := "Row", variants := [{ name := "A", fields := [.in
   ["instance Foldable for f.Seq: Foldable is declared by the api owning the container",
    "instances: all for containers of one api"]
 
+-- A sum never contains itself: a constructor's sum is declared before it.
+#guard ({ apiName := "a", sums := [{ name := "A", ctors := [{ name := "X", args := ["A"] }] }],
+          fns := [{ name := "f", inputs := [], returns := "A" }] } : Idl).shape ==
+  ["sum A: constructor X: sum A is declared before A (a sum never contains itself)"]
+#guard ({ apiName := "a", sums := [{ name := "A", ctors := [{ name := "X", args := ["B"] }] }, { name := "B", ctors := [{ name := "Y" }] }],
+          fns := [{ name := "f", inputs := [], returns := "A" }] } : Idl).shape ==
+  ["sum A: constructor X: sum B is declared before A (a sum never contains itself)"]
+
+-- Element budgets: variants and fields count across the API's elements.
+#guard ({ apiName := "a", elements := [{ name := "Row", variants := [{ name := "A", fields := [.int64] }, { name := "B", fields := [.int64, .int64, .int64] }] }] } : Idl).budgets
+    { «alpha-beta» with max_elements := 1, max_fields := 2 } ==
+  ["element variants 2 exceeds budget 1", "element fields 4 exceeds budget 2"]
+
 -- The cross-file rules, on manifests built as data.
 
 /-- The smallest IDL: one constructor. -/
