@@ -21,3 +21,7 @@ lean_lib Planner where
 @[default_target]
 lean_lib Player where
   globs := #[.andSubmodules `Player]
+
+@[default_target]
+lean_lib Agents where
+  globs := #[.submodules `Agents]
