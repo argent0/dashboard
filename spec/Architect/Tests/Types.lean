@@ -19,7 +19,10 @@ inductive Covers
   | only (cs : List Component)
   deriving Repr, DecidableEq, Inhabited
 
-/-- A suite check. `files` are its own test files, beyond `test_paths`. -/
+/-- A suite check. `files` are its own test files, beyond `test_paths`.
+After a failing attempt the player runs it again, up to `retry_failed`
+times, when the failing output contains one of `retry_on` (any failure, with
+`retry_on` empty). -/
 structure Check where
   name : String
   cmd : String

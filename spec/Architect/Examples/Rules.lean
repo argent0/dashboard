@@ -63,6 +63,14 @@ check slow where
   runs = 2
   min_pass = 3
 
+/-- error: check busy: retry_on needs retry_failed ≥ 1
+check busy: a retry_on entry is a non-empty substring -/
+#guard_msgs in
+check busy where
+  cmd = "true"
+  covers = all
+  retry_on = ["Text file busy", ""]
+
 -- The cross-file rules, on manifests built as data.
 
 def base : Manifest :=

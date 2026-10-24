@@ -121,13 +121,14 @@ def Fixture.problems (f : Fixture) : List String :=
       s!"{who}: stand_in = {a.name}, so users are exactly {a.generator.name} and {a.consumer.name} (the stand-in compiles only in their views)"
 
 /-- A check runs at least once, passes at least once in `runs`, retries only
-with a budget, covers something, and owns relative files. `retry_on`'s
-patterns are regexes, `dashboard`'s to read. -/
+with a budget, covers something, and owns relative files. Each `retry_on`
+entry is a non-empty substring of the failing output it retries. -/
 def Check.problems (c : Check) : List String :=
   let who := s!"check {c.name}"
   rule (c.runs ≥ 1) s!"{who}: runs is at least 1 (got {c.runs})" ++
   rule (1 ≤ c.min_pass && c.min_pass ≤ c.runs) s!"{who}: min_pass lies between 1 and runs ({c.runs}), got {c.min_pass}" ++
   rule (c.retry_on.isEmpty || c.retry_failed ≥ 1) s!"{who}: retry_on needs retry_failed ≥ 1" ++
+  rule (!c.retry_on.contains "") s!"{who}: a retry_on entry is a non-empty substring" ++
   rule (c.covers != .only []) s!"{who}: covers is empty: write covers = all or covers = [module, …]" ++
   relPaths who "files" c.files
 

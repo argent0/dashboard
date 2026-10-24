@@ -721,7 +721,7 @@ impl Runner {
 
     /// Prepares the worktree and runs the check: one attempt, then up to
     /// `retry_failed` more after a failing verdict (only when the failure's
-    /// output matches `retry_on`, if set). The check passes if any attempt
+    /// output contains a `retry_on` substring, if set). The check passes if any attempt
     /// does; the result describes the last attempt plus what the retries saw.
     fn execute(
         &self,
@@ -879,11 +879,6 @@ impl Runner {
         dir: &std::path::Path,
         view: bool,
     ) -> CheckResult {
-        let patterns: Vec<regex::Regex> = check
-            .retry_on
-            .iter()
-            .filter_map(|p| regex::Regex::new(p).ok())
-            .collect();
         let mut retries = 0;
         let mut retry_outputs = Vec::new();
         let started = Instant::now();
@@ -893,7 +888,7 @@ impl Runner {
                 && !result.timed_out
                 && result.impurity().is_none()
                 && retries < check.retry_failed
-                && (patterns.is_empty() || patterns.iter().any(|p| p.is_match(&failed_output)));
+                && (check.retry_on.is_empty() || check.retry_on.iter().any(|s| failed_output.contains(s.as_str())));
             if !retry {
                 result.retries = retries;
                 result.retry_outputs = retry_outputs;
@@ -907,7 +902,7 @@ impl Runner {
 
     /// One attempt: runs `check.cmd` up to `check.runs` times, stopping early
     /// once the verdict is decided. Also returns the full output of every
-    /// failing run, which `retry_on` is matched against.
+    /// failing run, which `retry_on` is searched in.
     fn attempt(
         &self,
         check: &Check,

@@ -492,10 +492,6 @@ fn parse_suite(json: &serde_json::Value, arch: &ArchConfig) -> Result<config::Su
     for v in json.get("checks").and_then(|c| c.as_array()).into_iter().flatten() {
         let mut c: config::Check = serde_json::from_value(v.clone()).map_err(|e| format!("check: {e}"))?;
         let source = source_of(v.get("module").and_then(|m| m.as_str()).unwrap_or("Tests"));
-        // Lean's rules held the rest; a regex is a Rust fact.
-        for pattern in &c.retry_on {
-            regex::Regex::new(pattern).map_err(|e| format!("{source}: check {:?}: retry_on {pattern:?}: {e}", c.name))?;
-        }
         c.source = Some(source);
         checks.push(c);
     }

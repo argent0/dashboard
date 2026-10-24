@@ -385,7 +385,7 @@ pub struct Check {
     /// of the check. Never applied to a task check (spec §6.3).
     #[serde(default)]
     pub retry_failed: u32,
-    /// Regexes: only retry when a failing run's output matches one of them.
+    /// Substrings: only retry when a failing run's output contains one of them.
     /// Empty means every failure is retried (while `retry_failed` lasts).
     #[serde(default)]
     pub retry_on: Vec<String>,
@@ -497,9 +497,8 @@ impl Check {
                 self.name, self.runs, self.min_pass
             ));
         }
-        for pattern in &self.retry_on {
-            regex::Regex::new(pattern)
-                .map_err(|e| format!("check {:?}: retry_on {pattern:?}: {e}", self.name))?;
+        if self.retry_on.iter().any(|s| s.is_empty()) {
+            return Err(format!("check {:?}: a retry_on entry is a non-empty substring", self.name));
         }
         if !self.retry_on.is_empty() && self.retry_failed == 0 {
             return Err(format!(
@@ -1521,11 +1520,11 @@ mod tests {
 
     #[test]
     fn retry_policy_is_parsed_and_validated() {
-        let ok = check_from_str("name = \"u\"\ncmd = \"x\"\nretry_failed = 2\nretry_on = [\"Text file busy\", \"os error \\\\d+\"]\n").unwrap();
+        let ok = check_from_str("name = \"u\"\ncmd = \"x\"\nretry_failed = 2\nretry_on = [\"Text file busy\", \"os error \"]\n").unwrap();
         assert_eq!(ok.retry_failed, 2);
         assert_eq!(ok.retry_on.len(), 2);
         assert_eq!(check_from_str("name = \"u\"\ncmd = \"x\"\n").unwrap().retry_failed, 0);
-        assert!(check_from_str("name = \"u\"\ncmd = \"x\"\nretry_failed = 1\nretry_on = [\"(\"]\n").is_err(), "bad regex");
+        assert!(check_from_str("name = \"u\"\ncmd = \"x\"\nretry_failed = 1\nretry_on = [\"\"]\n").is_err(), "empty substring");
         assert!(check_from_str("name = \"u\"\ncmd = \"x\"\nretry_on = [\"a\"]\n").is_err(), "retry_on alone");
     }
 
