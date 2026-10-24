@@ -17,14 +17,14 @@ structure Job where
   failing : List String
   notes : List Revision := []
 
-/-- A commit the worker makes: a request the player answers. -/
+/-- A commit the worker makes: a request the hub answers. -/
 inductive Move
   /-- The work, for review. -/
   | submit (rev : Revision)
   | contest (test why : String)
   | block (why : String)
 
-/-- The player's possible replies to each move. -/
+/-- The hub's possible replies to each move. -/
 inductive Reply : Move → Type
   /-- Back, with the foreman's note and the checks that now fail. -/
   | sentBack {rev} (note : Revision) (failing : List String) : Reply (.submit rev)

@@ -2,8 +2,10 @@ import Agents.Kernel
 
 /-!
 The planner's work. It starts with something to plan: a goal, or a
-dropped task to replan. It may ask the architect for a design first, then
-hands the player a plan, and decides on what the player reports back.
+dropped task to replan. It may ask the architect for a design first, and
+keeps each answer (`Answer`): the revision a design landed as, the reason
+of a refusal, the why of a decline. Then it commits a plan and decides on
+what the hub reports back.
 -/
 namespace Planner
 open Kernel
@@ -16,7 +18,15 @@ inductive Goal
   the operator may hand it one too. -/
   | replan (slug : Slug) (cause : Cause)
 
-/-- What the player reports about a running plan. -/
+/-- How the architect answered a need. -/
+inductive Answer
+  /-- `rev` is on `main`. -/
+  | designed (what : String) (rev : Revision)
+  /-- The hub refused its last proposal, for `r`. -/
+  | refused (what : String) (r : Reason)
+  | declined (what : String) (why : String)
+
+/-- What the hub reports about a running plan. -/
 inductive Advice
   /-- The foreman recommends acceptance; `trim` names the task checks it
   would drop from the suite (spec §6.5). -/
@@ -35,30 +45,32 @@ def Advice.cause : Advice → Cause
 
 /-- The planner's possible decisions on each advice. -/
 inductive Decision : Advice → Type
+  /-- Land `tip`, the work the foreman recommends (or its trim). -/
   | accept {t} : Decision (.recommend t)
   /-- Commit `rev`, which drops the checks of `t` (`dashboard trim`, spec
-  §6.5); the player runs the run set on it, and acceptance waits again. -/
+  §6.5); the hub runs the run set on it, and acceptance waits again. -/
   | trim {t} (rev : Revision) (h : t ≠ []) : Decision (.recommend t)
   /-- Continue with a revised plan. -/
   | continue {w} (p : Plan) : Decision (.doubt w)
   | resolve {paths} (merge : Revision) : Decision (.conflict paths)
   | drop {a} (why : String) : Decision a
 
-/-- Advice the player reports from the work; a conflict comes from landing. -/
+/-- Advice the hub reports from the work; a conflict comes from landing. -/
 def Advice.isReport : Advice → Bool
   | .conflict _ => false
   | _ => true
 
 inductive State
-  /-- Something to plan. The start. -/
-  | toPlan (g : Goal)
+  /-- Something to plan, with the architect's answers so far. The start is
+  `heard = []`. -/
+  | toPlan (g : Goal) (heard : List Answer)
   /-- Asked the architect for `what`. -/
-  | designing (g : Goal) (what : String)
-  /-- The player runs plan `p`. -/
+  | designing (g : Goal) (what : String) (heard : List Answer)
+  /-- Plan `p` runs. -/
   | running (g : Goal) (p : Plan)
   /-- Advice `a` waits for a decision. -/
   | advised (g : Goal) (p : Plan) (a : Advice)
-  /-- Accepted or resolved; the player lands it. -/
+  /-- Accepted or resolved; the hub lands it. -/
   | landing (g : Goal) (p : Plan)
   /-- `p` is on `main`. An end. -/
   | landed (p : Plan)
@@ -76,27 +88,24 @@ def after (g : Goal) (p : Plan) : (a : Advice) → Decision a → State
 
 /-- The planner's legal transitions. -/
 inductive Step : State → State → Type
-  | need {g} (what : String) : Step (.toPlan g) (.designing g what)
-  /-- The architect answered: designed, or declined. -/
-  | designed {g w} (rev : Revision) : Step (.designing g w) (.toPlan g)
-  | declined {g w} (why : String) : Step (.designing g w) (.toPlan g)
-  | plan {g} (p : Plan) : Step (.toPlan g) (.running g p)
-  | abandon {g} (why : String) : Step (.toPlan g) (.abandoned g why)
+  | need {g hs} (what : String) : Step (.toPlan g hs) (.designing g what hs)
+  /-- The architect answered: designed, refused, or declined. -/
+  | designed {g w hs} (rev : Revision) :
+      Step (.designing g w hs) (.toPlan g (hs ++ [.designed w rev]))
+  | refused {g w hs} (r : Reason) : Step (.designing g w hs) (.toPlan g (hs ++ [.refused w r]))
+  | declined {g w hs} (why : String) :
+      Step (.designing g w hs) (.toPlan g (hs ++ [.declined w why]))
+  | plan {g hs} (p : Plan) : Step (.toPlan g hs) (.running g p)
+  | abandon {g hs} (why : String) : Step (.toPlan g hs) (.abandoned g why)
   | report {g p} (a : Advice) (h : a.isReport = true) : Step (.running g p) (.advised g p a)
   | conflict {g p} (paths : List String) : Step (.landing g p) (.advised g p (.conflict paths))
   | decide {g p a} (d : Decision a) : Step (.advised g p a) (after g p a d)
   | land {g p} : Step (.landing g p) (.landed p)
-  /-- The player's merge broke the run set: the work goes on. -/
+  /-- The merge broke the run set: the work goes on. -/
   | reopened {g p} : Step (.landing g p) (.running g p)
 
-/-- The need a step names to the architect, if any. -/
-def Step.need? : Step s t → Option String
-  | .need what => some what
-  | .designed (w := w) _ | .declined (w := w) _ => some w
-  | _ => none
-
 def State.isStart : State → Bool
-  | .toPlan _ => true
+  | .toPlan _ [] => true
   | _ => false
 
 /-- What a dropped end hands a new planner machine to start from. -/

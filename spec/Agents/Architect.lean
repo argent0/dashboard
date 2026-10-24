@@ -4,8 +4,8 @@ import Agents.Kernel
 The architect's work. It designs the architecture on `main`: components,
 APIs, frames, fixtures and checks. It starts with something to design, a
 goal from the operator or a need a planner names, proposes a revision of
-`main`, and the player judges it. `maxProposals` is how many proposals the
-player judges per question: past it, the last refusal ends the question.
+`main`, and the hub judges it. `maxProposals` is how many proposals the
+hub judges per question: past it, the last refusal ends the question.
 -/
 namespace Architect
 open Kernel
@@ -21,13 +21,13 @@ inductive State
   /-- Something to design, with `n` proposals refused so far. The start is
   `n = 0`. -/
   | asked (q : Question) (n : Nat)
-  /-- Proposed `rev` as the answer; the player judges it. -/
+  /-- Proposed `rev` as the answer; the hub judges it. -/
   | proposing (q : Question) (n : Nat) (rev : Revision)
   /-- `rev` is on `main`. An end. -/
   | designed (q : Question) (rev : Revision)
   /-- Declined, with why. An end. -/
   | declined (q : Question) (why : String)
-  /-- The player refused the last proposal it judges, for `r`. An end. -/
+  /-- The hub refused the last proposal it judges, for `r`. An end. -/
   | refused (q : Question) (r : Reason)
 
 variable (maxProposals : Nat)

@@ -11,10 +11,11 @@ type `Step : State → State → Type` whose values are its legal transitions.
 Each machine starts with something to do and ends in states with no step
 out. A `Run` is a path of steps.
 
-Roles meet in edges (`Agents/Edge/`): an edge pairs each step of a spine
-with the peer's steps that exchange the same message, and its projection
-into the peer's `Step` is what checks it. Shared words stay few: a role's
-view of a shared thing is its own type, in its own words.
+Roles meet in the hub (`Agents/Hub.lean`): every event is a commit by
+one role, and each role's state is a view of the hub's log, so every legal
+log is a run of every role's machine (`Agents/Views.lean`). Shared words
+stay few: a role's view of a shared thing is its own type, in its own
+words.
 -/
 namespace Kernel
 export Dashboard (Slug Component Check Manifest)
@@ -70,6 +71,12 @@ def Run.two {S : Type} {Step : S → S → Type} {s t u : S} (a : Step s t) (b :
     Run Step s u :=
   .next a (.next b .stay)
 
+/-- A run, one step longer at its end. -/
+def Run.snoc {S : Type} {Step : S → S → Type} : {s t u : S} → Run Step s t → Step t u →
+    Run Step s u
+  | _, _, _, .stay, st => .next st .stay
+  | _, _, _, .next a r, st => .next a (r.snoc st)
+
 /-- The steps of a run. -/
 def Run.length {S : Type} {Step : S → S → Type} : {s u : S} → Run Step s u → Nat
   | _, _, .stay => 0
@@ -91,12 +98,12 @@ theorem Run.bounded {S : Type} {Step : S → S → Type} (fuel : S → Nat)
     have := h st
     simp only [Run.length]; omega
 
-/-- A role of the loop. -/
+/-- A role of the loop: who makes a commit. -/
 inductive Role
-  | architect | planner | player | foreman | worker
+  | architect | planner | foreman | worker
   deriving Repr, DecidableEq, BEq, Inhabited
 
-/-- One or more steps of `Step` from `s` to `u`: a peer that moves. -/
+/-- One or more steps of `Step` from `s` to `u`: a role that moves. -/
 inductive Steps {S : Type} (Step : S → S → Type) : S → S → Type
   | mk {s t u} : Step s t → Run Step t u → Steps Step s u
 
@@ -107,7 +114,7 @@ def Steps.two {S : Type} {Step : S → S → Type} {s t u : S} (a : Step s t) (b
     Steps Step s u :=
   .mk a (.one b)
 
-/-- A peer's part in one exchange, between two moments: it starts in a start
+/-- A role's part in one commit, between two moments: it starts in a start
 state, or it moves. Absent before and after, it takes no part: `Empty`. -/
 def Side {S : Type} (Step : S → S → Type) (start : S → Bool) : Option S → Option S → Type
   | none, none => Empty
@@ -115,23 +122,14 @@ def Side {S : Type} (Step : S → S → Type) (start : S → Bool) : Option S �
   | some s, some t => Steps Step s t
   | some _, none => Empty
 
-/-- A peer at one step of the spine: it takes part (`Side`), or it waits as
-it is. -/
+/-- A role that may be absent, at one commit: it takes part (`Side`), or it
+waits as it is. -/
 abbrev Peer {S : Type} (Step : S → S → Type) (start : S → Bool) (w w' : Option S) : Type :=
   Side Step start w w' ⊕ PLift (w' = w)
 
-/-- A peer that always exists, at one step of the spine: it moves, or it
-waits as it is. -/
+/-- A role that always exists, at one commit: it moves, or it waits as it
+is. -/
 abbrev Present {S : Type} (Step : S → S → Type) (w w' : S) : Type :=
   Steps Step w w' ⊕ PLift (w' = w)
-
-/-- An edge along a run of the spine `Step`: one `Sync` per spine step,
-taking the peer from state to state. The spine's run is the index, so a
-step shared by several edges is one event in each. -/
-inductive EdgeRun {S P : Type} {Step : S → S → Type}
-    (Sync : (s t : S) → Step s t → P → P → Type) : {s u : S} → Run Step s u → P → P → Type
-  | stay {s w} : EdgeRun Sync (.stay (s := s)) w w
-  | next {s t u w w' w''} {st : Step s t} {r : Run Step t u} :
-      Sync s t st w w' → EdgeRun Sync r w' w'' → EdgeRun Sync (.next st r) w w''
 
 end Kernel

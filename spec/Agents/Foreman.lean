@@ -3,7 +3,7 @@ import Agents.Kernel
 /-!
 The foreman's work. One foreman per task. It starts with something to do,
 an assignment to post: the prompt and the failing tests. Then it answers
-the player's asks one at a time: reviews of the worker's submissions and
+the hub's asks one at a time: reviews of the worker's submissions and
 contests of its tests. It ends when the task is accepted or dropped.
 
 It writes within its scope alone (`inBounds`).
@@ -12,12 +12,12 @@ namespace Foreman
 open Kernel Dashboard
 
 /-- What the foreman is handed: the plan of its task, and the round the
-player is in when it hands it. -/
+hub is in when it hands it. -/
 structure Assignment where
   plan : Plan
   round : Nat := 0
 
-/-- What the player asks of the foreman after the post. -/
+/-- What the hub asks of the foreman after the post. -/
 inductive Ask
   /-- Review submission `sub`, made in round `round`. -/
   | review (round : Nat) (sub : Revision)
@@ -54,7 +54,7 @@ def after (a : Assignment) (prompt : Revision) : (k : Ask) → Response k → St
   | _, .unsure why => .unsure a why
   | _, _ => .posted a prompt
 
-/-- The states that wait on the player alone. -/
+/-- The states that wait on the hub alone. -/
 def State.waits : State → Bool
   | .posted .. | .unsure .. => true
   | _ => false
