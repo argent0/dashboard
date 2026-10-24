@@ -132,7 +132,8 @@ def Fixture.toJson (f : Fixture) : Json :=
 def Check.toJson (c : Check) (file : String) : Json :=
   Json.mkObj [("name", c.name), ("cmd", c.cmd), ("runs", c.runs), ("min_pass", c.min_pass),
     ("retry_failed", c.retry_failed), ("retry_on", strs c.retry_on),
-    ("covers", strs (c.covers.map Component.name)), ("all", c.all), ("files", strs c.files),
+    ("covers", strs (match c.covers with | .all => [] | .only cs => cs.map Component.name)),
+    ("all", c.covers == .all), ("files", strs c.files),
     ("module", file)]
 
 def Suite.toJson (s : Suite) : Json :=
@@ -256,7 +257,7 @@ def impactedTo (path : String) (components : List Component) : CoreM Unit := do
   for n in ← declsOf ``Module do
     let m ← evalDeclSafe Module n
     if let some cmd := m.test_cmd then
-      checks := checks.push { name := m.name, cmd, covers := [m] }
+      checks := checks.push { name := m.name, cmd, covers := .only [m] }
   for n in ← declsOf ``Check do
     checks := checks.push (← evalDeclSafe Check n)
   let names := (impacted checks.toList components).map (·.name)

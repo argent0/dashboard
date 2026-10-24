@@ -21,7 +21,7 @@ def roadmap : Roadmap :=
       { agent_cmd := "claude", task_agent_cmd := "claude", idle_after := 900,
         lock_files := ["Cargo.lock"], lock_regen := [("Cargo.lock", "cargo generate-lockfile")],
         runs := .parallel },
-    sandbox := { enabled := true, network := false, writable := ["~/.cargo"] },
+    sandbox := .jail .offline ["~/.cargo"],
     budget := { check_timeout := 60, suite_warn := 300, suite_fail := 600 } }
 
 end Spec.Examples.Roadmap

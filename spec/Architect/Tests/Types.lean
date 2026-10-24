@@ -11,10 +11,15 @@ import Architect.Types
 namespace Dashboard
 
 
-/-- A suite check. `covers` names the modules and roots it tests: it runs
+/-- What a check tests. `only cs` names modules and roots: the check runs
 in a view of their files and joins the run set of a task on any of them.
-`all` (written `covers = all`) runs it in the whole worktree for every
-task. `files` are its own test files, beyond `test_paths`. -/
+`all` (written `covers = all`) runs it in the whole worktree for every task. -/
+inductive Covers
+  | all
+  | only (cs : List Component)
+  deriving Repr, DecidableEq, Inhabited
+
+/-- A suite check. `files` are its own test files, beyond `test_paths`. -/
 structure Check where
   name : String
   cmd : String
@@ -22,8 +27,7 @@ structure Check where
   min_pass : Nat := 1
   retry_failed : Nat := 0
   retry_on : List String := []
-  covers : List Component := []
-  all : Bool := false
+  covers : Covers := .only []
   files : List String := []
   deriving Repr, DecidableEq, Inhabited
 
@@ -36,6 +40,8 @@ structure Suite where
 /-- The run set of a task on `components` (spec §6.6): every check covering one
 of them, plus every `covers = all` check. The reference definition. -/
 def impacted (checks : List Check) (components : List Component) : List Check :=
-  checks.filter fun c => c.all || c.covers.any fun n => components.any (·.name == n.name)
+  checks.filter fun c => match c.covers with
+    | .all => true
+    | .only cs => cs.any fun n => components.any (·.name == n.name)
 
 end Dashboard

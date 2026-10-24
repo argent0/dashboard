@@ -46,7 +46,7 @@ module core where
   lang = rust
 
 def stable : Check :=
-  { name := "stable", cmd := "cargo test x", covers := [core], runs := 20, min_pass := 20 }
+  { name := "stable", cmd := "cargo test x", covers := .only [core], runs := 20, min_pass := 20 }
 
 def header (s : Slug) : Header :=
   { slug := s, title := "Title", phase := "p1", milestone := false, dependsOn := ["alpha"],

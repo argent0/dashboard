@@ -70,11 +70,18 @@ structure Budget where
   suite_fail : Nat := 0
   deriving Repr, DecidableEq, Inhabited
 
-/-- `[sandbox]` (spec §20): the jail every check runs in. -/
-structure Sandbox where
-  enabled : Bool := true
-  network : Bool := false
-  writable : List String := []
+/-- Whether a jailed check reaches the network. -/
+inductive Network
+  | offline
+  | online
+  deriving Repr, DecidableEq, Inhabited
+
+/-- `[sandbox]` (spec §20): where every check runs. `jail` runs it in the
+jail, with `writable` the paths it may write beyond its worktree; `off` runs
+it on the host. -/
+inductive Sandbox
+  | off
+  | jail (network : Network := .offline) (writable : List String := [])
   deriving Repr, DecidableEq, Inhabited
 
 /-- `[player] runs` (spec §4). -/
@@ -102,7 +109,7 @@ structure Roadmap where
   docs_paths : List String := []
   limits : Limits := {}
   player : Player := {}
-  sandbox : Sandbox := {}
+  sandbox : Sandbox := .jail
   budget : Budget := {}
   deriving Repr, DecidableEq, Inhabited
 

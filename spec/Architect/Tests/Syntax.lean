@@ -15,7 +15,7 @@ namespace Dashboard
 syntax (name := archCheck) "check " ident " where" manyIndent(group(ident " = " term)) : command
 syntax (name := archSuite) "suite" " where" manyIndent(group(ident " = " term)) : command
 
-/-- `covers = all` sets `all`; `covers = [a, b]` coerces each element to a
+/-- `covers = all` is `Covers.all`; `covers = [a, b]` is `Covers.only` and coerces each element to a
 `Component`, so modules and roots mix. A check named like a module is a
 redeclaration. -/
 macro_rules
@@ -28,14 +28,14 @@ macro_rules
         ks := ks.push key
         vs := vs.push val
       else if val.raw.isIdent && val.raw.getId.eraseMacroScopes == `all then
-        ks := ks.push (Lean.mkIdent `all)
-        vs := vs.push (← `(true))
+        ks := ks.push key
+        vs := vs.push (← `(Dashboard.Covers.all))
       else
         match val with
         | `([$xs,*]) =>
           let elems ← xs.getElems.mapM fun x => `(($x : Dashboard.Component))
           ks := ks.push key
-          vs := vs.push (← `([$elems,*]))
+          vs := vs.push (← `(Dashboard.Covers.only [$elems,*]))
         | _ => Lean.Macro.throwErrorAt val "covers is `all` or a list of modules and roots: covers = [a, b]"
     `(def $n : Dashboard.Check := { name := $s, $[$ks:ident := $vs],* })
 
