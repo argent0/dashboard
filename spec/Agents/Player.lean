@@ -97,14 +97,16 @@ inductive Task
   | serving (p : Plan) (c : Spent)
   /-- Asked the foreman `k`. -/
   | asking (p : Plan) (c : Spent) (k : Foreman.Ask)
-  /-- The planner decides on the foreman's recommendation for `sub`, which
-  drops `trim`. -/
-  | deciding (p : Plan) (c : Spent) (trim : List String) (sub : Revision)
+  /-- The planner decides on the foreman's recommendation for the worker's
+  `sub`, which drops `trim`; `tip` is what accept merges: `sub`, or the trim
+  commit on it. -/
+  | deciding (p : Plan) (c : Spent) (trim : List String) (tip sub : Revision)
   /-- The planner decides on the foreman's doubt. -/
   | doubting (p : Plan) (c : Spent) (why : String) (held : Option Worker.Move)
   /-- The task stopped for `cause`; the planner decides. -/
   | stopping (p : Plan) (cause : Cause)
-  /-- Merging `merge` into `main`; holds the worker's `sub`. -/
+  /-- Merging `merge`, the player's merge commit, into `main`; holds the
+  worker's `sub`. -/
   | merging (p : Plan) (c : Spent) (merge sub : Revision)
   /-- The planner resolves a conflict on `paths`. -/
   | resolving (p : Plan) (c : Spent) (paths : List String) (sub : Revision)
@@ -188,15 +190,17 @@ inductive Step : Task → Task → Type
       (hr : lim.reviewRounds < c.rounds + 1) :
       Step (.asking p c (.review n sub)) (.stopping p .reviewRounds)
   | recommended {p c n sub} (trim : List String) :
-      Step (.asking p c (.review n sub)) (.deciding p c trim sub)
+      Step (.asking p c (.review n sub)) (.deciding p c trim sub sub)
   | replied {p c n t w} (rev : Revision) : Step (.asking p c (.contest n t w)) (.serving p c)
   | doubted {p c k} (why : String) :
       Step (.asking p c k) (.doubting p c why (some (askHeld k)))
   -- the planner's decisions
   /-- The planner's trim commit `rev` (spec §6.5); the run set passes on it. -/
-  | trimmed {p c trim sub} (rev : Revision) (hp : failing rev = []) (ht : trim ≠ []) :
-      Step (.deciding p c trim sub) (.deciding p c [] rev)
-  | accept {p c t sub} : Step (.deciding p c t sub) (.merging p c sub sub)
+  | trimmed {p c trim tip sub} (rev : Revision) (hp : failing rev = []) (ht : trim ≠ []) :
+      Step (.deciding p c trim tip sub) (.deciding p c [] rev sub)
+  /-- The planner accepts: the player merges `tip` onto `main` as `merge`. -/
+  | accept {p c t tip sub} (merge : Revision) :
+      Step (.deciding p c t tip sub) (.merging p c merge sub)
   | continue {p c w h} (p' : Plan) (hl : c.continues + 1 ≤ lim.continues) :
       Step (.doubting p c w h) (.ordered (.continue p') { c with continues := c.continues + 1 } h)
   | resolve {p c paths sub} (merge : Revision) :
@@ -214,6 +218,31 @@ inductive Step : Task → Task → Type
       Step (.merging p c merge sub) (.resolving p { c with conflicts := c.conflicts + 1 } paths sub)
   | conflictOut {p c merge sub} (paths : List String) (hl : lim.conflicts < c.conflicts + 1) :
       Step (.merging p c merge sub) (.stopping p .conflicts)
+
+/-- The states that hold a worker's move: the worker waits on the player. -/
+def Task.holdsMove : Task → Bool
+  | .deciding .. | .resolving .. | .merging .. | .asking .. => true
+  | .doubting _ _ _ h | .ordered _ _ h | .posting _ _ h | .launching _ _ _ _ h => h.isSome
+  | _ => false
+
+/-- The roles a step sends a message to. A peer missing here waits through
+the step, and an edge pairs the step with that peer only by `holds`. -/
+def Step.peers : Step lim failing s t → List Role
+  | .assign | .posted .. | .postRefused .. => [.foreman]
+  | .postOut (h := h) .. => [.foreman, .planner] ++ (if h.isSome then [.worker] else [])
+  | .postUnsure .. => [.foreman, .planner]
+  | .launch | .restart => [.worker]
+  | .submitted .. | .contested .. => [.worker, .foreman]
+  | .failed .. => [.worker]
+  | .failedOut .. | .contestOut .. | .blocked .. => [.worker, .planner]
+  | .sentBack .. | .replied .. => [.foreman, .worker]
+  | .sendBackRefused .. => [.foreman]
+  | .sendBackOut .. | .overRounds .. => [.foreman, .worker, .planner]
+  | .recommended .. | .doubted .. => [.foreman, .planner]
+  | .trimmed .. | .accept .. | .continue .. | .resolve .. | .conflicted .. => [.planner]
+  | .drop (s := s) .. => [.planner, .foreman] ++ (if s.holdsMove then [.worker] else [])
+  | .clean .. => [.planner, .foreman, .worker]
+  | .broken .. | .brokenOut .. | .conflictOut .. => [.planner, .worker]
 
 /-- A task starts with nothing spent. -/
 theorem start_spent {s : Task} (h : s.isStart = true) : s.spent = {} := by
@@ -246,7 +275,7 @@ def Task.stage : Task → Nat
   | .serving .. => 7
   | .asking _ _ (.contest ..) => 8
   | .asking _ _ (.review ..) => 6
-  | .deciding _ _ t _ => if t = [] then 4 else 5
+  | .deciding _ _ t .. => if t = [] then 4 else 5
   | .doubting .. => 3
   | .resolving .. => 3
   | .merging .. => 2

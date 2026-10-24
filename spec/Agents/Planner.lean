@@ -86,6 +86,14 @@ inductive Step : State → State → Type
   | conflict {g p} (paths : List String) : Step (.landing g p) (.advised g p (.conflict paths))
   | decide {g p a} (d : Decision a) : Step (.advised g p a) (after g p a d)
   | land {g p} : Step (.landing g p) (.landed p)
+  /-- The player's merge broke the run set: the work goes on. -/
+  | reopened {g p} : Step (.landing g p) (.running g p)
+
+/-- The need a step names to the architect, if any. -/
+def Step.need? : Step s t → Option String
+  | .need what => some what
+  | .designed (w := w) _ | .declined (w := w) _ => some w
+  | _ => none
 
 def State.isStart : State → Bool
   | .toPlan _ => true
