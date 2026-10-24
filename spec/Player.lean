@@ -11,6 +11,7 @@ keywords stay free as names here.
 -/
 import Architect.Types
 import Architect.Tests.Types
+import Architect.Rules
 import Planner.Types
 
 namespace Spec
@@ -310,20 +311,6 @@ abbrev Scope := Path → Bool
 -- ---------------------------------------------------------------------------
 -- The two packages, as data, and their oracles (decisions 5, 7, 8)
 -- ---------------------------------------------------------------------------
-
-/-- A project's architecture: what `architecture/` declares and the exporter
-writes (`config::ArchConfig` plus every `idl::Idl`). -/
-structure Manifest where
-  settings : Settings := {}
-  modules : List Module := []
-  roots : List Root := []
-  apis : List Api := []
-  fixtures : List Fixture := []
-  checks : List Check := []
-  suite : Suite := {}
-  idls : List Idl := []
-  frames : List Frame := []
-  deriving Repr, DecidableEq, Inhabited
 
 /-- The tasks package of a tree: the roadmap and every task it declares. -/
 structure Plan where

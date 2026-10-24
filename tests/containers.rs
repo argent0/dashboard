@@ -287,7 +287,4 @@ fn element_budgets_and_bad_impls() {
     assert!(all.contains("api db-nutrition: element variants 2 exceeds budget 1"), "{all}");
     assert!(all.contains("element fields 4 exceeds budget 2"), "{all}");
     assert!(rep.headroom.iter().any(|h| h.contains("element variants 2/1, fields 4/2")), "{:?}", rep.headroom);
-    let mut m = manifest();
-    m["api"][1]["impl"] = json!(["engine/foldable/seq.rs"]);
-    assert!(arch_config_from_json(m).unwrap_err().contains("not under generator module functor's paths"));
 }

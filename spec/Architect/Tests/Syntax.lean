@@ -37,7 +37,7 @@ macro_rules
           ks := ks.push key
           vs := vs.push (← `(Dashboard.Covers.only [$elems,*]))
         | _ => Lean.Macro.throwErrorAt val "covers is `all` or a list of modules and roots: covers = [a, b]"
-    `(def $n : Dashboard.Check := { name := $s, $[$ks:ident := $vs],* })
+    checked (← `(def $n : Dashboard.Check := { name := $s, $[$ks:ident := $vs],* })) (← `(Dashboard.Check.problems $n))
 
 macro_rules
   | `(suite where $[$k:ident = $v:term]*) => do

@@ -189,11 +189,42 @@ def srcOf (env : Environment) (n : Name) : String :=
       "/".intercalate (m.components.map (·.toString (escape := false)))).getD ""
   | none => ""
 
+/-- The values of every declaration of type `ty`, in declaration order. -/
+def valuesOf (α : Type) [Inhabited α] (ty : Name) : CoreM (List α) := do
+  let mut out := #[]
+  for n in ← declsOf ty do
+    out := out.push (← evalDeclSafe α n)
+  return out.toList
+
+/-- The manifest the environment declares: its first `architecture where`
+and `suite where` blocks, and every module, root, API, fixture, check, IDL
+and frame. -/
+def manifest : CoreM Manifest := do
+  return {
+    settings := (← valuesOf Settings ``Settings).headD {}
+    modules := ← valuesOf Module ``Module
+    roots := ← valuesOf Root ``Root
+    apis := ← valuesOf Api ``Api
+    fixtures := ← valuesOf Fixture ``Fixture
+    checks := ← valuesOf Check ``Check
+    «suite» := (← valuesOf Suite ``Suite).headD {}
+    idls := ← valuesOf Idl ``Idl
+    frames := ← valuesOf Frame ``Frame }
+
+/-- `#wellformed`: every structural rule of the manifest the file sees, one
+error per problem. The exporter runs the same `Manifest.problems`. -/
+elab "#wellformed" : command => do
+  let ps ← Elab.Command.liftCoreM do return (← manifest).problems
+  for p in ps do
+    logError p
+
 /-- Every declaration, as the JSON `dashboard` loads. The manifest's blocks
 (`architecture`, `module`, `root`, `api`, `fixture`) come from
 `Architecture.lean`, the director's file, and the `suite where` block from
 `Tests.lean`: a task agent's `Apis/` or `Tests/` file declaring one is an
-error, so a post can never widen its own scope through the manifest. -/
+error, so a post can never widen its own scope through the manifest. The
+manifest's structural problems (`Manifest.problems`, as `#wellformed` runs
+them) join `errors`. -/
 def exportAll : CoreM Json := do
   let env ← getEnv
   let mut errors : Array String := #[]
@@ -205,24 +236,9 @@ def exportAll : CoreM Json := do
       if file != home && !(ty == ``Check && file.startsWith "Tests/") then
         errors := errors.push s!"architecture/{file}.lean: declares {what} ({n}); it belongs in architecture/{home}.lean"
   let settings ← declsOf ``Settings
-  let base ← match settings with
-    | #[n] => evalDeclSafe Settings n
-    | #[] => pure {}
-    | ns => do
-      errors := errors.push s!"more than one `architecture where` block: {ns}"
-      pure {}
-  let mut modules := #[]
-  for n in ← declsOf ``Module do
-    modules := modules.push (Module.toJson (← evalDeclSafe Module n))
-  let mut roots := #[]
-  for n in ← declsOf ``Root do
-    roots := roots.push (Root.toJson (← evalDeclSafe Root n))
-  let mut apis := #[]
-  for n in ← declsOf ``Api do
-    apis := apis.push (Api.toJson (← evalDeclSafe Api n))
-  let mut fixtures := #[]
-  for n in ← declsOf ``Fixture do
-    fixtures := fixtures.push (Fixture.toJson (← evalDeclSafe Fixture n))
+  if settings.size > 1 then
+    errors := errors.push s!"more than one `architecture where` block: {settings}"
+  let m ← manifest
   let mut frames := #[]
   for n in ← declsOf ``Frame do
     let file := srcOf env n
@@ -230,28 +246,26 @@ def exportAll : CoreM Json := do
     if file != s!"Frames/{f.moduleName}" then
       errors := errors.push s!"architecture/{file}.lean: declares the frame of {f.moduleName}; it belongs in architecture/Frames/{f.moduleName}.lean"
     frames := frames.push (Frame.toJson f file)
-  let mut idls : Array (String × Json) := #[]
-  for n in ← declsOf ``Idl do
-    let i ← evalDeclSafe Idl n
-    if idls.any (·.1 == i.apiName) then
-      errors := errors.push s!"api {i.apiName}: more than one `idl` block"
-    idls := idls.push (i.apiName, i.toJson)
+  errors := errors ++ m.problems.toArray
   let mut checks := #[]
   for n in ← declsOf ``Check do
     checks := checks.push (Check.toJson (← evalDeclSafe Check n) (srcOf env n))
-  let suiteV ← match ← declsOf ``Suite with
-    | #[n] => evalDeclSafe Suite n
-    | #[] => pure {}
-    | ns => do
-      errors := errors.push s!"more than one `suite where` block: {ns}"
-      pure {}
+  let suites ← declsOf ``Suite
+  if suites.size > 1 then
+    errors := errors.push s!"more than one `suite where` block: {suites}"
+  let modules := m.modules.toArray.map Module.toJson
+  let roots := m.roots.toArray.map Root.toJson
+  let apis := m.apis.toArray.map Api.toJson
+  let fixtures := m.fixtures.toArray.map Fixture.toJson
+  let idls := m.idls.toArray.map fun i => (i.apiName, i.toJson)
+  let base := m.settings
   let arch := Json.mkObj [("max_modules", base.max_modules), ("max_roots", base.max_roots),
     ("shared", strs base.shared), ("linked", strs base.linked),
     ("view_rewritable", strs base.view_rewritable), ("source_paths", strs base.source_paths),
     ("module", Json.arr modules), ("root", Json.arr roots), ("api", Json.arr apis),
     ("fixture", Json.arr fixtures)]
   return Json.mkObj [("arch", arch), ("idls", Json.mkObj idls.toList),
-    ("suite", suiteV.toJson), ("checks", Json.arr checks), ("frames", Json.arr frames),
+    ("suite", m.«suite».toJson), ("checks", Json.arr checks), ("frames", Json.arr frames),
     ("errors", Json.arr (errors.map Json.str))]
 
 /-- Writes the export to `path`: what the generated runner calls. -/

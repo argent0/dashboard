@@ -28,6 +28,7 @@ pub const TOOLCHAIN: &str = "leanprover/lean4:v4.35.0";
 const ARCHITECT_LEAN: &str = include_str!("../spec/Architect.lean");
 const ARCHITECT_TYPES_LEAN: &str = include_str!("../spec/Architect/Types.lean");
 const ARCHITECT_SYNTAX_LEAN: &str = include_str!("../spec/Architect/Syntax.lean");
+const ARCHITECT_RULES_LEAN: &str = include_str!("../spec/Architect/Rules.lean");
 const ARCHITECT_EXPORT_LEAN: &str = include_str!("../spec/Architect/Export.lean");
 const TESTS_LEAN: &str = include_str!("../spec/Architect/Tests.lean");
 const TESTS_TYPES_LEAN: &str = include_str!("../spec/Architect/Tests/Types.lean");
@@ -108,6 +109,7 @@ pub fn vendored() -> Vec<(&'static str, String)> {
         ("Architect.lean", ARCHITECT_LEAN.to_string()),
         ("Architect/Types.lean", ARCHITECT_TYPES_LEAN.to_string()),
         ("Architect/Syntax.lean", ARCHITECT_SYNTAX_LEAN.to_string()),
+        ("Architect/Rules.lean", ARCHITECT_RULES_LEAN.to_string()),
         ("Architect/Export.lean", ARCHITECT_EXPORT_LEAN.to_string()),
         ("Architect/Tests.lean", TESTS_LEAN.to_string()),
         ("Architect/Tests/Types.lean", TESTS_TYPES_LEAN.to_string()),
@@ -446,18 +448,6 @@ pub fn parse(text: &str) -> Result<Exported, String> {
     if let Some(frames) = json.get("frames") {
         arch.frames = serde_json::from_value(frames.clone()).map_err(|e| format!("frames: {e}"))?;
     }
-    // A frame's skeleton and holes are written under its `src`: inside its
-    // own module, so a frame never opens another module's files.
-    for f in &arch.frames {
-        let file = crate::frame::lean_file(&f.module);
-        let Some(m) = arch.modules.iter().find(|m| m.name == f.module) else {
-            return Err(format!("{file}: frame of {}, which is no module", f.module));
-        };
-        let src = f.src.trim_end_matches('/');
-        if src.is_empty() || src.starts_with('/') || src.split('/').any(|c| c == ".." || c == ".") || !config::path_under_test_paths(src, &m.paths) {
-            return Err(format!("{file}: src {:?} must be a directory inside module {}'s paths", f.src, m.name));
-        }
-    }
     // Every API's every problem, not just the first.
     let mut idls = BTreeMap::new();
     let mut errs = Vec::new();
@@ -474,16 +464,6 @@ pub fn parse(text: &str) -> Result<Exported, String> {
     if !errs.is_empty() {
         return Err(errs.join("\n"));
     }
-    for a in &arch.apis {
-        if !idls.contains_key(&a.name) {
-            return Err(format!("api {}: no `idl {}` block (expected {})", a.name, a.name, api_file(&a.name)));
-        }
-    }
-    for name in idls.keys() {
-        if !arch.apis.iter().any(|a| a.name == *name) {
-            return Err(format!("{}: idl for an api the manifest does not declare", api_file(name)));
-        }
-    }
     let suite = parse_suite(&json, &arch)?;
     Ok(Exported { arch, idls, suite, json })
 }
@@ -494,9 +474,9 @@ fn source_of(module: &str) -> String {
     format!("{DIR}/{module}.lean")
 }
 
-/// The suite of an export: its checks (each validated, with `source` from
-/// its declaring module), then one implicit check per module with a
-/// `test_cmd`. Names are unique; a check covers something.
+/// The suite of an export: its checks (with `source` from its declaring
+/// module), then one implicit check per module with a `test_cmd`. Lean's
+/// rules keep names unique and every check covering something.
 fn parse_suite(json: &serde_json::Value, arch: &ArchConfig) -> Result<config::Suite, String> {
     #[derive(serde::Deserialize, Default)]
     #[serde(default)]
@@ -512,47 +492,14 @@ fn parse_suite(json: &serde_json::Value, arch: &ArchConfig) -> Result<config::Su
     for v in json.get("checks").and_then(|c| c.as_array()).into_iter().flatten() {
         let mut c: config::Check = serde_json::from_value(v.clone()).map_err(|e| format!("check: {e}"))?;
         let source = source_of(v.get("module").and_then(|m| m.as_str()).unwrap_or("Tests"));
-        c.validate().map_err(|e| format!("{source}: {e}"))?;
-        if c.covers.is_default() {
-            return Err(format!("{source}: check {:?}: covers is empty: write covers = all or covers = [module, …]", c.name));
+        // Lean's rules held the rest; a regex is a Rust fact.
+        for pattern in &c.retry_on {
+            regex::Regex::new(pattern).map_err(|e| format!("{source}: check {:?}: retry_on {pattern:?}: {e}", c.name))?;
         }
         c.source = Some(source);
         checks.push(c);
     }
-    let mut out: Vec<config::Check> = Vec::new();
-    for c in checks {
-        if arch.modules.iter().any(|m| m.name == c.name) {
-            return Err(format!("{}: check {:?} is named like a module", c.source.as_deref().unwrap_or(""), c.name));
-        }
-        if out.iter().any(|o| o.name == c.name) {
-            return Err(format!("check name {:?} is declared more than once", c.name));
-        }
-        out.push(c);
-    }
-    // A check's `files` leave its file out of every other check's view, and
-    // a task agent and a worker may add files under their checks' `files`:
-    // over a fixture, either would reach into setup its users share.
-    let overlap = |a: &str, b: &str| {
-        let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
-        config::path_under_test_paths(a, &[b.to_string()]) || config::path_under_test_paths(b, &[a.to_string()])
-    };
-    for f in &arch.fixtures {
-        for p in &f.paths {
-            if let Some(t) = block.test_paths.iter().find(|t| overlap(p, t)) {
-                return Err(format!("{}: test_paths {t:?} overlaps fixture {}'s {p:?}", config::TESTS_LEAN, f.name));
-            }
-            for c in &out {
-                if let Some(x) = c.files.iter().find(|x| overlap(p, x)) {
-                    return Err(format!(
-                        "{}: check {:?}: files {x:?} overlaps fixture {}'s {p:?}: a fixture's files are its own; a check reads them through its covers",
-                        c.source.as_deref().unwrap_or(""),
-                        c.name,
-                        f.name
-                    ));
-                }
-            }
-        }
-    }
+    let mut out = checks;
     for m in &arch.modules {
         if let Some(cmd) = &m.test_cmd {
             out.push(config::Check {
@@ -643,7 +590,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_an_export_and_cross_checks_apis_against_idls() {
+    fn parses_an_export_and_reports_its_errors() {
         let doc = r#"{"arch": {"max_modules": 2, "module": [{"name": "a", "lang": "rust", "paths": ["a"]}, {"name": "b", "lang": "rust", "paths": ["b"]}],
             "api": [{"name": "ab", "generator": "a", "consumer": "b", "paths": ["api"]}]},
             "idls": {"ab": {"api": "ab", "types": [{"name": "Id", "kind": {"repr": "i64"}}], "ctors": [{"name": "X", "args": ["Id"]}]}},
@@ -651,12 +598,8 @@ mod tests {
         let e = parse(doc).unwrap();
         assert_eq!(e.arch.modules.len(), 2);
         assert_eq!(e.idls["ab"].constructors(), 1);
-        let missing = doc.replace(r#""idls": {"ab":"#, r#""idls": {"xy":"#).replace(r#""api": "ab", "types""#, r#""api": "xy", "types""#);
-        assert!(parse(&missing).unwrap_err().contains("no `idl ab` block"), "{}", parse(&missing).unwrap_err());
-        let errs = doc.replace(r#""errors": []"#, r#""errors": ["api ab: more than one `idl` block"]"#);
-        assert!(parse(&errs).unwrap_err().contains("more than one"));
-        let bad = doc.replace(r#""consumer": "b""#, r#""consumer": "zz""#);
-        assert!(parse(&bad).unwrap_err().contains("unknown module or root"));
+        let errs = doc.replace(r#""errors": []"#, r#""errors": ["api ab: one `idl` block per api"]"#);
+        assert!(parse(&errs).unwrap_err().contains("one `idl` block per api"));
     }
 
     #[test]
@@ -678,22 +621,5 @@ mod tests {
         }
         assert_eq!(ident("db"), "db");
         assert_eq!(ident("engine-client"), "«engine-client»");
-    }
-
-    #[test]
-    fn a_check_keeps_its_files_and_test_paths_apart_from_fixtures() {
-        let doc = |files: &str, test_paths: &str| {
-            format!(
-                r#"{{"arch": {{"module": [{{"name": "a", "lang": "rust", "paths": ["a"]}}],
-                "fixture": [{{"name": "heroes", "users": ["a"], "paths": ["fixtures/heroes"]}}]}},
-                "idls": {{}}, "suite": {{"test_paths": {test_paths}}},
-                "checks": [{{"name": "t", "cmd": "true", "covers": ["a"], "files": {files}, "module": "Tests/x"}}], "errors": []}}"#
-            )
-        };
-        assert!(parse(&doc(r#"["a/tests/t.rs"]"#, "[]")).is_ok());
-        let e = parse(&doc(r#"["fixtures/heroes/x.rs"]"#, "[]")).unwrap_err();
-        assert!(e.contains("architecture/Tests/x.lean: check \"t\": files \"fixtures/heroes/x.rs\" overlaps fixture heroes"), "{e}");
-        assert!(parse(&doc(r#"["fixtures"]"#, "[]")).unwrap_err().contains("overlaps fixture heroes"));
-        assert!(parse(&doc("[]", r#"["fixtures/heroes"]"#)).unwrap_err().contains("test_paths"));
     }
 }

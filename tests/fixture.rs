@@ -112,7 +112,7 @@ fn a_check_declaring_files_inside_a_fixture_is_refused() {
     let report = player.tick().expect("post tick");
     assert_eq!(report.rejected.len(), 1, "{report}");
     let msg = &report.rejected[0].message;
-    assert!(msg.contains("files \"fixtures/ab/extra.txt\" overlaps fixture both"), "{msg}");
+    assert!(msg.contains("fixture both: path \"fixtures/ab\" overlaps check") && msg.contains("\"fixtures/ab/extra.txt\""), "{msg}");
 }
 
 #[test]

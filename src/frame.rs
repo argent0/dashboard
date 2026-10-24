@@ -10,7 +10,7 @@
 // generated `match`. `lint_hole` keeps a hole from reaching around its
 // context (`crate::`, statics, I/O). Rust only so far.
 
-use crate::config::{ArchConfig, path_under_test_paths};
+use crate::config::ArchConfig;
 use crate::idl::{self, Idl};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -150,18 +150,8 @@ impl<'a> Plan<'a> {
         let Some(m) = cfg.modules.iter().find(|m| m.name == frame.module) else {
             return Err(vec![format!("{who}: {} is no module", frame.module)]);
         };
-        if m.lang != "rust" {
-            errs.push(format!("{who}: frames are Rust only so far; {} is {}", m.name, m.lang));
-        }
-        let src = frame.src.trim_end_matches('/');
-        if src.is_empty() || src.starts_with('/') || src.split('/').any(|c| c == ".." || c == ".") {
-            errs.push(format!("{who}: src {:?} must be a relative directory (src \"crates/{}/src\")", frame.src, m.name));
-        } else if !path_under_test_paths(src, &m.paths) {
-            errs.push(format!("{who}: src {src:?} lies outside module {}'s paths", m.name));
-        }
-        if !frame.bindings.split("::").all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
-            errs.push(format!("{who}: bindings {:?} must be a Rust path (crate::apis)", frame.bindings));
-        }
+        // Lean's rules (`Frame.placement`) held the module's language, `src`
+        // and `bindings`.
         // Types: frame-local first, then every API the module sees.
         let mut types: BTreeMap<String, Ty> = BTreeMap::new();
         let mut local: Vec<&str> = frame.records.iter().map(|r| r.name.as_str()).collect();

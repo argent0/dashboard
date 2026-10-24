@@ -44,6 +44,7 @@ elab "#writable " ns:ident* : command => do
 
 module core where
   lang = rust
+  paths = ["core"]
 
 def stable : Check :=
   { name := "stable", cmd := "cargo test x", covers := .only [core], runs := 20, min_pass := 20 }

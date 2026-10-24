@@ -2,13 +2,14 @@
 The architecture's syntax (architect-v3.md): the commands a director writes
 in `architecture/` (`architecture`, `module`, `root`, `api`, `fixture`,
 `idl`, `frame` … `where`), each elaborating to the data of
-`Architect.Types`. The suite's commands live in `Architect.Tests.Syntax`. Every word atom of a `syntax` line here is a token in
+`Architect.Types`, and checks it with its rules (`Architect.Rules`): a block
+breaking one is an error at the block. The suite's commands live in `Architect.Tests.Syntax`. Every word atom of a `syntax` line here is a token in
 every file that imports it, so a name spelled like one needs `«…»`.
 
 Vendored as `architecture/Architect/Syntax.lean`. Plain Lean (no
 `import Lean`), so an API file elaborates fast.
 -/
-import Architect.Types
+import Architect.Rules
 
 namespace Dashboard
 
@@ -25,25 +26,32 @@ syntax (name := archApi) "api " ident " : " ident " → " ident " where" manyInd
 def identText (n : Lean.Syntax) : String :=
   n.getId.toString (escape := false)
 
+/-- `decl`, then a check that `problems` of it is empty: the error lands on
+the block. -/
+def checked (decl : Lean.TSyntax `command) (problems : Lean.TSyntax `term) : Lean.MacroM (Lean.TSyntax `command) := do
+  let check ← `(#eval Dashboard.ensure $problems)
+  pure ⟨Lean.mkNullNode #[decl, check]⟩
+
 macro_rules
   | `(architecture where $[$k:ident = $v:term]*) => do
     let id := Lean.mkIdent `settings
-    `(def $id : Dashboard.Settings := { $[$k:ident := $v:term],* })
+    checked (← `(def $id : Dashboard.Settings := { $[$k:ident := $v:term],* })) (← `(Dashboard.Settings.problems $id))
 
 macro_rules
   | `(module $n:ident where $[$k:ident = $v:term]*) => do
     let s := Lean.Syntax.mkStrLit (identText n)
-    `(def $n : Dashboard.Module := { name := $s, $[$k:ident := $v:term],* })
+    checked (← `(def $n : Dashboard.Module := { name := $s, $[$k:ident := $v:term],* })) (← `(Dashboard.Module.problems $n))
 
 macro_rules
   | `(root $n:ident where $[$k:ident = $v:term]*) => do
     let s := Lean.Syntax.mkStrLit (identText n)
-    `(def $n : Dashboard.Root := { name := $s, $[$k:ident := $v:term],* })
+    checked (← `(def $n : Dashboard.Root := { name := $s, $[$k:ident := $v:term],* })) (← `(Dashboard.Root.problems $n))
 
 macro_rules
   | `(api $n:ident : $g:ident → $c:ident where $[$k:ident = $v:term]*) => do
     let s := Lean.Syntax.mkStrLit (identText n)
-    `(def $n : Dashboard.Api := { name := $s, generator := $g, consumer := $c, $[$k:ident := $v:term],* })
+    checked (← `(def $n : Dashboard.Api := { name := $s, generator := $g, consumer := $c, $[$k:ident := $v:term],* }))
+      (← `(Dashboard.Api.problems $n))
 
 syntax (name := archFixture) "fixture " ident " where" manyIndent(group(ident " = " term)) : command
 
@@ -66,7 +74,7 @@ macro_rules
   | `(fixture $n:ident where $[$k:ident = $v:term]*) => do
     let s := Lean.Syntax.mkStrLit (identText n)
     let vs ← (k.zip v).mapM fun (key, val) => fixtureField key val
-    `(def $n : Dashboard.Fixture := { name := $s, $[$k:ident := $vs],* })
+    checked (← `(def $n : Dashboard.Fixture := { name := $s, $[$k:ident := $vs],* })) (← `(Dashboard.Fixture.problems $n))
 
 -- ---------------------------------------------------------------------------
 -- The IDL DSL
@@ -503,12 +511,13 @@ macro_rules
     for it in items do
       acc ← addFrameItem acc it
     let id := Lean.mkIdent (n.getId ++ `frame)
-    `(def $id : Dashboard.Frame := {
+    checked (← `(def $id : Dashboard.Frame := {
         moduleName := ($n : Dashboard.Module).name,
         srcDir := $(acc.srcDir),
         mount := $(acc.mount),
         fns := $(← listTerm acc.fns),
         records := $(← listTerm acc.records),
-        sums := $(← listTerm acc.sums) })
+        sums := $(← listTerm acc.sums) }))
+      (← `(Dashboard.Frame.placement $id $n))
 
 end Dashboard

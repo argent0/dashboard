@@ -671,15 +671,6 @@ pub fn sync_bindings(root: &Path, loaded: &Loaded, write: bool) -> (Vec<String>,
 pub fn check(root: &Path, loaded: &Loaded, sandbox: &Sandbox, scratch: &Path) -> Report {
     let cfg = &loaded.cfg;
     let mut rep = Report::default();
-    let n = cfg.modules.len() as u64;
-    if cfg.max_modules > 0 && n > cfg.max_modules {
-        rep.problems
-            .push(format!("modules: {n} exceeds the total modules budget {}", cfg.max_modules));
-    }
-    let r = cfg.roots.len() as u64;
-    if cfg.max_roots > 0 && r > cfg.max_roots {
-        rep.problems.push(format!("roots: {r} exceeds the total roots budget {}", cfg.max_roots));
-    }
     let mut owner: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut files_of: BTreeMap<&str, Vec<PathBuf>> = BTreeMap::new();
     let nodes: Vec<(&str, &str, &[String])> = cfg
@@ -1072,14 +1063,12 @@ mod tests {
     }
 
     #[test]
-    fn budgets_and_overlap_fail() {
+    fn byte_budgets_fail() {
         let d = fixture();
         let mut m = manifest();
-        m["max_modules"] = json!(1);
         m["module"][0]["max_bytes"] = json!(5);
         let rep = run(d.path(), &m);
         let all = rep.problems.join("\n");
-        assert!(all.contains("total modules budget 1"), "{all}");
         assert!(all.contains("bytes 23 exceeds budget 5"), "{all}");
     }
 
@@ -1090,7 +1079,6 @@ mod tests {
         write(d.path(), "stray/x.rs", "fn x() {}");
         let mut m = manifest();
         m["source_paths"] = json!(["a", "b", "bin", "stray", "api"]);
-        m["max_roots"] = json!(1);
         m["root"] = json!([{"name": "cli", "lang": "rust", "paths": ["bin"], "max_bytes": 5}]);
         let rep = run(d.path(), &m);
         let all = rep.problems.join("\n");
@@ -1103,9 +1091,6 @@ mod tests {
         m2["api"][0]["consumer"] = json!("cli");
         let rep = run(d.path(), &m2);
         assert!(!rep.problems.iter().any(|p| p.contains("unknown")), "{:?}", rep.problems);
-        let mut cyc = manifest();
-        cyc["api"].as_array_mut().unwrap().push(json!({"name": "ba", "generator": "b", "consumer": "a", "paths": ["api"]}));
-        assert!(arch_config_from_json(cyc).unwrap_err().contains("cycle: a -> b -> a"));
     }
 
     #[test]
@@ -1191,31 +1176,6 @@ mod tests {
         assert!(rep.headroom[0].contains("bytes 23/1000"), "{:?}", rep.headroom);
     }
 
-    #[test]
-    fn rejects_bad_manifests() {
-        let with_linked = |linked: &str| {
-            let mut m = manifest();
-            m.as_object_mut().unwrap().remove("shared");
-            m["linked"] = json!([linked]);
-            arch_config_from_json(m).unwrap_err()
-        };
-        for (linked, err) in [("a", "overlaps"), ("a/sub", "overlaps"), (".", "relative"), ("../x", "relative"), ("/abs", "relative")] {
-            assert!(with_linked(linked).contains(err), "{linked}");
-        }
-        assert!(with_linked("").contains("relative"));
-        let rewritable = |p: &str| {
-            let mut m = manifest();
-            m["view_rewritable"] = json!([p]);
-            arch_config_from_json(m)
-        };
-        assert!(rewritable("shared.txt").is_ok());
-        assert!(rewritable("a/lib.rs").unwrap_err().contains("under a shared path"));
-        assert!(rewritable("../x").unwrap_err().contains("relative"));
-        let mut dup = manifest();
-        dup["api"].as_array_mut().unwrap().push(json!({"name": "x", "generator": "a", "consumer": "b", "paths": ["api"]}));
-        assert!(arch_config_from_json(dup).unwrap_err().contains("one API per connected pair"));
-    }
-
     fn with_fixture(users: Value, paths: Value) -> Value {
         let mut m = manifest();
         m["fixture"] = json!([{"name": "heroes", "users": users, "paths": paths, "max_bytes": 10}]);
@@ -1263,24 +1223,5 @@ mod tests {
         write(d.path(), "fixtures/heroes/mod.rs", "fn g(x: Ab) { match x { Ab::X(_) => 1, _ => 2 }; }");
         let all = run(d.path(), &m).problems.join("\n");
         assert!(all.contains("fixtures/heroes/mod.rs:1: wildcard arm in a match over Ab"), "{all}");
-    }
-
-    #[test]
-    fn rejects_bad_fixtures() {
-        let err = |users: Value, paths: Value| arch_config_from_json(with_fixture(users, paths)).unwrap_err();
-        assert!(err(json!([]), json!(["f"])).contains("users is empty"));
-        assert!(err(json!(["zz"]), json!(["f"])).contains("unknown module or root"));
-        assert!(err(json!(["a"]), json!([])).contains("no paths"));
-        for (p, why) in [("a/tests", "module a"), ("api/x", "api ab"), ("shared.txt", "shared"), ("architecture/x", "Lean package"), ("tasks", "tasks/"), ("../x", "relative")] {
-            assert!(err(json!(["a"]), json!([p])).contains(why), "{p}: {}", err(json!(["a"]), json!([p])));
-        }
-        let mut two = with_fixture(json!(["a"]), json!(["fixtures"]));
-        two["fixture"].as_array_mut().unwrap().push(json!({"name": "inner", "users": ["b"], "paths": ["fixtures/inner"]}));
-        assert!(arch_config_from_json(two).unwrap_err().contains("overlaps fixture inner"));
-        let mut s = with_fixture(json!(["a"]), json!(["f"]));
-        s["fixture"][0]["stand_in"] = json!("ab");
-        assert!(arch_config_from_json(s.clone()).unwrap_err().contains("users are exactly a and b"));
-        s["fixture"][0]["users"] = json!(["b", "a"]);
-        assert!(arch_config_from_json(s).is_ok());
     }
 }
