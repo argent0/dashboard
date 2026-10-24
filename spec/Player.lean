@@ -25,7 +25,7 @@ open Dashboard
 by fetch source). The player writes merges, syncs and every ref. -/
 inductive Source
   | director
-  | taskAgent
+  | foreman
   | worker
   | player
   deriving Repr, DecidableEq, Inhabited
@@ -150,9 +150,9 @@ inductive DashKind
   | released
   /-- The `main` commit a task branch last saw (§11). -/
   | base
-  /-- The task agent's last commit, and the step it was asked (§17). -/
-  | agent
-  | agentAsked
+  /-- The foreman's last commit, and the step it was asked (§17). -/
+  | foremanTip
+  | foremanAsked
   deriving Repr, DecidableEq, Inhabited
 
 /-- A notes ref, one per record kind: `refs/notes/dashboard[-<kind>]`. -/
@@ -174,7 +174,7 @@ inductive NoteKind
   | conflicts
   | budgetRaises
   | arch
-  | agentReports
+  | foremanReports
   deriving Repr, DecidableEq, Inhabited
 
 /-- A fetched clone's branch before import: `refs/incoming/…` (§4). -/
@@ -185,15 +185,15 @@ inductive Incoming
   | directorTask (s : Slug)
   /-- `refs/incoming/worker/<slug>`. -/
   | worker (s : Slug)
-  /-- `refs/incoming/agent/<slug>`: the task agent's. -/
-  | agent (s : Slug)
+  /-- `refs/incoming/foreman/<slug>`: the foreman's. -/
+  | foreman (s : Slug)
   deriving Repr, DecidableEq, Inhabited
 
 /-- Who made the commits fetched into an incoming ref. -/
 def Incoming.source : Incoming → Source
   | .directorMain | .directorTask _ => .director
   | .worker _ => .worker
-  | .agent _ => .taskAgent
+  | .foreman _ => .foreman
 
 /-- Every ref the player writes or reads in the hub. -/
 inductive Ref
@@ -468,8 +468,8 @@ def LedgerKind.encode : LedgerKind → String
 
 def DashKind.encode : DashKind → String
   | .pins => "pins" | .held => "held" | .escalated => "escalated"
-  | .released => "released" | .base => "base" | .agent => "agent"
-  | .agentAsked => "agent-asked"
+  | .released => "released" | .base => "base" | .foremanTip => "foreman-tip"
+  | .foremanAsked => "foreman-asked"
 
 def NoteKind.encode : NoteKind → String
   | .checks => "dashboard" | .views => "dashboard-views"
@@ -480,15 +480,15 @@ def NoteKind.encode : NoteKind → String
   | .escalations => "dashboard-escalations"
   | .escalationsCleared => "dashboard-escalations-cleared"
   | .conflicts => "dashboard-conflicts" | .budgetRaises => "dashboard-budget-raises"
-  | .arch => "dashboard-arch" | .agentReports => "dashboard-agent-reports"
+  | .arch => "dashboard-arch" | .foremanReports => "dashboard-foreman-reports"
 
 def LedgerKind.all : List LedgerKind := [.rejected, .impure, .flakes]
 def DashKind.all : List DashKind :=
-  [.pins, .held, .escalated, .released, .base, .agent, .agentAsked]
+  [.pins, .held, .escalated, .released, .base, .foremanTip, .foremanAsked]
 def NoteKind.all : List NoteKind :=
   [.checks, .views, .speedups, .runsets, .relaunches, .rejections, .impurities,
    .imports, .flakes, .explorations, .escalations, .escalationsCleared, .conflicts,
-   .budgetRaises, .arch, .agentReports]
+   .budgetRaises, .arch, .foremanReports]
 
 namespace Ref
 
@@ -501,7 +501,7 @@ def encodeSegs : Ref → List String
   | .incoming .directorMain => ["refs", "incoming", "director", "main"]
   | .incoming (.directorTask s) => ["refs", "incoming", "director", "task", s.name]
   | .incoming (.worker s) => ["refs", "incoming", "worker", s.name]
-  | .incoming (.agent s) => ["refs", "incoming", "agent", s.name]
+  | .incoming (.foreman s) => ["refs", "incoming", "foreman", s.name]
   | .dashboard k s => ["refs", "dashboard", k.encode, s.name]
   | .escalationCleared s n => ["refs", "dashboard", "escalation-cleared", s.name, toString n]
   | .test id => ["refs", "dashboard", "test", id]
@@ -528,7 +528,7 @@ def decodeSegs : List String → Except NameError Ref
     | some s => .ok (.incoming (.directorTask s))
     | none => .error (.malformed s)
   | ["refs", "incoming", "worker", s] => (.incoming ∘ .worker) <$> slugE s
-  | ["refs", "incoming", "agent", s] => (.incoming ∘ .agent) <$> slugE s
+  | ["refs", "incoming", "foreman", s] => (.incoming ∘ .foreman) <$> slugE s
   | ["refs", "dashboard", "escalation-cleared", s, n] => match canonNat? n with
     | some n => (.escalationCleared · n) <$> slugE s
     | none => .error .foreign

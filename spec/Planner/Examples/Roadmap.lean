@@ -19,7 +19,7 @@ def roadmap : Roadmap :=
             post := 2, review := 2, accept := 2, retire := 2, claims := 2, evidence := 1,
             budget := 2 } },
     player :=
-      { agent_cmd := "claude", task_agent_cmd := "claude", idle_after := 900,
+      { agent_cmd := "claude", foreman_cmd := "claude", idle_after := 900,
         lock_files := ["Cargo.lock"], lock_regen := [("Cargo.lock", "cargo generate-lockfile")],
         runs := .parallel },
     sandbox := .jail .offline ["~/.cargo"],

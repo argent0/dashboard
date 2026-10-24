@@ -99,11 +99,11 @@ inductive Runs
   | queued
   deriving Repr, DecidableEq, Inhabited
 
-/-- `[player]`: the commands that launch sessions and the lock files a task
-agent may commit. -/
+/-- `[player]`: the commands that launch sessions and the lock files the
+foreman may commit. -/
 structure Player where
   agent_cmd : String := "claude --dangerously-skip-permissions"
-  task_agent_cmd : String := "claude --dangerously-skip-permissions"
+  foreman_cmd : String := "claude --dangerously-skip-permissions"
   idle_after : Nat := 900
   lock_files : List String := []
   lock_regen : List (String × String) := []
@@ -125,7 +125,7 @@ structure Roadmap where
 /-- What every task declares, whatever its kind. `components` names the modules
 and roots the task changes: its worker's scope and its run set (spec §6.6).
 `dependsOn` names slugs: a dependency's declaration lives on its own branch
-until it is accepted. `brief` is pasted into the task agent's prompt (§17). -/
+until it is accepted. `brief` is pasted into the foreman's prompt (§17). -/
 structure Header where
   slug : Slug
   title : String

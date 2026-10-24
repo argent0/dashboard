@@ -50,15 +50,15 @@ def realRefs : List (String × Ref) :=
    ("refs/incoming/director/main", .incoming .directorMain),
    ("refs/incoming/director/task/alpha", .incoming (.directorTask "alpha")),
    ("refs/incoming/worker/alpha", .incoming (.worker "alpha")),
-   ("refs/incoming/agent/alpha", .incoming (.agent "alpha")),
+   ("refs/incoming/foreman/alpha", .incoming (.foreman "alpha")),
    ("refs/dashboard/pins/alpha", .dashboard .pins "alpha"),
-   ("refs/dashboard/agent-asked/alpha", .dashboard .agentAsked "alpha"),
+   ("refs/dashboard/foreman-asked/alpha", .dashboard .foremanAsked "alpha"),
    ("refs/dashboard/escalation-cleared/alpha/1", .escalationCleared "alpha" 1),
    ("refs/dashboard/test/0000001730000000-alpha", .test "0000001730000000-alpha"),
    ("refs/dashboard/queue/7", .queue "7"),
    ("refs/notes/dashboard", .note .checks),
    ("refs/notes/dashboard-escalations-cleared", .note .escalationsCleared),
-   ("refs/notes/dashboard-agent-reports", .note .agentReports)]
+   ("refs/notes/dashboard-foreman-reports", .note .foremanReports)]
 
 def decodes (s : String) (r : Ref) : Bool :=
   match Ref.decode s with

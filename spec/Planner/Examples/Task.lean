@@ -51,7 +51,7 @@ def stable : Check :=
 
 def header (s : Slug) : Header :=
   { slug := s, title := "Title", phase := "p1", dependsOn := ["alpha"],
-    components := [core], brief := "Context for the task agent." }
+    components := [core], brief := "Context for the foreman." }
 
 def task : Task := .task (header "beta")
 def spike : Task := .spike { header "probe" with dependsOn := [] }

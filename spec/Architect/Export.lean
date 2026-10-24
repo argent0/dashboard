@@ -221,7 +221,7 @@ elab "#wellformed" : command => do
 /-- Every declaration, as the JSON `dashboard` loads. The manifest's blocks
 (`architecture`, `module`, `root`, `api`, `fixture`) come from
 `Architecture.lean`, the director's file, and the `suite where` block from
-`Tests.lean`: a task agent's `Apis/` or `Tests/` file declaring one is an
+`Tests.lean`: a foreman's `Apis/` or `Tests/` file declaring one is an
 error, so a post can never widen its own scope through the manifest. The
 manifest's structural problems (`Manifest.problems`, as `#wellformed` runs
 them) join `errors`. -/
