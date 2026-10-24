@@ -145,9 +145,9 @@ inductive Task
   /-- An answer to a pinned question, backed by claims; never merges (§14). -/
   | spike (h : Header)
   /-- Replaces a flaky test with a stable one (§15): `fix_paths` are unpinned,
-  `stable` is the check proving the replacement stable, `evidence` proves
+  `check` is the check proving the replacement stable, `evidence` proves
   the flake. -/
-  | flakyFix (h : Header) (stable : Check) (fix_paths : List String)
+  | flakyFix (h : Header) (check : Check) (fix_paths : List String)
       (replace : List Replace) (evidence : List Evidence)
   /-- Makes the `slow` suite checks faster (§15.1). -/
   | speedup (h : Header) (slow : List String)

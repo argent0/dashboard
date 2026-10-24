@@ -55,7 +55,7 @@ def header (s : Slug) : Header :=
 def task : Task := .task (header "beta")
 def spike : Task := .spike { header "probe" with dependsOn := [] }
 def flakyFix : Task :=
-  .flakyFix (h := header "fix-x") (stable := stable) (fix_paths := ["tests/x.rs"])
+  .flakyFix (h := header "fix-x") (check := stable) (fix_paths := ["tests/x.rs"])
     (replace := [{ old := "x", new := "x2" }])
     (evidence := [{ name := "x", cmd := "cargo test x", runs := 20, min_pass := 1, max_pass := 15 }])
 def speedup : Task := .speedup (h := header "faster") (slow := ["stable"])
